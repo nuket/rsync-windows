@@ -97,6 +97,12 @@ int win32_open(const char *path, int flags, ...)
 /* ------------------------------------------------------------------ stat */
 
 /* Windows reports a symlink only via a reparse point plus its tag. */
+static int attrs_are_symlink(DWORD attrs, DWORD tag)
+{
+	return (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+	    && (tag == IO_REPARSE_TAG_SYMLINK || tag == IO_REPARSE_TAG_MOUNT_POINT);
+}
+
 static int path_is_symlink(const char *path)
 {
 	WIN32_FIND_DATAA fd;
@@ -112,33 +118,10 @@ static int path_is_symlink(const char *path)
 		return 0;
 	FindClose(h);
 
-	return fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK
-	    || fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT;
+	return attrs_are_symlink(attrs, fd.dwReserved0);
 }
 
-/* Give rsync a usable st_ino/st_nlink so that --hard-links and the
- * "file is its own basis" checks behave. */
-static void fill_file_ids(const char *path, struct _stat64 *st)
-{
-	BY_HANDLE_FILE_INFORMATION bhfi;
-	HANDLE h = CreateFileA(path, 0,
-			       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-			       NULL, OPEN_EXISTING,
-			       FILE_FLAG_BACKUP_SEMANTICS, NULL);
-
-	if (h == INVALID_HANDLE_VALUE)
-		return;
-
-	if (GetFileInformationByHandle(h, &bhfi)) {
-		st->st_dev = (unsigned int)bhfi.dwVolumeSerialNumber;
-		st->st_ino = ((unsigned __int64)bhfi.nFileIndexHigh << 32)
-			   | bhfi.nFileIndexLow;
-		st->st_nlink = (short)bhfi.nNumberOfLinks;
-	}
-	CloseHandle(h);
-}
-
-/* Trailing slashes upset _stat64 on plain files; drop all but a root's. */
+/* Trailing slashes upset the file APIs on plain files; drop all but a root's. */
 static const char *trim_path(const char *path, char *buf, size_t bufsz)
 {
 	size_t len = strlen(path);
@@ -156,40 +139,113 @@ static const char *trim_path(const char *path, char *buf, size_t bufsz)
 	return buf;
 }
 
-int win32_stat64(const char *path, struct _stat64 *st)
+/* 100ns ticks since 1601 -> seconds since 1970. */
+static __time64_t filetime_to_time(const FILETIME *ft)
+{
+	unsigned __int64 ticks =
+		((unsigned __int64)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
+
+	if (ticks < 116444736000000000ULL)
+		return 0;
+	return (__time64_t)((ticks - 116444736000000000ULL) / 10000000ULL);
+}
+
+/*
+ * Fill in a stat buffer from an open handle.  GetFileInformationByHandle is
+ * what gives us a usable st_ino: the 64-bit NTFS file index, which is what
+ * --hard-links compares.  It also reports the real link count.
+ */
+static int stat_by_handle(HANDLE h, struct win32_stat *st, int is_link)
+{
+	BY_HANDLE_FILE_INFORMATION bhfi;
+
+	if (!GetFileInformationByHandle(h, &bhfi)) {
+		errno = EACCES;
+		return -1;
+	}
+
+	memset(st, 0, sizeof *st);
+
+	st->st_dev = (dev_t)bhfi.dwVolumeSerialNumber;
+	st->st_rdev = st->st_dev;
+	st->st_ino = ((unsigned __int64)bhfi.nFileIndexHigh << 32)
+		   | bhfi.nFileIndexLow;
+	st->st_nlink = (nlink_t)(bhfi.nNumberOfLinks ? bhfi.nNumberOfLinks : 1);
+	st->st_size = ((__int64)bhfi.nFileSizeHigh << 32) | bhfi.nFileSizeLow;
+	st->st_uid = WIN32_FAKE_UID;
+	st->st_gid = WIN32_FAKE_GID;
+
+	st->st_atime = filetime_to_time(&bhfi.ftLastAccessTime);
+	st->st_mtime = filetime_to_time(&bhfi.ftLastWriteTime);
+	st->st_ctime = filetime_to_time(&bhfi.ftCreationTime);
+
+	/* Windows has one permission bit we can represent, so synthesise a
+	 * plausible mode from it and let --chmod do the rest. */
+	if (is_link)
+		st->st_mode = S_IFLNK | 0777;
+	else if (bhfi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+		st->st_mode = _S_IFDIR | 0777;
+	else
+		st->st_mode = _S_IFREG | 0666;
+
+	if (!is_link && (bhfi.dwFileAttributes & FILE_ATTRIBUTE_READONLY))
+		st->st_mode &= ~(mode_t)0222;
+
+	return 0;
+}
+
+static int stat_path(const char *path, struct win32_stat *st, int follow)
 {
 	char buf[MAXPATHLEN];
 	const char *p = trim_path(path, buf, sizeof buf);
-	int rc = _stat64(p, st);
+	DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+	int is_link = 0;
+	HANDLE h;
+	int rc;
 
-	if (rc == 0)
-		fill_file_ids(p, st);
+	if (!follow && path_is_symlink(p)) {
+		is_link = 1;
+		flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+	}
+
+	h = CreateFileA(p, FILE_READ_ATTRIBUTES,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			NULL, OPEN_EXISTING, flags, NULL);
+	if (h == INVALID_HANDLE_VALUE) {
+		switch (GetLastError()) {
+		case ERROR_FILE_NOT_FOUND:
+		case ERROR_PATH_NOT_FOUND:
+		case ERROR_INVALID_NAME:   errno = ENOENT; break;
+		case ERROR_ACCESS_DENIED:  errno = EACCES; break;
+		default:                   errno = EIO;    break;
+		}
+		return -1;
+	}
+
+	rc = stat_by_handle(h, st, is_link);
+	CloseHandle(h);
 	return rc;
 }
 
-int win32_lstat64(const char *path, struct _stat64 *st)
+int win32_stat(const char *path, struct win32_stat *st)
 {
-	char buf[MAXPATHLEN];
-	const char *p = trim_path(path, buf, sizeof buf);
-	int rc = _stat64(p, st);
+	return stat_path(path, st, 1);
+}
 
-	if (rc != 0) {
-		/* A symlink to a missing target still exists as a link. */
-		if (path_is_symlink(p)) {
-			memset(st, 0, sizeof *st);
-			st->st_mode = S_IFLNK | 0777;
-			st->st_nlink = 1;
-			return 0;
-		}
-		return rc;
+int win32_lstat(const char *path, struct win32_stat *st)
+{
+	return stat_path(path, st, 0);
+}
+
+int win32_fstat(int fd, struct win32_stat *st)
+{
+	HANDLE h = (HANDLE)_get_osfhandle(fd);
+
+	if (h == INVALID_HANDLE_VALUE) {
+		errno = EBADF;
+		return -1;
 	}
-
-	if (path_is_symlink(p))
-		st->st_mode = (st->st_mode & ~(unsigned)_S_IFMT) | S_IFLNK;
-	else
-		fill_file_ids(p, st);
-
-	return 0;
+	return stat_by_handle(h, st, 0);
 }
 
 /* ------------------------------------------------------------------ links */

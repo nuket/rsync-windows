@@ -262,6 +262,10 @@ if(WIN32)
     # Creating one needs Developer Mode or SeCreateSymbolicLinkPrivilege;
     # without either, rsync reports the EPERM per link and carries on.
     set(HAVE_READLINK 1)
+    # Hard links: CreateHardLink on NTFS.  Safe now that STRUCT_STAT carries
+    # the full 64-bit NTFS file index as st_ino (see win32/win32compat.h);
+    # with the CRT's 16-bit st_ino, rsync would link unrelated files.
+    set(HAVE_LINK 1)
 else()
     check_function_exists(setmode HAVE_SETMODE)
 endif()

@@ -705,6 +705,10 @@ typedef unsigned int size_t;
 #endif
 #endif
 
+/* A platform header may define its own STRUCT_STAT (with OFF_T and
+ * SIZEOF_CAPITAL_OFF_T alongside it) when the system's struct stat cannot
+ * carry what rsync needs -- an inode wide enough for --hard-links, say. */
+#ifndef STRUCT_STAT
 #if SIZEOF_OFF_T == 8 || !SIZEOF_OFF64_T || !defined HAVE_STRUCT_STAT64
 #define OFF_T off_t
 #define STRUCT_STAT struct stat
@@ -714,6 +718,7 @@ typedef unsigned int size_t;
 #define STRUCT_STAT struct stat64
 #define USE_STAT64_FUNCS 1
 #define SIZEOF_CAPITAL_OFF_T SIZEOF_OFF64_T
+#endif
 #endif
 
 /* CAVEAT: on some systems, int64 will really be a 32-bit integer IFF
