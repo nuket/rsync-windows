@@ -135,6 +135,9 @@ char **raw_argv, **cooked_argv;
 #  define SIGACTMASK(n,h) SIGACTION(n,h)
 # endif
 static struct sigaction sigact;
+#else
+/* No sigaction(): SIGACTION() falls back to signal() and there is no mask. */
+# define SIGACTMASK(n,h) SIGACTION(n,h)
 #endif
 
 struct pid_status {
@@ -1814,6 +1817,9 @@ int main(int argc,char *argv[])
 	raw_argc = argc;
 	raw_argv = argv;
 
+#ifdef _WIN32
+	win32_init();	/* Winsock startup + binary stdio */
+#endif
 	raise_fd_limit();
 
 #ifdef HAVE_SIGACTION
@@ -1885,6 +1891,23 @@ int main(int argc,char *argv[])
 		option_error();
 		exit_cleanup(RERR_SYNTAX);
 	}
+#ifdef _WIN32
+	/* rsync splits and rebuilds paths around '/', so translate the user's
+	 * backslashes once, here, for the local (non-remote) operands only --
+	 * a remote spec's path belongs to the peer and is left untouched. */
+	{
+		int i;
+		for (i = 0; i < argc; i++) {
+			char *host = NULL;
+			int port = 0;
+			if (!check_for_hostspec(argv[i], &host, &port))
+				win32_normalize_path(argv[i]);
+			if (host)
+				free(host);
+		}
+	}
+#endif
+
 	if (write_batch
 	 && poptDupArgv(argc, (const char **)argv, &cooked_argc, (const char ***)&cooked_argv) != 0)
 		out_of_memory("main");

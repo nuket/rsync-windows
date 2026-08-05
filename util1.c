@@ -1235,7 +1235,7 @@ int change_dir(const char *dir, int set_path_only)
 	if (len == 1 && *dir == '.' && (!skipped_chdir || set_path_only))
 		return 1;
 
-	if (*dir == '/') {
+	if (IS_ABS_PATH(dir)) {
 		if (len >= sizeof curr_dir) {
 			errno = ENAMETOOLONG;
 			return 0;

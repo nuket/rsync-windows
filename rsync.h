@@ -338,6 +338,16 @@ enum delret {
 #define MKP_DROP_NAME		(1<<0) /* drop trailing filename or trailing slash */
 #define MKP_SKIP_SLASH		(1<<1) /* skip one or more leading slashes */
 
+/* Is this local path absolute?  On Windows a leading drive letter counts,
+ * e.g. "C:/dir" and "C:\dir" as well as the usual "/dir". */
+#ifdef _WIN32
+#define IS_ABS_PATH(p) ((p)[0] == '/' \
+			|| (isalpha((uchar)(p)[0]) && (p)[1] == ':' \
+			    && ((p)[2] == '/' || (p)[2] == '\\')))
+#else
+#define IS_ABS_PATH(p) ((p)[0] == '/')
+#endif
+
 /* Defines for maybe_send_keepalive() */
 #define MSK_ALLOW_FLUSH 	(1<<0)
 #define MSK_ACTIVE_RECEIVER 	(1<<1)
@@ -484,22 +494,30 @@ enum delret {
 #endif
 #endif
 
+#ifndef _WIN32
 /* these are needed for the uid/gid mapping code */
 #include <pwd.h>
 #include <grp.h>
+#endif
 
 #include <stdarg.h>
+#ifndef _WIN32
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#endif
 #ifdef HAVE_NETDB_H
 #include <netdb.h>
 #endif
+#ifndef _WIN32
 #include <syslog.h>
+#endif
 #ifdef HAVE_SYS_FILE_H
 #include <sys/file.h>
 #endif
 
-#ifdef HAVE_DIRENT_H
+#ifdef _WIN32
+/* win32compat.h supplies struct dirent and the opendir() family. */
+#elif defined HAVE_DIRENT_H
 # include <dirent.h>
 #else
 # define dirent direct
