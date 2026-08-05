@@ -54,7 +54,7 @@ extern int local_server_shares_memory;
 extern int msgs2stderr;
 extern int inc_recurse;
 extern int io_error;
-extern int batch_fd;
+extern RSYNC_TLS int batch_fd;
 extern int eol_nulls;
 extern int flist_eof;
 extern int file_total;

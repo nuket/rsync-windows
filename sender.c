@@ -51,7 +51,7 @@ extern int updating_basis_file;
 extern int make_backups;
 extern int inplace;
 extern int inplace_partial;
-extern int batch_fd;
+extern RSYNC_TLS int batch_fd;
 extern char *module_dir;
 extern int module_dirfd;
 extern int write_batch;

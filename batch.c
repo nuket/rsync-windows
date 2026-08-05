@@ -48,7 +48,12 @@ extern char *iconv_opt;
 
 extern filter_rule_list filter_list;
 
-int batch_fd = -1;
+/* Set to -1 when the input stream hits EOF (io.c), which for --read-batch
+ * happens in the receiving half only.  fork() gives each half its own copy;
+ * where the halves are threads instead, they need one each or the receiver
+ * reaching the end of the batch stops the generator selecting for input too.
+ * RSYNC_TLS is empty on every platform that forks. */
+RSYNC_TLS int batch_fd = -1;
 int batch_sh_fd = -1;
 int batch_stream_flags;
 
