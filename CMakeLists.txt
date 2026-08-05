@@ -529,7 +529,11 @@ configure_file(cmake/config.h.in "${GEN_DIR}/config.h")
 # ---------------------------------------------------------------------------
 set(EXTRA_ROUNDING_FOUND OFF)
 foreach(r 0 1 3)
-    try_compile(ROUNDING_OK
+    # The bindir argument is what makes this the older try_compile signature.
+    # Dropping it is neater, but that form arrived in CMake 3.25 and this file
+    # claims to work with 3.20 -- Ubuntu 22.04 ships 3.22, where the shorter
+    # form reads "SOURCES" as the bindir and fails somewhere else entirely.
+    try_compile(ROUNDING_OK "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/rounding-try"
         SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/rounding.c"
         COMPILE_DEFINITIONS "-DEXTRA_ROUNDING=${r}"
         C_STANDARD 99
