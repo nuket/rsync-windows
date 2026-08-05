@@ -51,25 +51,21 @@ OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
 
 ## What works
 
-* Transfers to a remote host over ssh (`rsync -rt local/ user@host:/path/`),
-  including recursion, the delta algorithm, `--delete`, `--exclude`,
-  compression and `--stats`.
+* Transfers in **both directions** over ssh — `rsync -rt local/ user@host:/path/`
+  and `rsync -rt user@host:/path/ C:\local\` — including recursion, the delta
+  algorithm, `--delete`, `--exclude`, compression and `--stats`.
 * Drive-letter paths (`C:\dir`, `C:/dir`) and backslash separators.
 * File names outside the legacy ANSI code page. The executable embeds a
   manifest selecting the UTF-8 active code page, so names like
   `naïve-café-日本.txt` round-trip byte-for-byte to a UTF-8 Unix peer.
 * Names containing spaces, quotes and shell metacharacters.
 
-## What does not work yet
+## What does not work
 
-* **Pulling** (`rsync user@host:/path/ C:\local\`). The receiving side of
-  rsync forks into a generator and a receiver process that run concurrently
-  (`do_recv()` in `main.c`), and there is no `fork()` on Windows. This exits
-  with `fork failed in do_recv: Function not implemented`. Emulating it means
-  running the two halves as threads, which requires making rsync's I/O state
-  per-thread — a substantial change that is not attempted here.
-* **Local-to-local copies** (`rsync C:\a\ C:\b\`), for the same reason:
-  `local_child()` forks an in-process server. Exits with a clear message.
+* **Local-to-local copies** (`rsync C:\a\ C:\b\`). `local_child()` forks an
+  in-process server, and unlike the generator/receiver split there is no
+  shared-nothing state to isolate — the child re-runs rsync's whole argument
+  and option machinery. Exits with a clear message.
 * **Daemon mode** (`--daemon`, `rsync://`), which needs `fork()`, `chroot()`
   and Unix users.
 * Symlinks, hard links, ACLs, xattrs, devices and Unix ownership are compiled
@@ -86,7 +82,44 @@ OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
 | `win32/win32proc.c` | `CreateProcess` in place of `fork()`+`execvp()` for the ssh child, plus `waitpid()`/`kill()`. |
 | `win32/win32dir.c` | `opendir`/`readdir` over `FindFirstFile`. |
 | `win32/win32compat.c` | stat/link/attribute/time calls, users and groups, `getpass`, signal filtering. |
+| `win32/win32fork.c` | `fork()` stand-in for the generator/receiver split (below). |
 | `win32/rsync.manifest` | Selects the UTF-8 active code page. |
+
+### The generator/receiver split
+
+Receiving forks into a generator and a receiver that run concurrently over
+one socket (`do_recv()` in `main.c`). With no `fork()`, the receiver runs as
+a thread — but a thread shares every global, where fork would have given the
+child private copies.
+
+The state the two halves modify independently is therefore tagged
+`RSYNC_TLS` (`rsync.h`), which is `__declspec(thread)` on Windows and
+**nothing at all** on every other platform, so Unix builds are untouched.
+A new thread would normally start from the TLS *template* (the initial
+values); fork gives the child the parent's *current* values, so
+`win32_fork_thread()` copies the parent's whole TLS block into the child
+before any rsync code runs. Pointers in that block still refer to shared
+heap, so the buffers holding in-flight protocol data are deep-copied by
+`io_fork_child_fixup()`.
+
+Two consequences worth knowing:
+
+* **Incremental recursion is forced off when receiving** (`compat.c`). With
+  it on, each half independently parses and appends file-list chunks *after*
+  the split; in two address spaces that is fine, in one heap the two halves
+  collide. Building the whole list up front avoids it, at the cost of a
+  slower start on very large trees.
+* **fds are process-wide**, so the hand-off does not close the sibling's pipe
+  ends the way the forked version does, and the receiver half returns rather
+  than lingering in `read_final_goodbye()` waiting for a `SIGUSR2` that a
+  thread cannot receive. It still performs that function's protocol-31
+  `MSG_DONE` exchange first, which the generator waits for.
+
+Residual risk: this is emulation, not fork. Both halves share one heap, so
+the pre-split file list is shared rather than copied. That is read-mostly and
+transfers verify byte-for-byte in testing (see below), but it is a weaker
+guarantee than the Unix version's shared-nothing processes. Treat Windows
+pulls as well-tested rather than proven.
 
 Two details worth knowing:
 
@@ -100,6 +133,23 @@ Two details worth knowing:
   (`USE_STAT64_FUNCS`). Offsets are 64-bit.
 
 Set `RSYNC_WIN32_DEBUG=1` to trace the shim's fd operations to stderr.
+
+## Testing
+
+Against an Ubuntu 22.04 host running rsync 3.2.7 (protocol 31), over ssh:
+
+* Push and pull of a 443-file / 23 MB tree, compared byte-for-byte with an
+  MD5 manifest on both sides; the Windows→Linux→Windows round trip is
+  identical to the original.
+* Delta transfer in both directions (a modified block in a 300 KB file moves
+  ~700 literal bytes against ~299 KB matched).
+* Incremental runs with remote modifications, additions, renames and
+  deletions, verified against the remote's own manifest each round.
+* Five repeated pulls with and without `-z`, all byte-exact.
+* Unicode, spaces and shell metacharacters in file names.
+
+The `RSYNC_TLS` changes are inert off Windows, and the CMake-built binary
+still passes rsync's own test suite on Linux (104 passed, 9 skipped).
 
 ## Known rough edges
 

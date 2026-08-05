@@ -169,6 +169,18 @@ void set_allow_inc_recurse(void)
 		client_info = *buf ? strdup(buf+1) : ""; /* The +1 skips the leading "e". */
 	}
 
+#ifdef _WIN32
+	/* On Windows the receiving side's generator/receiver split is two
+	 * threads of one process rather than two processes (see win32fork.c),
+	 * so the halves share one heap.  Incremental recursion has each half
+	 * independently parse and append file-list chunks after the split,
+	 * which under fork() lands in two private address spaces but here
+	 * would collide in one.  Building the whole list before the split
+	 * avoids that entirely, at the cost of a slower start on huge trees. */
+	if (!am_sender)
+		allow_inc_recurse = 0;
+#endif
+
 	if (!recurse || use_qsort)
 		allow_inc_recurse = 0;
 	else if (!am_sender

@@ -331,6 +331,18 @@ enum delret {
 #define MKP_DROP_NAME		(1<<0) /* drop trailing filename or trailing slash */
 #define MKP_SKIP_SLASH		(1<<1) /* skip one or more leading slashes */
 
+/* State that diverges between the generator and the receiver after the fork
+ * in do_recv().  On Windows there is no fork(), so the receiver runs as a
+ * thread and these live in thread-local storage; win32_fork_thread() seeds
+ * the new thread's TLS block from the parent's, giving fork-like semantics.
+ * Everywhere else this expands to nothing and the variables stay ordinary
+ * globals, exactly as before. */
+#ifdef _WIN32
+#define RSYNC_TLS __declspec(thread)
+#else
+#define RSYNC_TLS
+#endif
+
 /* Is this local path absolute?  On Windows a leading drive letter counts,
  * e.g. "C:/dir" and "C:\dir" as well as the usual "/dir". */
 #ifdef _WIN32

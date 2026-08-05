@@ -387,14 +387,31 @@ static void timeval_to_filetime(const struct timeval *tv, FILETIME *ft)
 int win32_utimes(const char *path, const struct timeval tv[2])
 {
 	FILETIME atime, mtime;
+	char buf[MAXPATHLEN];
+	const char *p;
+	size_t len;
 	HANDLE h;
 	BOOL ok;
 
-	h = CreateFileA(path, FILE_WRITE_ATTRIBUTES,
+	/* rsync hands us "dir/." for the transfer root, which CreateFile
+	 * rejects; reduce it to the directory itself. */
+	len = strlen(path);
+	if (len >= 2 && path[len-1] == '.'
+	 && (path[len-2] == '/' || path[len-2] == '\\')) {
+		len -= (len == 2) ? 1 : 2;   /* keep "/" itself */
+		if (len >= sizeof buf)
+			len = sizeof buf - 1;
+		memcpy(buf, path, len);
+		buf[len] = '\0';
+		p = buf;
+	} else
+		p = path;
+
+	h = CreateFileA(p, FILE_WRITE_ATTRIBUTES,
 			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 			NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
 	if (h == INVALID_HANDLE_VALUE) {
-		errno = ENOENT;
+		errno = (GetLastError() == ERROR_ACCESS_DENIED) ? EACCES : ENOENT;
 		return -1;
 	}
 

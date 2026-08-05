@@ -373,6 +373,11 @@ struct group  *win32_getgrnam(const char *name);
 /* --------------------------------------------------------------- processes */
 
 pid_t win32_piped_child(char **command, int *f_in, int *f_out);
+
+/* fork() replacement for do_recv()'s generator/receiver split: runs `fn` on a
+ * thread seeded with a copy of this thread's TLS block.  See win32fork.c. */
+pid_t win32_fork_thread(void (*fn)(void *), void *arg);
+void  win32_remember_thread_child(pid_t pid, HANDLE h);
 pid_t win32_waitpid(pid_t pid, int *status, int options);
 int   win32_kill(pid_t pid, int sig);
 

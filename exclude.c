@@ -25,7 +25,7 @@
 
 extern int am_server;
 extern int am_sender;
-extern int am_generator;
+extern RSYNC_TLS int am_generator;
 extern int eol_nulls;
 extern int io_error;
 extern int xfer_dirs;
