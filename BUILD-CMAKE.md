@@ -32,6 +32,9 @@ against real `awk` on a Linux host.
 | `RSYNC_ENABLE_SIMD` | `OFF` | SIMD/asm checksum acceleration (x86-64) |
 | `RSYNC_EXTERNAL_ZLIB` | `OFF` | Link system zlib instead of the bundled copy |
 | `RSYNC_STATIC_CRT` | `ON` | Link the C runtime statically (MSVC only; see below) |
+| `RSYNC_HARDEN` | `ON` | Exploit mitigations: CFG, CET, strict `/GS`, Spectre (MSVC only) |
+| `RSYNC_STRICT_MITIGATIONS` | `OFF` | Also ACG, CIG and strict handle checks (see below) |
+| `RSYNC_ENABLE_ASAN` | `OFF` | AddressSanitizer, for testing |
 
 `RSYNC_PATH`, `RSYNC_RSH`, `NOBODY_USER` and `NOBODY_GROUP` are cache strings
 with the same meaning as the corresponding `configure` options.
@@ -86,6 +89,80 @@ packaging rsync alongside other `/MD` binaries and would rather they share one
 runtime. Note that mixing the two in a single process is the thing to avoid —
 each CRT has its own heap and its own fd table — but rsync links no C libraries
 outside its own tree, so there is nothing here to mix with.
+
+### Hardening
+
+rsync parses input it does not control — a file list, a checksum stream and a
+set of deltas, all produced by the far end — in C. `RSYNC_HARDEN` (on by
+default) is worth the few kilobytes it costs.
+
+Baked into the image by the toolchain:
+
+| Mitigation | Flag | What it buys |
+| --- | --- | --- |
+| Control Flow Guard | `/guard:cf` | indirect calls are checked against a table of legitimate targets, so a clobbered function pointer cannot be aimed anywhere |
+| CET shadow stack | `/CETCOMPAT` | the CPU keeps its own copy of return addresses, which defeats ROP at the return |
+| Strict stack cookies | `/GS /sdl` | `/sdl` puts a cookie on functions the default `/GS` heuristic skips |
+| Spectre v1 | `/Qspectre` | speculation barriers on bounds-check patterns |
+| ASLR + DEP | `/DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT` | MSVC defaults, pinned so they cannot quietly lapse |
+| Import path | `/DEPENDENTLOADFLAG:0x800` | static imports resolve from System32 alone, so a DLL planted beside the exe cannot win |
+
+Switched on at runtime by `win32/win32harden.c`, before `WSAStartup()` can pull
+in the Winsock catalog:
+
+* `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` — the `LoadLibrary`
+  counterpart to `/DEPENDENTLOADFLAG`. rsync.exe gets dropped into downloads
+  folders, shares and USB sticks, and the default search order looks beside the
+  executable before System32.
+* Extension points disabled — AppInit_DLLs, `SetWindowsHookEx`, IMEs, legacy
+  Winsock LSPs. A console file-transfer tool needs none of them.
+* Image-load policy — `NoRemoteImages`, `NoLowMandatoryLabelImages`,
+  `PreferSystem32Images`. The first matters most here: rsync is routinely
+  pointed at a UNC path, and this stops a DLL being loaded from the very share
+  it is copying to or from.
+* Heap termination on corruption (already the 64-bit default; stated anyway).
+
+Verify what actually landed:
+
+```powershell
+dumpbin /headers build\rsync.exe    # Control Flow Guard, CET compatible,
+                                    # Dynamic base, NX compatible, High Entropy
+dumpbin /loadconfig build\rsync.exe # Dependent Load Flag 0800, Guard CF count
+```
+
+**`RSYNC_STRICT_MITIGATIONS`** (off) adds three more that are genuinely useful
+but can break a working setup on someone else's machine, which is a poor trade
+for a file copier:
+
+* **ACG** (`ProhibitDynamicCode`) — no page may become executable after the
+  fact. rsync generates no code, but an injected profiler or anti-virus DLL may,
+  and it would then fail inside this process.
+* **CIG** (`MicrosoftSignedOnly`) — only Microsoft-signed images may be loaded
+  from that point on. It does not apply to rsync.exe itself, which is already
+  mapped, so an unsigned build is unaffected; what it stops is an unsigned DLL
+  being injected later. It is also what most often collides with EDR.
+* **Strict handle checks** — using a closed handle raises instead of returning
+  an error. Good discipline and a good way to find a double-close, but it turns
+  a latent bug into a crash.
+
+All twelve tests pass with these on, but that is one machine — treat it as an
+opt-in for a controlled environment.
+
+### AddressSanitizer
+
+`-DRSYNC_ENABLE_ASAN=ON` builds with ASan. It is a testing configuration, not a
+shipping one — several times slower, and it needs the ASan runtime DLL beside
+the toolchain, so `/DEPENDENTLOADFLAG` is dropped for that build (otherwise the
+loader refuses to look outside System32 and the binary dies at startup with
+`STATUS_DLL_NOT_FOUND`).
+
+```powershell
+cmake -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DRSYNC_ENABLE_ASAN=ON
+cmake --build build-asan
+python win32\tests\run.py --rsync-bin build-asan\rsync.exe
+```
+
+The full suite passes clean under it, ssh transfers included.
 
 ## What works
 

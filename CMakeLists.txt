@@ -46,6 +46,10 @@ option(RSYNC_ENABLE_ICONV     "Support --iconv character conversion" OFF)
 option(RSYNC_ENABLE_SIMD      "Use SIMD/asm checksum acceleration" OFF)
 option(RSYNC_EXTERNAL_ZLIB    "Link the system zlib instead of the bundled copy" OFF)
 option(RSYNC_STATIC_CRT       "Link the C runtime statically (MSVC only)" ON)
+option(RSYNC_HARDEN           "Enable exploit mitigations (MSVC only)" ON)
+option(RSYNC_STRICT_MITIGATIONS
+       "Also enable ACG, CIG and strict handle checks -- see BUILD-CMAKE.md" OFF)
+option(RSYNC_ENABLE_ASAN      "Build with AddressSanitizer (for testing)" OFF)
 # Note: the test suite (runtests.py) and its C helpers are driven by the
 # autoconf Makefile's "make check"; CMake builds only rsync itself.
 
@@ -64,6 +68,9 @@ if(WIN32)
     # Shim headers (pwd.h, dirent.h, syslog.h, ...) so the shared sources
     # can include them unconditionally.
     set(RSYNC_PLATFORM_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/win32/include")
+    # Always defined, so win32harden.c can branch on it with a plain `if`
+    # rather than a preprocessor conditional.
+    add_compile_definitions(RSYNC_STRICT_MITIGATIONS=$<BOOL:${RSYNC_STRICT_MITIGATIONS}>)
 else()
     set(RSYNCD_SYSCONF  "/etc/rsyncd.conf")
     set(POPT_SYSCONFDIR "/etc")
@@ -80,6 +87,57 @@ endif()
 # MSVC_RUNTIME_LIBRARY property from it (policy CMP0091, NEW since 3.15).
 if(MSVC AND RSYNC_STATIC_CRT)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# ---------------------------------------------------------------------------
+# Exploit mitigations
+#
+# rsync parses input it does not control -- a file list, a checksum stream and
+# a set of deltas, all produced by the far end -- in C, so the image-level
+# mitigations are worth having.  These are the ones the toolchain can bake in;
+# the ones that have to be switched on at runtime live in win32/win32harden.c.
+#
+# Check the result with:  dumpbin /headers /loadconfig build\rsync.exe
+# ---------------------------------------------------------------------------
+if(MSVC AND RSYNC_HARDEN)
+    add_compile_options(
+        /GS             # stack cookies -- MSVC's default, pinned deliberately
+        /sdl            # strict /GS, so the cookie goes on functions the
+                        # default heuristic skips.  It also promotes a set of
+                        # warnings to errors, which is the cost: an upstream
+                        # merge can break the Windows build and has to be
+                        # looked at rather than ignored
+        /guard:cf       # CFG: indirect calls checked against a table of
+                        # legitimate targets, so a clobbered function pointer
+                        # cannot be aimed at an arbitrary address
+        /Qspectre)      # speculative-execution hardening for the bounds-check
+                        # patterns that Spectre v1 preys on
+    add_link_options(
+        /guard:cf                  # the other half of CFG: emit the table
+        /CETCOMPAT                 # opt in to the CPU shadow stack where there
+                                   # is one, which defeats ROP at the return
+        /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT)  # ASLR and DEP, pinned as above
+    if(NOT RSYNC_ENABLE_ASAN)
+        # LOAD_LIBRARY_SEARCH_SYSTEM32: resolve the static imports from
+        # System32 alone, so a DLL planted beside the executable cannot win.
+        # Left out under ASan, whose runtime DLL lives in the MSVC toolchain
+        # directory: the loader would refuse to look there and the binary
+        # would die at startup with STATUS_DLL_NOT_FOUND.
+        add_link_options(/DEPENDENTLOADFLAG:0x800)
+    endif()
+endif()
+
+if(RSYNC_ENABLE_ASAN)
+    # A testing tool, not a shipping configuration: it makes rsync several
+    # times slower and needs the ASan runtime present.  Worth running the
+    # Windows suite under once in a while -- see BUILD-CMAKE.md.
+    if(MSVC)
+        add_compile_options(/fsanitize=address /Zi)
+        add_link_options(/INCREMENTAL:NO)
+    else()
+        add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=address)
+    endif()
 endif()
 
 set(GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}")
@@ -627,7 +685,8 @@ if(WIN32)
         win32/win32dir.c
         win32/win32fork.c
         win32/win32args.c
-        win32/win32links.c)
+        win32/win32links.c
+        win32/win32harden.c)
 
 endif()
 
@@ -694,7 +753,7 @@ if(WIN32)
     # because they reach into main.c/io.c, which no helper links.
     set(HELPER_WIN32_SOURCES
         win32/win32compat.c win32/win32io.c win32/win32dir.c
-        win32/win32proc.c win32/win32links.c)
+        win32/win32proc.c win32/win32links.c win32/win32harden.c)
 endif()
 
 function(rsync_test_helper name)
@@ -795,5 +854,8 @@ message(STATUS "  OpenSSL ............. ${USE_OPENSSL}")
 message(STATUS "  bundled zlib ........ ${RSYNC_EXTERNAL_ZLIB}")
 if(MSVC)
     message(STATUS "  static CRT .......... ${RSYNC_STATIC_CRT}")
+    message(STATUS "  mitigations ......... ${RSYNC_HARDEN}")
+    message(STATUS "  strict mitigations .. ${RSYNC_STRICT_MITIGATIONS}")
 endif()
+message(STATUS "  AddressSanitizer .... ${RSYNC_ENABLE_ASAN}")
 message(STATUS "")
