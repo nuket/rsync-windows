@@ -32,7 +32,8 @@ struct noted {
 };
 
 static struct noted noted[MAX_NOTED];
-static int noted_cnt;          /* entries actually stored */
+static int noted_cnt;          /* entries actually stored, both kinds */
+static int noted_of_kind[2];   /* ...and how many of those are each kind */
 static int seen_cnt[2];        /* everything seen, per kind, stored or not */
 static int printer_registered;
 static CRITICAL_SECTION lock;
@@ -81,9 +82,12 @@ static void print_summary(void)
 			if (noted[i].kind == kind)
 				fprintf(stderr, "    %s\n", noted[i].path);
 		}
-		if (seen_cnt[kind] > noted_cnt)
-			fprintf(stderr, "    ... and more (only the first %d "
-					"of each kind are listed)\n", MAX_NOTED);
+		/* Against this kind's own stored count, not the combined one:
+		 * a run with both kinds fills the table between them, and
+		 * comparing against the total hid the truncation. */
+		if (seen_cnt[kind] > noted_of_kind[kind])
+			fprintf(stderr, "    ... and %d more not listed\n",
+				seen_cnt[kind] - noted_of_kind[kind]);
 	}
 	fprintf(stderr,
 		"This build does not reproduce links: Windows needs a privilege "
@@ -115,6 +119,10 @@ void win32_note_link(const char *path, int kind)
 		}
 	}
 
+	/* Past MAX_NOTED the paths are no longer kept, so this loop can no
+	 * longer recognise a repeat and the count becomes "times seen" rather
+	 * than "distinct paths".  It only ever appears as "and N more", so an
+	 * approximation there is better than paying to keep every path. */
 	seen_cnt[kind]++;
 
 	if (noted_cnt < MAX_NOTED) {
@@ -123,6 +131,7 @@ void win32_note_link(const char *path, int kind)
 			noted[noted_cnt].path = copy;
 			noted[noted_cnt].kind = kind;
 			noted_cnt++;
+			noted_of_kind[kind]++;
 		}
 	}
 
