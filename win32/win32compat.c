@@ -11,6 +11,7 @@
 
 #include <lmcons.h>
 #include <locale.h>
+#include <winioctl.h>   /* FSCTL_GET_REPARSE_POINT (WIN32_LEAN_AND_MEAN omits it) */
 
 /* --------------------------------------------------------------- startup */
 
@@ -193,12 +194,47 @@ int win32_lstat64(const char *path, struct _stat64 *st)
 
 /* ------------------------------------------------------------------ links */
 
+/* The reparse-point payload.  Declared here because the SDK only exposes it
+ * to kernel-mode headers. */
+typedef struct {
+	ULONG  ReparseTag;
+	USHORT ReparseDataLength;
+	USHORT Reserved;
+	union {
+		struct {
+			USHORT SubstituteNameOffset;
+			USHORT SubstituteNameLength;
+			USHORT PrintNameOffset;
+			USHORT PrintNameLength;
+			ULONG  Flags;
+			WCHAR  PathBuffer[1];
+		} SymbolicLinkReparseBuffer;
+		struct {
+			USHORT SubstituteNameOffset;
+			USHORT SubstituteNameLength;
+			USHORT PrintNameOffset;
+			USHORT PrintNameLength;
+			WCHAR  PathBuffer[1];
+		} MountPointReparseBuffer;
+	} u;
+} RSYNC_REPARSE_BUFFER;
+
+/*
+ * Read the target *as stored in the link*, which is what rsync puts on the
+ * wire.  GetFinalPathNameByHandle() would resolve the whole chain instead,
+ * turning a relative link into an absolute one and following it to the end.
+ */
 int win32_readlink(const char *path, char *buf, size_t bufsiz)
 {
+	union {
+		RSYNC_REPARSE_BUFFER rb;
+		char space[16 * 1024];
+	} data;
 	HANDLE h;
-	char tmp[MAXPATHLEN];
-	DWORD len;
-	const char *src;
+	DWORD got = 0;
+	const WCHAR *wname;
+	USHORT woff, wlen;
+	int n;
 
 	h = CreateFileA(path, 0,
 			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -210,39 +246,110 @@ int win32_readlink(const char *path, char *buf, size_t bufsiz)
 		return -1;
 	}
 
-	len = GetFinalPathNameByHandleA(h, tmp, sizeof tmp - 1, FILE_NAME_OPENED);
+	if (!DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0,
+			     &data, sizeof data, &got, NULL)) {
+		CloseHandle(h);
+		errno = EINVAL;     /* not a reparse point */
+		return -1;
+	}
 	CloseHandle(h);
 
-	if (len == 0 || len >= sizeof tmp) {
+	/* Prefer the print name: it is the text the user wrote, without the
+	 * "\??\" device prefix that the substitute name carries. */
+	if (data.rb.ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+		woff = data.rb.u.SymbolicLinkReparseBuffer.PrintNameOffset;
+		wlen = data.rb.u.SymbolicLinkReparseBuffer.PrintNameLength;
+		wname = data.rb.u.SymbolicLinkReparseBuffer.PathBuffer;
+		if (!wlen) {
+			woff = data.rb.u.SymbolicLinkReparseBuffer.SubstituteNameOffset;
+			wlen = data.rb.u.SymbolicLinkReparseBuffer.SubstituteNameLength;
+		}
+	} else if (data.rb.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT) {
+		woff = data.rb.u.MountPointReparseBuffer.PrintNameOffset;
+		wlen = data.rb.u.MountPointReparseBuffer.PrintNameLength;
+		wname = data.rb.u.MountPointReparseBuffer.PathBuffer;
+		if (!wlen) {
+			woff = data.rb.u.MountPointReparseBuffer.SubstituteNameOffset;
+			wlen = data.rb.u.MountPointReparseBuffer.SubstituteNameLength;
+		}
+	} else {
 		errno = EINVAL;
 		return -1;
 	}
-	tmp[len] = '\0';
 
-	/* Strip the \\?\ prefix Windows likes to add. */
-	src = tmp;
-	if (strncmp(src, "\\\\?\\", 4) == 0)
-		src += 4;
+	/* The manifest selects UTF-8, so the narrow encoding is UTF-8 too. */
+	n = WideCharToMultiByte(CP_UTF8, 0, wname + woff / sizeof(WCHAR),
+				wlen / sizeof(WCHAR), buf, (int)bufsiz, NULL, NULL);
+	if (n <= 0) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
 
-	len = (DWORD)strlen(src);
-	if (len > bufsiz)
-		len = (DWORD)bufsiz;
-	memcpy(buf, src, len);
-	return (int)len;
+	/* rsync speaks '/'; a Windows link stores '\'. */
+	{
+		int i;
+		for (i = 0; i < n; i++) {
+			if (buf[i] == '\\')
+				buf[i] = '/';
+		}
+	}
+	return n;
+}
+
+/*
+ * Windows needs to know at creation time whether a symlink points at a
+ * directory, and it records that in the link itself.  A relative target is
+ * relative to the *link's* directory, not to our cwd, so resolve it that way
+ * before asking.  Guessing wrong leaves a link that resolves to the wrong
+ * kind of object.
+ */
+static int symlink_target_is_dir(const char *target, const char *linkpath)
+{
+	char probe[MAXPATHLEN];
+	const char *slash;
+	DWORD attrs;
+	size_t dirlen;
+
+	if (IS_ABS_PATH(target)) {
+		attrs = GetFileAttributesA(target);
+		return attrs != INVALID_FILE_ATTRIBUTES
+		    && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+	}
+
+	slash = strrchr(linkpath, '/');
+	if (!slash)
+		slash = strrchr(linkpath, '\\');
+	dirlen = slash ? (size_t)(slash - linkpath) + 1 : 0;
+
+	if (dirlen + strlen(target) >= sizeof probe)
+		return 0;
+	memcpy(probe, linkpath, dirlen);
+	strcpy(probe + dirlen, target);
+
+	attrs = GetFileAttributesA(probe);
+	return attrs != INVALID_FILE_ATTRIBUTES
+	    && (attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
 int win32_symlink(const char *target, const char *linkpath)
 {
 	DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-	DWORD attrs = GetFileAttributesA(target);
 
-	if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+	if (symlink_target_is_dir(target, linkpath))
 		flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
 
 	if (!CreateSymbolicLinkA(linkpath, target, flags)) {
-		/* Without Developer Mode or SeCreateSymbolicLinkPrivilege this
-		 * is the failure users will hit. */
-		errno = (GetLastError() == ERROR_PRIVILEGE_NOT_HELD) ? EPERM : EIO;
+		DWORD err = GetLastError();
+
+		/* Creating symlinks needs Developer Mode or the
+		 * SeCreateSymbolicLinkPrivilege; without either, this is the
+		 * failure users will hit. */
+		switch (err) {
+		case ERROR_PRIVILEGE_NOT_HELD:  errno = EPERM;  break;
+		case ERROR_ALREADY_EXISTS:      errno = EEXIST; break;
+		case ERROR_PATH_NOT_FOUND:      errno = ENOENT; break;
+		default:                        errno = EIO;    break;
+		}
 		return -1;
 	}
 	return 0;
