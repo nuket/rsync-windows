@@ -69,14 +69,12 @@ OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
   SeCreateSymbolicLinkPrivilege — without either, Windows refuses, and rsync
   reports the `EPERM` per link and finishes the rest of the transfer.
 
+* **Hard links** (`-H`), via `CreateHardLink` on NTFS.
+
 ## What does not work
 
 * **Daemon mode** (`--daemon`, `rsync://`), which needs `fork()`, `chroot()`
   and Unix users.
-* **Hard links** (`-H`). `CreateHardLink` itself is fine, but MSVC's
-  `struct _stat64` stores `st_ino` in 16 bits — far too few for an NTFS file
-  index. rsync would see collisions and hard-link unrelated files, so this
-  stays off until `STRUCT_STAT` is widened.
 * ACLs, xattrs, devices and Unix ownership are compiled out; none of them map
   onto Windows. `--archive` therefore behaves like `-rlt` plus permissions,
   and only the read-only bit of a file's mode is representable.
@@ -217,6 +215,9 @@ Against an Ubuntu 22.04 host running rsync 3.2.7 (protocol 31), over ssh:
 * Unicode, spaces and shell metacharacters in file names.
 * A symlink read back with its stored target (not the resolved path) and
   pushed to Linux verbatim.
+* Hard links in both directions: a linked set arrives linked and unrelated
+  files do not, and `-H` over the 457-file tree produces no false links —
+  the check that the 16-bit `st_ino` would have failed.
 * Local-to-local copy of a 457-file tree, byte-for-byte identical to the
   source; `--delete --exclude` correctly spares the excluded files;
   `--remove-source-files` empties the source.
@@ -225,11 +226,26 @@ The `RSYNC_TLS` changes are inert off Windows, and the CMake-built binary
 still passes rsync's own test suite there: on both Ubuntu 22.04.5 and
 26.04, 108 passed, 5 skipped, 0 failures.
 
+### File metadata
+
+`STRUCT_STAT` is `struct win32_stat` (`win32/win32compat.h`) rather than the
+CRT's `struct _stat64`, which keeps `st_ino` in **16 bits** — nowhere near
+enough for an NTFS file index, so rsync would see collisions and hard-link
+unrelated files. `rsync.h` only picks a `STRUCT_STAT` when a platform header
+has not already supplied one.
+
+The three stat calls are built on `GetFileInformationByHandle`, which returns
+the full 64-bit file index as `st_ino` and the real link count as
+`st_nlink` — between them, that is what `-H` compares. `rsync --version` now
+reports "64-bit inums".
+
 ## Known rough edges
 
-* `st_ino` is 16 bits in MSVC's `struct _stat64`, so the 64-bit NTFS file
-  index is truncated when stored. This only matters for features that are
-  already disabled (`--hard-links`), but `rsync --version` reports
-  "16-bit inums".
-* `--iconv` is unavailable, so `--protect-args`/`--secluded-args` and
-  charset conversion behave as on a build without iconv.
+* Only the read-only bit of a mode is representable, so `st_mode` is
+  synthesised (0666/0777, minus write when read-only). Permission-preserving
+  options have little to work with.
+* `struct timeval` has a 32-bit `tv_sec` here, so times set through
+  `utimes()` are subject to the 2038 limit even though the stat side is
+  64-bit.
+* `--iconv` is unavailable, so `--secluded-args` and charset conversion
+  behave as on a build without iconv.

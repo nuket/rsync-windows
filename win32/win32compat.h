@@ -118,16 +118,43 @@ typedef int             ssize_t;
 #endif
 #endif
 
-/* rsync uses the stat64 family (see rsync.h's STRUCT_STAT selection); the
- * CRT spells that struct _stat64. */
-#define stat64          _stat64
-#define fstat64         _fstat64
+/*
+ * Our own stat buffer, rather than the CRT's struct _stat64.
+ *
+ * _stat64 keeps st_ino in 16 bits, which cannot hold an NTFS file index --
+ * rsync would see two unrelated files as the same inode and hard-link them
+ * together.  Widening it here (and telling rsync.h to keep its hands off
+ * STRUCT_STAT) is what makes --hard-links safe.
+ */
+struct win32_stat {
+	dev_t            st_dev;
+	unsigned __int64 st_ino;
+	mode_t           st_mode;
+	nlink_t          st_nlink;
+	uid_t            st_uid;
+	gid_t            st_gid;
+	dev_t            st_rdev;
+	__int64          st_size;
+	__time64_t       st_atime;
+	__time64_t       st_mtime;
+	__time64_t       st_ctime;
+};
+
+#define STRUCT_STAT           struct win32_stat
+#define OFF_T                 __int64
+#define SIZEOF_CAPITAL_OFF_T  8
+#define USE_STAT64_FUNCS      1
+
+int win32_stat(const char *path, struct win32_stat *st);
+int win32_lstat(const char *path, struct win32_stat *st);
+int win32_fstat(int fd, struct win32_stat *st);
+
+/* syscall.c calls these under USE_STAT64_FUNCS. */
+#define stat64(p, b)    win32_stat((p), (b))
+#define lstat64(p, b)   win32_lstat((p), (b))
+#define fstat64(f, b)   win32_fstat((f), (b))
 #define lseek64         _lseeki64
 #define ftruncate64     win32_ftruncate64
-
-int  win32_stat64(const char *path, struct _stat64 *st);
-int  win32_lstat64(const char *path, struct _stat64 *st);
-#define lstat64         win32_lstat64
 
 /* -------------------------------------------------------------- file mode */
 
