@@ -10,7 +10,7 @@
  *   - Route the handful of POSIX calls rsync makes through win32_* wrappers
  *     that dispatch on which kind of fd they were handed.
  *
- * Copyright (C) 2026 rsync CMake/Windows port.
+ * Copyright (C) 2026 Max Vilimpoc, rsync CMake/Windows port.
  * Distributed under the same GPL-3.0-or-later terms as the rest of rsync.
  */
 
