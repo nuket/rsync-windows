@@ -1,3 +1,99 @@
+RSYNC ON WINDOWS
+----------------
+
+This branch builds rsync natively on Windows with MSVC — no Cygwin, no MSYS,
+no emulation layer — and adds a CMake build that replaces autoconf on every
+platform. Push, pull, local copies, the delta algorithm, `--delete`, filters,
+batch mode and UTF-8 file names all work; daemon mode, ACLs, xattrs, devices,
+Unix ownership and link *creation* do not (see BUILD-CMAKE.md).
+
+    windows-build-and-test.bat
+
+builds it and runs the test suite. The result is a standalone `rsync.exe`
+importing only `WS2_32`, `ADVAPI32` and `KERNEL32` — all shipped with
+Windows — with the C runtime linked in and the usual exploit mitigations
+enabled (Control Flow Guard, CET shadow stack, strict `/GS`, Spectre v1
+hardening, ASLR, DEP, and a System32-only DLL search path).
+
+### The guiding constraint
+
+The shared sources contain **no `#ifdef _WIN32`**. Platform variation is
+expressed three other ways instead, so that upstream code stays readable and
+merges stay clean:
+
+1. **Platform hooks** — `rsync.h` defines a handful of macros right after
+   `#include "config.h"`, each defaulting to the POSIX behaviour. A port
+   overrides whichever it needs from a header named by
+   `RSYNC_PLATFORM_INCLUDE`; a platform that needs none changes nothing.
+2. **Stand-in headers** — `win32/include/` supplies `pwd.h`, `grp.h`,
+   `dirent.h` and friends, so shared sources include them unconditionally.
+3. **Conditional linking** — `pipe.c` and `win32/win32pipe.c` are alternative
+   implementations of one interface; exactly one is linked.
+
+### Changes to non-Windows files
+
+22 shared files change, by 380 lines — and 123 of those are a single
+`RSYNC_TLS` token added to a declaration, which expands to nothing off
+Windows. No file gains a Windows conditional.
+
+| File(s) | Change | Why |
+| --- | --- | --- |
+| `rsync.h` | +62: hook macros (`RSYNC_TLS`, `IS_ABS_PATH`, `IS_DRIVE_PATH`, `platform_init`, `platform_fix_path_args`, `close_sibling_fd`, `LOCAL_SERVER_SHARES_STATE`), each `#ifndef`-guarded with the POSIX default | the one place the port hooks into; every other shared change follows from these |
+| `pipe.c` | +51: `spawn_receiver_half()`, `receiver_half_finish()`, `inc_recurse_when_receiving`, `local_server_shares_memory` | factors the `do_recv()` fork out of `main.c` so a port can replace it wholesale |
+| `main.c` | +70/−72: `receiver_half()` extracted and de-static'd, `platform_init()` and `platform_fix_path_args()` call sites, `close_sibling_fd()`, a `SIGACTMASK` fallback where `sigaction()` is absent | the fork site and process startup |
+| `io.c` | +75/−41: `io_fork_child_fixup()` (deep-copies the protocol buffers a real fork would have duplicated), plus 38 `RSYNC_TLS` marks | the largest concentration of state the two halves diverge on |
+| `options.c` | +39/−8: `--backup`, `--no-backup`, `--append-verify`, `--no-append` moved from popt targets to `OPT_` switch codes | popt takes its target's address in a static initializer, which a thread-local cannot supply |
+| `exclude.c` | +7/−6: `local_server` → `LOCAL_SERVER_SHARES_STATE` at five sites | a local server that is a separate process must actually be *sent* the filter list; without this `--delete --exclude` deleted the excluded files |
+| `compat.c` | +9/−1: honour `inc_recurse_when_receiving` | incremental recursion needs the private address spaces `fork()` gives; threads share one heap |
+| `batch.c` | +7/−2: `batch_fd` marked `RSYNC_TLS`, with the reason | it is set to −1 at input EOF in the receiving half only; sharing it deadlocked `--read-batch` |
+| `util1.c` | +1/−1: `*dir == '/'` → `IS_ABS_PATH(dir)` | `C:\dir` is absolute too |
+| `checksum.c` `cleanup.c` `clientserver.c` `delete.c` `flist.c` `generator.c` `log.c` `match.c` `progress.c` `receiver.c` `rsync.c` `sender.c` `xattrs.c` | `RSYNC_TLS` on declarations only | state `fork()` would have made private, marked so a thread-based split gets its own copy |
+
+### Windows support files
+
+All new, all Windows-only (`win32/`, ~3,100 lines):
+
+| File | Lines | Role |
+| --- | --- | --- |
+| `win32io.c` | 711 | fd routing: CRT fds for files and pipes, pseudo-fds with a side table for Winsock sockets, and a `select()` that waits on both |
+| `win32compat.c` | 621 | `stat`/`chmod`/`rename`/`unlink`, users and groups, times, signals, `getpass` |
+| `win32compat.h` | 593 | POSIX types, `S_IS*`, open flags, the platform hooks, `struct win32_stat` (64-bit `st_ino`), and the macros routing POSIX names to `win32_*` |
+| `win32proc.c` | 301 | `CreateProcess` for `fork()`+`execvp()`, `CommandLineToArgvW` quoting, `waitpid()`/`kill()` |
+| `win32pipe.c` | 177 | replaces `pipe.c`: process plumbing and the generator/receiver split |
+| `win32harden.c` | 154 | runtime exploit mitigations — DLL search order, extension points, image-load policy |
+| `win32links.c` | 142 | records symlinks and hard links met, and lists them as the run ends |
+| `win32fork.c` | 120 | `fork()` stand-in: a thread that starts from a copy of the parent's TLS block |
+| `win32undef.h` | 113 | undoes every shim macro, so `win32/*.c` can reach the real CRT and Winsock |
+| `win32dir.c` | 111 | `opendir`/`readdir` over `FindFirstFile` |
+| `win32args.c` | 37 | the `platform_fix_path_args()` hook |
+| `win32helperstubs.c` | 21 | log-level arrays the C test helpers need |
+| `win32/include/` | 9 files | stand-ins: `pwd.h`, `grp.h`, `dirent.h`, `syslog.h`, `unistd.h`, `netinet/{in,tcp}.h`, `arpa/inet.h`, `sys/ioctl.h` |
+| `rsync.manifest`, `rsync.rc` | 37 | selects the UTF-8 active code page, embedded as a resource |
+| `win32/tests/` | 24 tests | covers what the port supports and skips what Windows cannot do; `testsuite/` is untouched |
+
+### Build files
+
+| File | Lines | Role |
+| --- | --- | --- |
+| `CMakeLists.txt` | 861 | full autoconf replacement: feature probes, generated headers, source lists, test helpers, mitigation and static-CRT options |
+| `BUILD-CMAKE.md` | 551 | build instructions, design notes, and what does not work |
+| `cmake/gen-headers.py` | 304 | Python ports of the `awk` generators (`proto.h`, `daemon-parm.h`, `help-*.h`, `default-*.h`), byte-exact against real `awk` |
+| `cmake/config.h.in` | 257 | the `config.h` template |
+| `windows-build-and-test.bat` | 289 | one-command build and test; finds MSVC via `vswhere`, so no Developer Command Prompt is needed |
+| `setup-linux.sh` | 272 | installs the build dependencies on Ubuntu 22.04 and 26.04 |
+
+Python 3.6+ is the only new hard requirement, and only because it replaces
+`awk` for header generation.
+
+### Testing
+
+The upstream suite is unchanged and still passes on Linux under both build
+systems — 103 passed / 6 skipped with autoconf, 98 passed / 2 xfailed /
+9 skipped with CMake, on Ubuntu 22.04.5 and 26.04. `win32/tests/` adds 24
+tests that pass on Windows, including push, pull and delta over ssh to a
+Linux peer.
+
+
 WHAT IS RSYNC?
 --------------
 
