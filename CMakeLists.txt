@@ -9,6 +9,9 @@
 #   cmake -B build -G Ninja
 #   cmake --build build
 #
+# Copyright (C) 2026 Max Vilimpoc, rsync CMake/Windows port.
+# Distributed under the same GPL-3.0-or-later terms as the rest of rsync.
+#
 cmake_minimum_required(VERSION 3.20)
 
 project(rsync
