@@ -118,17 +118,32 @@ def main():
             env.pop(var, None)
 
         logfile = scratch / 'test.log'
+        # A test that hangs is a failure of that test, not of the run: report
+        # it and carry on, rather than letting TimeoutExpired escape and take
+        # every remaining test with it.  rsync deadlocks are exactly the kind
+        # of bug this suite exists to catch, so this path is not theoretical.
         with open(logfile, 'w', encoding='utf-8', errors='replace') as log:
-            proc = subprocess.run([sys.executable, str(script)],
-                                  stdout=log, stderr=subprocess.STDOUT,
-                                  env=env, cwd=str(scratch), timeout=600)
+            try:
+                proc = subprocess.run([sys.executable, str(script)],
+                                      stdout=log, stderr=subprocess.STDOUT,
+                                      env=env, cwd=str(scratch), timeout=300)
+                returncode = proc.returncode
+            except subprocess.TimeoutExpired:
+                log.write('\nTIMEOUT: the test did not finish within 300s\n')
+                returncode = FAIL
+                # Whatever it was waiting on is still running; without this
+                # the scratch dir cannot be removed and the stray rsync
+                # lingers after the suite exits.
+                for stray in ('rsync.exe', 'rsync'):
+                    subprocess.run(['taskkill', '/F', '/IM', stray],
+                                   capture_output=True)
 
-        if proc.returncode == PASS:
+        if returncode == PASS:
             print(f'PASS   {name}')
             passed += 1
             if not args.keep_scratch:
                 rmtree(scratch)
-        elif proc.returncode == SKIP:
+        elif returncode == SKIP:
             reason = ''
             for line in logfile.read_text(encoding='utf-8',
                                           errors='replace').splitlines():

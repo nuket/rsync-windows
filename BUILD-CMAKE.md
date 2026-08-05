@@ -264,6 +264,19 @@ nothing.
 * ACLs, xattrs, devices and Unix ownership are compiled out; none of them map
   onto Windows. `--archive` therefore behaves like `-rt` plus permissions,
   and only the read-only bit of a file's mode is representable.
+* **`--read-batch`.** Replaying a batch has no sender, so the generator's
+  index stream loops back to the receiver through a pipe. How much of that
+  stream `recv_files()` consumes depends on incremental recursion — which
+  this port must force off while receiving, because the receiver is a thread
+  sharing the generator's heap rather than a forked process. With it off the
+  del-stats marker is left unread and the two halves wait on each other.
+  rsync refuses the option up front (`win32/win32args.c`) rather than writing
+  every file correctly and then hanging on the closing handshake, which is
+  what it did before the check was added.
+
+  **`--write-batch` and `--only-write-batch` do work**, and the batch is
+  portable: `win32/tests/test_batch.py` replays one on a Linux peer and
+  compares the result against the source.
 
 ## Design notes
 
@@ -404,32 +417,70 @@ cmake --build build --target win32-tests
 or directly, to pick individual tests:
 
 ```powershell
-python win32	estsun.py --rsync-bin buildsync.exe [TEST ...]
+python win32\tests\run.py --rsync-bin build\rsync.exe [TEST ...]
 ```
 
 Set `RSYNC_WIN_TEST_HOST=user@host` (key-based login, rsync installed) to
-include the ssh push/pull tests; they skip without it. All 12 currently
-pass.
+include the ssh tests; they skip without it. All 23 currently pass.
+
+Platform behaviour -- the part `testsuite/` could not reach even in principle:
 
 | Test | Covers |
 | --- | --- |
-| `wildmatch` | rsync's own wildmatch unit test, all 12 option sets |
-| `unsafe_symlink` | rsync's own `unsafe_symlink()` unit test, plus a drive-letter case |
 | `basics` | `--version`/`--help`, 64-bit capabilities, exact sizes, `-t` mtimes |
+| `paths` | drive letters, backslashes, trailing slashes, `h:relative` |
+| `filenames` | Unicode, spaces and shell metacharacters through the narrow API |
 | `local_copy` | local copy, incremental no-op, `--delete` |
 | `delete_exclude` | `--delete` must not delete what `--exclude` protects |
-| `delta` | block matching, and byte-exactness after a delta |
-| `filenames` | Unicode, spaces and shell metacharacters |
-| `paths` | drive letters, backslashes, trailing slashes, `h:relative` |
 | `links_reported` | links followed and copied as plain files, and listed at the end |
-| `inplace_append` | `--inplace` (including truncation) and `--append` |
-| `options` | `--remove-source-files`, `--dry-run`, filters, `-z`, `--backup` |
 | `remote` | push, pull and delta over ssh |
 
-The first two are rsync's own unit tests: `wildmatch()` and
-`unsafe_symlink()` are pure string and path arithmetic, so the upstream
-helpers run unmodified. CMake builds all of `Makefile.in`'s `CHECK_PROGS`,
-so `runtests.py` on a Unix host can use a CMake build tree too.
+Ordinary rsync behaviour, ported from the equivalent `testsuite/` tests:
+
+| Test | Covers | Upstream equivalent |
+| --- | --- | --- |
+| `helpers` | `secure_relative_open()` path validation, `trimslash` | `secure-relpath-validation`, `trimslash` |
+| `filters` | `--filter`, dir-merge, `-F`/`-F -F`, `--exclude-from`, `-C`, `--max-size`/`--min-size`, `-m` | `exclude`, `merge`, `filter-depth`, `cvs-exclude`, `size-filter`, `prune-empty-dirs` |
+| `files_from` | `--files-from` incl. implied `--relative`, `-0`, stdin, `--delete` | `files-from`, `files-from-depth` |
+| `relative` | `-R`, `./` cut points, `--no-implied-dirs`, `-d`, `--mkpath`, dedupe, missing args | `relative`, `relative-implied`, `dirs`, `mkpath`, `duplicates`, `missing` |
+| `transfer_control` | `--temp-dir`, `--partial-dir`, `--delay-updates`, `--update`, `--sparse` | `temp-dir`, `partial`, `delay-updates`, `update`, `sparse` |
+| `altdest` | `--compare-dest`, `--copy-dest` | `alt-dest`, `alt-dest-deep` |
+| `backup` | `--backup-dir` at depth, `--suffix`, backup-on-delete | `backup`, `backup-deep` |
+| `itemize` | `-i` change strings, `--out-format`, `--stats`, `--info`, `-q` | `itemize`, `output-options` |
+| `fuzzy` | `--fuzzy` basis selection, and a repetitive delta basis | `fuzzy`, `fuzzy-basis`, `hashsearch-chain` |
+| `compress` | `--compress-choice`, `--compress-level`, `--skip-compress` | `compress-options` |
+| `batch` | `--write-batch`, `--only-write-batch`, replay on a Linux peer | `batch-mode` |
+| `delta` | block matching, and byte-exactness after a delta | `hands` |
+| `inplace_append` | `--inplace` (including truncation) and `--append` | `inplace`, `append` |
+| `options` | `--remove-source-files`, `--dry-run`, filters, `-z`, `--backup` | assorted |
+| `wildmatch` | rsync's own wildmatch unit test, all 12 option sets | `wildmatch` |
+| `unsafe_symlink` | rsync's own `unsafe_symlink()` unit test, plus a drive-letter case | `unsafe-links` |
+
+`wildmatch`, `unsafe_symlink` and `helpers` drive rsync's own C unit tests:
+`wildmatch()`, `unsafe_symlink()`, `secure_relative_open()` and `trimslash`
+are pure string and path arithmetic, so the upstream helpers run unmodified.
+CMake builds all of `Makefile.in`'s `CHECK_PROGS`, so `runtests.py` on a Unix
+host can use a CMake build tree too.
+
+`t_chmod_secure` is built but not driven: every one of its cases either
+builds a parent symlink that escapes the tree or checks that a legitimate one
+still resolves, and a build without symlink support cannot set any of that up.
+
+Two upstream assertions do not carry over, and the tests here say so rather
+than quietly weakening:
+
+* The upstream `fuzzy` test proves the basis was chosen by looking for
+  `--debug=FUZZY` output. For a local copy this port re-execs itself as
+  `--server` instead of forking, and `server_options()` forwards `--info` but
+  not `--debug` -- so a debug level a forked generator would have inherited in
+  memory never reaches ours. `test_fuzzy.py` asserts on `--stats`
+  matched-versus-literal bytes instead, which is the stronger claim: it shows
+  the basis was not merely found but actually used.
+* The upstream `partial` test interrupts a transfer with a signal to leave a
+  partial file behind. `TerminateProcess` gives rsync no chance to run the
+  cleanup handler that moves the partial into place, so
+  `test_transfer_control.py` exercises the resume path from the other end: it
+  plants a partial and checks the generator adopts and consumes it.
 
 ### Manual verification
 
