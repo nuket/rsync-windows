@@ -185,6 +185,9 @@ pid_t local_child(int argc, char **argv, int *f_in, int *f_out,
  * so they can. */
 int inc_recurse_when_receiving = 1;
 
+/* local_child() forks, so the local server inherits our parsed state. */
+int local_server_shares_memory = 1;
+
 /* Split do_recv() into a generator and a receiver.  Returns the receiver's
  * pid to the generator; in the receiver it runs receiver_half() and never
  * returns.  Windows supplies its own version of this file. */

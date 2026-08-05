@@ -394,6 +394,15 @@ enum delret {
 #define close_sibling_fd(fd) close(fd)
 #endif
 
+/* True when the server for a local copy inherited our parsed state, so
+ * things it already holds -- the filter list, the exact shape of a
+ * MSG_SUCCESS -- need not be transmitted.  local_child() forks on POSIX, so
+ * it does; a port that starts a separate process for it instead clears
+ * local_server_shares_memory, and those exchanges then happen over the pipe
+ * exactly as they would with a remote peer.  Both sides evaluate this the
+ * same way, which is what keeps the two ends of the protocol in step. */
+#define LOCAL_SERVER_SHARES_STATE (local_server && local_server_shares_memory)
+
 /* The default RSYNC_RSH is always set in config.h. */
 
 #include <stdio.h>
