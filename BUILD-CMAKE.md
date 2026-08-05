@@ -64,14 +64,22 @@ OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
 * Names containing spaces, quotes and shell metacharacters.
 * **Local-to-local copies** (`rsync -rt C:\a\ D:\b\`), including `--delete`,
   `--exclude` and `--remove-source-files`.
+* **Symlinks** (`-l`). Reading always works, including of directory
+  junctions. *Creating* one needs Developer Mode or the
+  SeCreateSymbolicLinkPrivilege — without either, Windows refuses, and rsync
+  reports the `EPERM` per link and finishes the rest of the transfer.
 
 ## What does not work
 
 * **Daemon mode** (`--daemon`, `rsync://`), which needs `fork()`, `chroot()`
   and Unix users.
-* Symlinks, hard links, ACLs, xattrs, devices and Unix ownership are compiled
-  out. `--archive` therefore behaves like `-rt` plus permissions; use `-rt`
-  to be explicit. Only the read-only bit of a file's mode is representable.
+* **Hard links** (`-H`). `CreateHardLink` itself is fine, but MSVC's
+  `struct _stat64` stores `st_ino` in 16 bits — far too few for an NTFS file
+  index. rsync would see collisions and hard-link unrelated files, so this
+  stays off until `STRUCT_STAT` is widened.
+* ACLs, xattrs, devices and Unix ownership are compiled out; none of them map
+  onto Windows. `--archive` therefore behaves like `-rlt` plus permissions,
+  and only the read-only bit of a file's mode is representable.
 
 ## Design notes
 
@@ -207,6 +215,8 @@ Against an Ubuntu 22.04 host running rsync 3.2.7 (protocol 31), over ssh:
   deletions, verified against the remote's own manifest each round.
 * Five repeated pulls with and without `-z`, all byte-exact.
 * Unicode, spaces and shell metacharacters in file names.
+* A symlink read back with its stored target (not the resolved path) and
+  pushed to Linux verbatim.
 * Local-to-local copy of a 457-file tree, byte-for-byte identical to the
   source; `--delete --exclude` correctly spares the excluded files;
   `--remove-source-files` empties the source.

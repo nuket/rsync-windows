@@ -258,6 +258,10 @@ if(WIN32)
     set(HAVE_GETPASS 1)
     # win32/include supplies these, so rsync.h can include them plainly.
     set(HAVE_DIRENT_H 1)
+    # Symlinks: reparse points, read back with FSCTL_GET_REPARSE_POINT.
+    # Creating one needs Developer Mode or SeCreateSymbolicLinkPrivilege;
+    # without either, rsync reports the EPERM per link and carries on.
+    set(HAVE_READLINK 1)
 else()
     check_function_exists(setmode HAVE_SETMODE)
 endif()
