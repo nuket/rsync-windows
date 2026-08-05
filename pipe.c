@@ -54,6 +54,18 @@ pid_t piped_child(char **command, int *f_in, int *f_out)
 	if (DEBUG_GTE(CMD, 1))
 		print_child_argv("opening connection using:", command);
 
+#ifdef _WIN32
+	/* Windows has no fork(); CreateProcess does the pipe setup and the
+	 * exec in one step.  See win32/win32proc.c. */
+	pid = win32_piped_child(command, f_in, f_out);
+	if (pid == -1) {
+		rsyserr(FERROR, errno, "Failed to exec %s", command[0]);
+		exit_cleanup(RERR_IPC);
+	}
+	set_blocking(*f_out);
+	return pid;
+#else
+
 	if (fd_pair(to_child_pipe) < 0 || fd_pair(from_child_pipe) < 0) {
 		rsyserr(FERROR, errno, "pipe");
 		exit_cleanup(RERR_IPC);
@@ -94,6 +106,7 @@ pid_t piped_child(char **command, int *f_in, int *f_out)
 	*f_out = to_child_pipe[1];
 
 	return pid;
+#endif
 }
 
 /* This function forks a child which calls child_main().  First,
@@ -115,6 +128,17 @@ pid_t local_child(int argc, char **argv, int *f_in, int *f_out,
 
 	/* The parent process is always the sender for a local rsync. */
 	assert(am_sender);
+
+#ifdef _WIN32
+	/* A local (non-remote) copy needs a forked in-process server, which we
+	 * can't emulate.  Remote transfers go through piped_child() instead. */
+	(void)argc; (void)argv; (void)f_in; (void)f_out; (void)child_main;
+	(void)to_child_pipe; (void)from_child_pipe; (void)pid;
+	rprintf(FERROR, "Local (non-remote) copies are not supported on Windows.\n"
+			"Use a remote source or destination, e.g. user@host:/path\n");
+	exit_cleanup(RERR_UNSUPPORTED);
+	return -1;
+#else
 
 	if (fd_pair(to_child_pipe) < 0 || fd_pair(from_child_pipe) < 0) {
 		rsyserr(FERROR, errno, "pipe");
@@ -175,4 +199,5 @@ pid_t local_child(int argc, char **argv, int *f_in, int *f_out,
 	*f_out = to_child_pipe[1];
 
 	return pid;
+#endif
 }

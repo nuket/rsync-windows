@@ -12,7 +12,9 @@
 
 #define        POPT_USE_TIOCGWINSZ
 #ifdef POPT_USE_TIOCGWINSZ
+#ifndef _WIN32
 #include <sys/ioctl.h>
+#endif
 #endif
 
 #ifdef HAVE_MBSRTOWCS
