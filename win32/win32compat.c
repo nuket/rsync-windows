@@ -39,6 +39,28 @@ int win32_no_fork(void)
 	return -1;
 }
 
+/*
+ * rsync splits and rebuilds paths around '/', so translate the user's
+ * backslashes once, here, for the local (non-remote) operands only -- a
+ * remote spec's path belongs to the peer and is left untouched.  Called from
+ * main() via the platform_fix_path_args() hook once popt has consumed the
+ * options and argv holds just the path operands.
+ */
+void win32_fix_path_args(int argc, char *argv[])
+{
+	int i;
+
+	for (i = 0; i < argc; i++) {
+		char *host = NULL;
+		int port = 0;
+
+		if (!check_for_hostspec(argv[i], &host, &port))
+			win32_normalize_path(argv[i]);
+		if (host)
+			free(host);
+	}
+}
+
 void win32_normalize_path(char *path)
 {
 	char *p;

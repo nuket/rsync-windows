@@ -3126,29 +3126,19 @@ static char *parse_hostspec(char *str, char **path_start_ptr, int *port_ptr)
  * 0.  The return value is a pointer to the PATH.  Note that the HOST spec can
  * be an IPv6 literal address enclosed in '[' and ']' (such as "[::1]" or
  * "[::ffff:127.0.0.1]") which is returned without the '[' and ']'. */
-#ifdef _WIN32
-/* "C:\dir" and "C:/dir" are local drive paths, not HOST:PATH specs.  We only
- * claim the single-letter-plus-separator form so that a genuine one-character
- * hostname with a relative path ("h:sub/dir") still works. */
-static int is_drive_path(const char *s)
-{
-	return isalpha((uchar)s[0]) && s[1] == ':'
-	    && (s[2] == '\\' || s[2] == '/' || s[2] == '\0');
-}
-#endif
-
 char *check_for_hostspec(char *s, char **host_ptr, int *port_ptr)
 {
 	char *path;
 
-#ifdef _WIN32
-	if (is_drive_path(s)) {
+	/* A local path that a port spells with a colon (a Windows drive, say)
+	 * must not be read as HOST:PATH.  Always false unless the platform
+	 * header says otherwise. */
+	if (IS_DRIVE_PATH(s)) {
 		*host_ptr = NULL;
 		if (port_ptr)
 			*port_ptr = 0;
 		return NULL;
 	}
-#endif
 
 	if (port_ptr && strncasecmp(URL_PREFIX, s, strlen(URL_PREFIX)) == 0) {
 		*host_ptr = parse_hostspec(s + strlen(URL_PREFIX), &path, port_ptr);

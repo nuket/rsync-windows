@@ -9,6 +9,9 @@ cmake -B build -G Ninja
 cmake --build build
 ```
 
+On Ubuntu, `./setup-linux.sh` installs everything either build system
+needs (tested on 22.04.5 and 26.04).
+
 The only hard requirement beyond a C compiler is **Python 3.6+**, which
 replaces `awk` for generating `proto.h`, `daemon-parm.h`, `help-*.h` and
 `default-*.h` (see `cmake/gen-headers.py`). Those generators are byte-exact
@@ -37,8 +40,8 @@ with the same meaning as the corresponding `configure` options.
 # The Windows port
 
 Built and tested with **MSVC 2022 (x64) + Ninja** on Windows 10. The
-compatibility layer lives entirely in `win32/`; changes to the shared sources
-are small and `#ifdef _WIN32`-guarded.
+compatibility layer lives entirely in `win32/`; the shared sources carry no
+`#ifdef _WIN32` at all (see Design notes).
 
 ```powershell
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -74,15 +77,51 @@ OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
 
 ## Design notes
 
+The shared sources contain **no `#ifdef _WIN32`**. (Two such conditionals
+exist in `options.c` and `rsync.h`, but both predate this port and belong to
+upstream.) The platform variation is expressed three other ways instead.
+
+**1. Stand-in headers.** `win32/include/` holds `pwd.h`, `grp.h`, `dirent.h`,
+`syslog.h`, `unistd.h`, `netinet/in.h`, `netinet/tcp.h`, `arpa/inet.h` and
+`sys/ioctl.h`. Each just pulls in `win32compat.h`, which already defines what
+rsync uses from them. That directory goes on the include path only on
+Windows, so `rsync.h`, `socket.c` and popt include those headers
+unconditionally, exactly as upstream wrote them.
+
+**2. Platform hooks.** `rsync.h` defines a handful of macros right after it
+includes `config.h`, each defaulting to the POSIX behaviour:
+
+| Hook | Default | Windows |
+| --- | --- | --- |
+| `RSYNC_TLS` | *(empty)* | `__declspec(thread)` |
+| `IS_ABS_PATH(p)` | leading `/` | also `C:/` and `C:\` |
+| `IS_DRIVE_PATH(s)` | always false | `C:\dir` is a drive, not `HOST:PATH` |
+| `platform_init()` | no-op | Winsock, binary stdio, UTF-8 |
+| `platform_fix_path_args()` | no-op | translate `\` in local operands |
+| `close_sibling_fd(fd)` | `close(fd)` | no-op (threads share one fd table) |
+
+A port overrides whichever it needs from a header named by
+`RSYNC_PLATFORM_INCLUDE` in `cmake/config.h.in`; a target that needs none of
+them changes nothing.
+
+**3. Conditional linking.** `pipe.c` and `win32/win32pipe.c` are alternative
+implementations of the same interface — `piped_child()`, `local_child()`,
+`spawn_receiver_half()`, `receiver_half_finish()` and
+`inc_recurse_when_receiving` — and exactly one is linked. Everything that
+differs about process handling lives in whole, readable functions in one file
+or the other, rather than interleaved.
+
 | File | Responsibility |
 | --- | --- |
-| `win32/win32compat.h` | POSIX types, `S_IS*`, open flags, and the macros that route POSIX calls to `win32_*` wrappers. Pulled in by `config.h`, so it is visible tree-wide. |
+| `win32/win32compat.h` | POSIX types, `S_IS*`, open flags, the platform hooks, and the macros that route POSIX calls to `win32_*` wrappers. Pulled in by `config.h`, so it is visible tree-wide. |
 | `win32/win32undef.h` | Undoes those macros. Every `win32/*.c` includes it so the shims can reach the real CRT/Winsock functions. |
 | `win32/win32io.c` | fd routing. CRT fds serve files and pipes; sockets get pseudo-fds above `WIN32_SOCK_BASE` with a side table, because Winsock `SOCKET`s are not CRT fds. |
 | `win32/win32proc.c` | `CreateProcess` in place of `fork()`+`execvp()` for the ssh child, plus `waitpid()`/`kill()`. |
 | `win32/win32dir.c` | `opendir`/`readdir` over `FindFirstFile`. |
 | `win32/win32compat.c` | stat/link/attribute/time calls, users and groups, `getpass`, signal filtering. |
 | `win32/win32fork.c` | `fork()` stand-in for the generator/receiver split (below). |
+| `win32/win32pipe.c` | Replaces `pipe.c`: process plumbing and the split. |
+| `win32/include/` | Stand-ins for headers MSVC lacks. |
 | `win32/rsync.manifest` | Selects the UTF-8 active code page. |
 
 ### The generator/receiver split
@@ -149,7 +188,8 @@ Against an Ubuntu 22.04 host running rsync 3.2.7 (protocol 31), over ssh:
 * Unicode, spaces and shell metacharacters in file names.
 
 The `RSYNC_TLS` changes are inert off Windows, and the CMake-built binary
-still passes rsync's own test suite on Linux (104 passed, 9 skipped).
+still passes rsync's own test suite there: on both Ubuntu 22.04.5 and
+26.04, 108 passed, 5 skipped, 0 failures.
 
 ## Known rough edges
 

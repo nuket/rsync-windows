@@ -245,10 +245,10 @@
 #cmakedefine ICONV_CONST @ICONV_CONST@
 #cmakedefine ICONV_OPTION @ICONV_OPTION@
 
-/* Windows builds pull in the POSIX shim layer here, before rsync.h starts
- * including system headers. */
-#ifdef _WIN32
-#include "win32/win32compat.h"
-#endif
+/* A port's compatibility header, pulled in before rsync.h starts including
+ * system headers so that it can also override the platform hooks that
+ * rsync.h defaults just below its own #include of this file.  Empty when the
+ * target needs no such layer. */
+@RSYNC_PLATFORM_INCLUDE@
 
 #endif /* RSYNC_CONFIG_H */

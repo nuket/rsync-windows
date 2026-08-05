@@ -50,9 +50,16 @@ set(RSYNC_RSH       "ssh"   CACHE STRING "Default remote shell")
 set(NOBODY_USER     "nobody" CACHE STRING "Unprivileged user for the daemon")
 set(NOBODY_GROUP    "nogroup" CACHE STRING "Unprivileged group for the daemon")
 
+set(RSYNC_PLATFORM_INCLUDE "")
+set(RSYNC_PLATFORM_INCLUDE_DIR "")
+
 if(WIN32)
     set(RSYNCD_SYSCONF  "rsyncd.conf")
     set(POPT_SYSCONFDIR ".")
+    set(RSYNC_PLATFORM_INCLUDE "#include \"win32/win32compat.h\"")
+    # Shim headers (pwd.h, dirent.h, syslog.h, ...) so the shared sources
+    # can include them unconditionally.
+    set(RSYNC_PLATFORM_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/win32/include")
 else()
     set(RSYNCD_SYSCONF  "/etc/rsyncd.conf")
     set(POPT_SYSCONFDIR "/etc")
@@ -249,6 +256,8 @@ if(WIN32)
     # win32compat.c implements getpass() with the console API, so the
     # termios-based lib/getpass.c is not needed.
     set(HAVE_GETPASS 1)
+    # win32/include supplies these, so rsync.h can include them plainly.
+    set(HAVE_DIRENT_H 1)
 else()
     check_function_exists(setmode HAVE_SETMODE)
 endif()
@@ -514,7 +523,7 @@ foreach(r 0 1 3)
         SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/rounding.c"
         COMPILE_DEFINITIONS "-DEXTRA_ROUNDING=${r}"
         C_STANDARD 99
-        CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${GEN_DIR};${CMAKE_CURRENT_SOURCE_DIR}"
+        CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${GEN_DIR};${CMAKE_CURRENT_SOURCE_DIR};${RSYNC_PLATFORM_INCLUDE_DIR}"
         OUTPUT_VARIABLE ROUNDING_OUTPUT)
     if(ROUNDING_OK)
         file(WRITE "${GEN_DIR}/rounding.h" "#define EXTRA_ROUNDING ${r}\n")
@@ -539,7 +548,7 @@ set(RSYNC_SOURCES
     backup.c delete.c
     options.c io.c compat.c hlink.c token.c uidlist.c socket.c hashtable.c
     usage.c fileio.c batch.c clientname.c chmod.c acls.c xattrs.c
-    progress.c pipe.c
+    progress.c
     params.c loadparm.c clientserver.c access.c connection.c authenticate.c)
 
 set(RSYNC_LIB_SOURCES
@@ -567,6 +576,15 @@ set(ZLIB_SOURCES
     zlib/deflate.c zlib/inffast.c zlib/inflate.c zlib/inftrees.c
     zlib/trees.c zlib/zutil.c zlib/adler32.c zlib/compress.c zlib/crc32.c)
 
+# pipe.c and win32/win32pipe.c are alternative implementations of the same
+# interface (process plumbing + the generator/receiver split), so exactly
+# one of them is linked.
+if(WIN32)
+    list(APPEND RSYNC_SOURCES win32/win32pipe.c)
+else()
+    list(APPEND RSYNC_SOURCES pipe.c)
+endif()
+
 set(RSYNC_ALL_SOURCES ${RSYNC_SOURCES} ${RSYNC_LIB_SOURCES} ${POPT_SOURCES})
 if(NOT RSYNC_EXTERNAL_ZLIB)
     list(APPEND RSYNC_ALL_SOURCES ${ZLIB_SOURCES})
@@ -579,6 +597,7 @@ if(WIN32)
         win32/win32io.c
         win32/win32dir.c
         win32/win32fork.c)
+
 endif()
 
 if(RSYNC_ENABLE_SIMD AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
@@ -591,6 +610,7 @@ endif()
 add_executable(rsync ${RSYNC_ALL_SOURCES})
 
 target_include_directories(rsync PRIVATE
+    "${RSYNC_PLATFORM_INCLUDE_DIR}"   # a port's stand-ins for missing headers
     "${GEN_DIR}"                      # -I. : generated headers win
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/popt")
