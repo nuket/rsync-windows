@@ -44,6 +44,18 @@ compatibility layer lives entirely in `win32/`; the shared sources carry no
 `#ifdef _WIN32` at all (see Design notes).
 
 ```powershell
+windows-build-and-test.bat
+```
+
+That finds the MSVC toolchain with `vswhere` (so no Developer Command Prompt
+is needed), configures, builds, and runs the test suite. Useful options:
+`--clean`, `--config Debug`, `--build-dir DIR`, `--no-tests`,
+`--tests PATTERN`, and `--host USER@HOST` to include the ssh transfer tests.
+It exits 0 on success, 1 on failure, 2 on a usage error.
+
+Or drive CMake directly:
+
+```powershell
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 .\build\rsync.exe --version
