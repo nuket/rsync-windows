@@ -32,7 +32,7 @@ extern int use_qsort;
 extern int allow_inc_recurse;
 extern int inc_recurse_when_receiving;
 extern int preallocate_files;
-extern int append_mode;
+extern RSYNC_TLS int append_mode;
 extern int fuzzy_basis;
 extern int read_batch;
 extern int write_batch;

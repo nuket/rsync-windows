@@ -23,7 +23,7 @@
 #include "inums.h"
 
 extern int checksum_seed;
-extern int append_mode;
+extern RSYNC_TLS int append_mode;
 
 extern struct name_num_item *xfer_sum_nni;
 extern int xfer_sum_len;
