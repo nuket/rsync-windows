@@ -429,7 +429,7 @@ static const char *bytes_per_sec_human_dnum(void)
 	return human_dnum((total_written + total_read) / (0.5 + (endtime - starttime)), 2);
 }
 
-static void output_summary(void)
+void output_summary(void)
 {
 	if (INFO_GTE(STATS, 2)) {
 		rprintf(FCLIENT, "\n");
@@ -908,7 +908,7 @@ static void check_alt_basis_dirs(void)
 }
 
 /* This is only called by the sender. */
-static void read_final_goodbye(int f_in, int f_out)
+void read_final_goodbye(int f_in, int f_out)
 {
 	int i, iflags, xlen;
 	uchar fnamecmp_type;
@@ -1003,29 +1003,22 @@ static void do_server_sender(int f_in, int f_out, int argc, char *argv[])
 }
 
 /* The receiving half of do_recv(), which runs concurrently with the
- * generator.  Under fork() this is the child and it never returns; on
- * Windows it is a thread body (see win32_fork_thread) and it does return,
- * because a thread cannot _exit() without taking the generator with it. */
-static void receiver_half(int f_in, int f_out, char *local_name,
-			  int error_pipe_r, int error_pipe_w)
+ * generator.  spawn_receiver_half() decides how the two are split -- a
+ * forked child on POSIX, a thread on Windows -- and receiver_half_finish()
+ * ends this half the way that split requires.  Both live in pipe.c, or in
+ * its platform counterpart. */
+void receiver_half(int f_in, int f_out, char *local_name,
+		   int error_pipe_r, int error_pipe_w)
 {
 	am_receiver = 1;
 	send_msgs_to_gen = am_server;
 
-#ifdef _WIN32
-	/* Threads share one fd table, so closing the generator's ends here
-	 * would close them for the generator too. */
-	(void)error_pipe_r;
-#else
-	close(error_pipe_r);
-#endif
+	close_sibling_fd(error_pipe_r);
 
 	/* We can't let two processes write to the socket at one time. */
 	io_end_multiplex_out(MPLX_SWITCHING);
-#ifndef _WIN32
 	if (f_in != f_out)
-		close(f_out);
-#endif
+		close_sibling_fd(f_out);
 	sock_f_out = -1;
 	f_out = error_pipe_w;
 
@@ -1048,72 +1041,8 @@ static void receiver_half(int f_in, int f_out, char *local_name,
 	send_msg(MSG_STATS, (char*)&stats.total_read, sizeof stats.total_read, 0);
 	io_flush(FULL_FLUSH);
 
-#ifdef _WIN32
-	/* The generator is still waiting for one more MSG_DONE, which the
-	 * protocol-31 half of read_final_goodbye() emits.  Do that exchange,
-	 * then return: the Unix code goes on to block in read_ndx_and_attrs()
-	 * until SIGUSR2 arrives, and a thread has no such signal.  Returning
-	 * lets the generator's wait_process() collect this half instead. */
-	if (protocol_version >= 29) {
-		uchar fnamecmp_type;
-		char xname[MAXPATHLEN];
-		int iflags, xlen, i;
-
-		kluge_around_eof = -1;
-		shutting_down = True;
-
-		i = read_ndx_and_attrs(f_in, f_out, &iflags, &fnamecmp_type,
-				       xname, &xlen);
-		if (protocol_version >= 31 && i == NDX_DONE)
-			write_int(f_out, NDX_DONE);
-		io_flush(FULL_FLUSH);
-	}
-
-	/* The Unix receiver prints this from sigusr2_handler(), because the
-	 * transfer counters live in this half, not the generator's. */
-	if (!am_server)
-		output_summary();
-	return;
-#else
-	/* Handle any keep-alive packets from the post-processing work
-	 * that the generator does. */
-	if (protocol_version >= 29) {
-		kluge_around_eof = -1;
-
-		/* This should only get stopped via a USR2 signal. */
-		read_final_goodbye(f_in, f_out);
-
-		rprintf(FERROR, "Invalid packet at end of run [%s]\n",
-			who_am_i());
-		exit_cleanup(RERR_PROTOCOL);
-	}
-
-	/* Finally, we go to sleep until our parent tells us to wrap up
-	 * with a USR2 signal.  We sleep for a short time, as on some OSes
-	 * a signal won't interrupt a sleep, then act on the flag the
-	 * (async-signal-safe) handler set. */
-	while (!got_sigusr2)
-		msleep(20);
-	receive_sigusr2();
-#endif
+	receiver_half_finish(f_in, f_out);
 }
-
-#ifdef _WIN32
-/* Thin adapter so win32_fork_thread() can start receiver_half(). */
-struct recv_half_args {
-	int f_in, f_out;
-	char *local_name;
-	int error_pipe_r, error_pipe_w;
-};
-
-static void receiver_half_entry(void *arg)
-{
-	struct recv_half_args *a = (struct recv_half_args *)arg;
-
-	receiver_half(a->f_in, a->f_out, a->local_name,
-		      a->error_pipe_r, a->error_pipe_w);
-}
-#endif
 
 static int do_recv(int f_in, int f_out, char *local_name)
 {
@@ -1177,35 +1106,12 @@ static int do_recv(int f_in, int f_out, char *local_name)
 
 	io_flush(FULL_FLUSH);
 
-#ifdef _WIN32
-	/* No fork() here: the receiver runs as a thread that inherits a copy of
-	 * this thread's divergent state (see RSYNC_TLS and win32_fork_thread).
-	 * Because threads share one fd table, the hand-off must not close the
-	 * sibling's ends of the pipes the way the forked version does. */
-	{
-		static struct recv_half_args rha;
-
-		rha.f_in = f_in;
-		rha.f_out = f_out;
-		rha.local_name = local_name;
-		rha.error_pipe_r = error_pipe[0];
-		rha.error_pipe_w = error_pipe[1];
-
-		pid = win32_fork_thread(receiver_half_entry, &rha);
-		if (pid == -1) {
-			rsyserr(FERROR, errno, "failed to start receiver thread in do_recv");
-			exit_cleanup(RERR_IPC);
-		}
-	}
-#else
-	if ((pid = do_fork()) == -1) {
-		rsyserr(FERROR, errno, "fork failed in do_recv");
+	pid = spawn_receiver_half(f_in, f_out, local_name,
+				  error_pipe[0], error_pipe[1]);
+	if (pid == -1) {
+		rsyserr(FERROR, errno, "failed to start the receiver in do_recv");
 		exit_cleanup(RERR_IPC);
 	}
-
-	if (pid == 0)
-		receiver_half(f_in, f_out, local_name, error_pipe[0], error_pipe[1]);
-#endif
 
 	am_generator = 1;
 	implied_filter_list.head = implied_filter_list.tail = NULL;
@@ -1215,12 +1121,9 @@ static int do_recv(int f_in, int f_out, char *local_name)
 	if (write_batch && !am_server)
 		stop_write_batch();
 
-#ifndef _WIN32
-	/* Shared fd table under threads -- see receiver_half(). */
-	close(error_pipe[1]);
+	close_sibling_fd(error_pipe[1]);
 	if (f_in != f_out)
-		close(f_in);
-#endif
+		close_sibling_fd(f_in);
 	sock_f_in = -1;
 	f_in = error_pipe[0];
 
@@ -1903,9 +1806,7 @@ int main(int argc,char *argv[])
 	raw_argc = argc;
 	raw_argv = argv;
 
-#ifdef _WIN32
-	win32_init();	/* Winsock startup + binary stdio */
-#endif
+	platform_init();
 	raise_fd_limit();
 
 #ifdef HAVE_SIGACTION
@@ -1977,22 +1878,7 @@ int main(int argc,char *argv[])
 		option_error();
 		exit_cleanup(RERR_SYNTAX);
 	}
-#ifdef _WIN32
-	/* rsync splits and rebuilds paths around '/', so translate the user's
-	 * backslashes once, here, for the local (non-remote) operands only --
-	 * a remote spec's path belongs to the peer and is left untouched. */
-	{
-		int i;
-		for (i = 0; i < argc; i++) {
-			char *host = NULL;
-			int port = 0;
-			if (!check_for_hostspec(argv[i], &host, &port))
-				win32_normalize_path(argv[i]);
-			if (host)
-				free(host);
-		}
-	}
-#endif
+	platform_fix_path_args(argc, argv);
 
 	if (write_batch
 	 && poptDupArgv(argc, (const char **)argv, &cooked_argc, (const char ***)&cooked_argv) != 0)

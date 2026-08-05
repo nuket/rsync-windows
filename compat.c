@@ -30,6 +30,7 @@ extern int inplace;
 extern int recurse;
 extern int use_qsort;
 extern int allow_inc_recurse;
+extern int inc_recurse_when_receiving;
 extern int preallocate_files;
 extern int append_mode;
 extern int fuzzy_basis;
@@ -169,17 +170,12 @@ void set_allow_inc_recurse(void)
 		client_info = *buf ? strdup(buf+1) : ""; /* The +1 skips the leading "e". */
 	}
 
-#ifdef _WIN32
-	/* On Windows the receiving side's generator/receiver split is two
-	 * threads of one process rather than two processes (see win32fork.c),
-	 * so the halves share one heap.  Incremental recursion has each half
-	 * independently parse and append file-list chunks after the split,
-	 * which under fork() lands in two private address spaces but here
-	 * would collide in one.  Building the whole list before the split
-	 * avoids that entirely, at the cost of a slower start on huge trees. */
-	if (!am_sender)
+	/* Incremental recursion has the generator and the receiver each parse
+	 * and append file-list chunks after do_recv() splits them, which needs
+	 * the private address spaces that fork() provides.  A port that splits
+	 * with threads instead clears this. */
+	if (!am_sender && !inc_recurse_when_receiving)
 		allow_inc_recurse = 0;
-#endif
 
 	if (!recurse || use_qsort)
 		allow_inc_recurse = 0;

@@ -338,28 +338,6 @@ enum delret {
 #define MKP_DROP_NAME		(1<<0) /* drop trailing filename or trailing slash */
 #define MKP_SKIP_SLASH		(1<<1) /* skip one or more leading slashes */
 
-/* State that diverges between the generator and the receiver after the fork
- * in do_recv().  On Windows there is no fork(), so the receiver runs as a
- * thread and these live in thread-local storage; win32_fork_thread() seeds
- * the new thread's TLS block from the parent's, giving fork-like semantics.
- * Everywhere else this expands to nothing and the variables stay ordinary
- * globals, exactly as before. */
-#ifdef _WIN32
-#define RSYNC_TLS __declspec(thread)
-#else
-#define RSYNC_TLS
-#endif
-
-/* Is this local path absolute?  On Windows a leading drive letter counts,
- * e.g. "C:/dir" and "C:\dir" as well as the usual "/dir". */
-#ifdef _WIN32
-#define IS_ABS_PATH(p) ((p)[0] == '/' \
-			|| (isalpha((uchar)(p)[0]) && (p)[1] == ':' \
-			    && ((p)[2] == '/' || (p)[2] == '\\')))
-#else
-#define IS_ABS_PATH(p) ((p)[0] == '/')
-#endif
-
 /* Defines for maybe_send_keepalive() */
 #define MSK_ALLOW_FLUSH 	(1<<0)
 #define MSK_ACTIVE_RECEIVER 	(1<<1)
@@ -367,6 +345,54 @@ enum delret {
 #include "errcode.h"
 
 #include "config.h"
+
+/* ---- platform hooks ------------------------------------------------------
+ *
+ * A port supplies a header via config.h (see cmake/config.h.in) and overrides
+ * whichever of these it needs; the defaults below are the POSIX behaviour, so
+ * a platform that needs none of them changes nothing.  Keeping the variation
+ * here rather than as #ifdefs at each use site is what lets the rest of the
+ * tree stay platform-agnostic.  The Windows port defines all of these in
+ * win32/win32compat.h.
+ */
+
+/* Storage class for state that diverges between the generator and the
+ * receiver after do_recv() splits them.  Where that split is a fork() the
+ * two halves get separate address spaces and this is empty; a port that
+ * splits with threads instead makes it thread-local. */
+#ifndef RSYNC_TLS
+#define RSYNC_TLS
+#endif
+
+/* Is this local path absolute? */
+#ifndef IS_ABS_PATH
+#define IS_ABS_PATH(p) ((p)[0] == '/')
+#endif
+
+/* Does this argument name a local path that must not be mistaken for a
+ * HOST:PATH spec?  (On Windows, "C:\dir" is a drive, not a host.) */
+#ifndef IS_DRIVE_PATH
+#define IS_DRIVE_PATH(s) (0)
+#endif
+
+/* Called once at the top of main(), before anything else. */
+#ifndef platform_init
+#define platform_init() ((void)0)
+#endif
+
+/* Adjust the non-option arguments in place after they are parsed, for ports
+ * that spell paths differently than the wire protocol does. */
+#ifndef platform_fix_path_args
+#define platform_fix_path_args(argc, argv) ((void)0)
+#endif
+
+/* Close an fd that belongs to the other half of the generator/receiver
+ * split.  With fork() the halves have separate fd tables and each closes
+ * what it does not need; a thread-based split shares one table, so a port
+ * that uses threads makes this a no-op. */
+#ifndef close_sibling_fd
+#define close_sibling_fd(fd) close(fd)
+#endif
 
 /* The default RSYNC_RSH is always set in config.h. */
 
@@ -506,30 +532,22 @@ enum delret {
 #endif
 #endif
 
-#ifndef _WIN32
 /* these are needed for the uid/gid mapping code */
 #include <pwd.h>
 #include <grp.h>
-#endif
 
 #include <stdarg.h>
-#ifndef _WIN32
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#endif
 #ifdef HAVE_NETDB_H
 #include <netdb.h>
 #endif
-#ifndef _WIN32
 #include <syslog.h>
-#endif
 #ifdef HAVE_SYS_FILE_H
 #include <sys/file.h>
 #endif
 
-#ifdef _WIN32
-/* win32compat.h supplies struct dirent and the opendir() family. */
-#elif defined HAVE_DIRENT_H
+#ifdef HAVE_DIRENT_H
 # include <dirent.h>
 #else
 # define dirent direct

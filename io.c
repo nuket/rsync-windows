@@ -2730,7 +2730,6 @@ void stop_write_batch(void)
 	write_batch_monitor_in = -1;
 }
 
-#ifdef _WIN32
 /* Give this thread private copies of the buffers reached through pointers in
  * the TLS block.  win32_fork_thread() has just memcpy'd the parent's block, so
  * every xbuf here still points at the parent's storage; fork() would have
@@ -2763,4 +2762,3 @@ void io_fork_child_fixup(void)
 	memset(&redo_list, 0, sizeof redo_list);
 	memset(&hlink_list, 0, sizeof hlink_list);
 }
-#endif

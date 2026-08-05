@@ -24,6 +24,9 @@
 
 extern int am_sender;
 extern int am_server;
+extern int protocol_version;
+extern RSYNC_TLS int kluge_around_eof;
+extern volatile sig_atomic_t got_sigusr2;
 extern int blocking_io;
 extern int filesfrom_fd;
 extern int munge_symlinks;
@@ -53,18 +56,6 @@ pid_t piped_child(char **command, int *f_in, int *f_out)
 
 	if (DEBUG_GTE(CMD, 1))
 		print_child_argv("opening connection using:", command);
-
-#ifdef _WIN32
-	/* Windows has no fork(); CreateProcess does the pipe setup and the
-	 * exec in one step.  See win32/win32proc.c. */
-	pid = win32_piped_child(command, f_in, f_out);
-	if (pid == -1) {
-		rsyserr(FERROR, errno, "Failed to exec %s", command[0]);
-		exit_cleanup(RERR_IPC);
-	}
-	set_blocking(*f_out);
-	return pid;
-#else
 
 	if (fd_pair(to_child_pipe) < 0 || fd_pair(from_child_pipe) < 0) {
 		rsyserr(FERROR, errno, "pipe");
@@ -106,7 +97,6 @@ pid_t piped_child(char **command, int *f_in, int *f_out)
 	*f_out = to_child_pipe[1];
 
 	return pid;
-#endif
 }
 
 /* This function forks a child which calls child_main().  First,
@@ -128,17 +118,6 @@ pid_t local_child(int argc, char **argv, int *f_in, int *f_out,
 
 	/* The parent process is always the sender for a local rsync. */
 	assert(am_sender);
-
-#ifdef _WIN32
-	/* A local (non-remote) copy needs a forked in-process server, which we
-	 * can't emulate.  Remote transfers go through piped_child() instead. */
-	(void)argc; (void)argv; (void)f_in; (void)f_out; (void)child_main;
-	(void)to_child_pipe; (void)from_child_pipe; (void)pid;
-	rprintf(FERROR, "Local (non-remote) copies are not supported on Windows.\n"
-			"Use a remote source or destination, e.g. user@host:/path\n");
-	exit_cleanup(RERR_UNSUPPORTED);
-	return -1;
-#else
 
 	if (fd_pair(to_child_pipe) < 0 || fd_pair(from_child_pipe) < 0) {
 		rsyserr(FERROR, errno, "pipe");
@@ -199,5 +178,52 @@ pid_t local_child(int argc, char **argv, int *f_in, int *f_out,
 	*f_out = to_child_pipe[1];
 
 	return pid;
-#endif
+}
+
+/* Whether the generator and the receiver can each parse file-list chunks
+ * after do_recv() splits them.  fork() gives them separate address spaces,
+ * so they can. */
+int inc_recurse_when_receiving = 1;
+
+/* Split do_recv() into a generator and a receiver.  Returns the receiver's
+ * pid to the generator; in the receiver it runs receiver_half() and never
+ * returns.  Windows supplies its own version of this file. */
+pid_t spawn_receiver_half(int f_in, int f_out, char *local_name,
+			  int error_pipe_r, int error_pipe_w)
+{
+	pid_t pid = do_fork();
+
+	if (pid == -1)
+		return -1;
+
+	if (pid == 0) {
+		receiver_half(f_in, f_out, local_name, error_pipe_r, error_pipe_w);
+		exit_cleanup(0); /* not reached: receiver_half_finish() blocks */
+	}
+
+	return pid;
+}
+
+/* End the receiving half.  It has to stay alive draining keep-alive packets
+ * while the generator finishes its post-processing, so it parks here until
+ * the generator kills it with SIGUSR2. */
+void receiver_half_finish(int f_in, int f_out)
+{
+	if (protocol_version >= 29) {
+		kluge_around_eof = -1;
+
+		/* This should only get stopped via a USR2 signal. */
+		read_final_goodbye(f_in, f_out);
+
+		rprintf(FERROR, "Invalid packet at end of run [%s]\n", who_am_i());
+		exit_cleanup(RERR_PROTOCOL);
+	}
+
+	/* Finally, we go to sleep until our parent tells us to wrap up
+	 * with a USR2 signal.  We sleep for a short time, as on some OSes
+	 * a signal won't interrupt a sleep, then act on the flag the
+	 * (async-signal-safe) handler set. */
+	while (!got_sigusr2)
+		msleep(20);
+	receive_sigusr2();
 }

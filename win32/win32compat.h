@@ -62,6 +62,38 @@
 #undef OUT
 #undef small
 
+/* ---- platform hooks ------------------------------------------------------
+ * These override the POSIX defaults in rsync.h (see the block after its
+ * #include "config.h"), which is what keeps the shared sources free of
+ * #ifdef _WIN32.
+ */
+
+/* The receiver half runs as a thread rather than a forked process, so state
+ * the two halves modify independently must be thread-local.  See
+ * win32/win32fork.c. */
+#define RSYNC_TLS __declspec(thread)
+
+/* A leading drive letter is absolute too: "C:/dir" and "C:\dir". */
+#define IS_ABS_PATH(p) ((p)[0] == '/' \
+			|| (isalpha((uchar)(p)[0]) && (p)[1] == ':' \
+			    && ((p)[2] == '/' || (p)[2] == '\\')))
+
+/* "C:\dir" is a drive path, not HOST:PATH.  Only the single-letter form is
+ * claimed, so a genuine one-character hostname with a relative path
+ * ("h:sub/dir") still resolves as remote. */
+#define IS_DRIVE_PATH(s) (isalpha((uchar)(s)[0]) && (s)[1] == ':' \
+			  && ((s)[2] == '\\' || (s)[2] == '/' || (s)[2] == '\0'))
+
+#define platform_init()                   win32_init()
+#define platform_fix_path_args(argc, argv) win32_fix_path_args((argc), (argv))
+
+/* Threads share one fd table, so closing the other half's end would close
+ * our own. */
+#define close_sibling_fd(fd) ((void)0)
+
+void win32_init(void);
+void win32_fix_path_args(int argc, char *argv[]);
+
 /* ------------------------------------------------------------------ types */
 
 /* The CRT's <sys/types.h> supplies off_t, ino_t and dev_t; the rest of the
@@ -508,10 +540,8 @@ struct tm *win32_localtime_r(const time_t *timep, struct tm *result);
 #define syslog(pri, ...)          ((void)0)
 
 /* Path separator handling: rsync speaks '/' on the wire, and Win32 accepts
- * '/' in nearly every API, so we only normalise where it matters. */
+ * '/' in nearly every API, so we only normalise where it matters.
+ * (win32_init and win32_fix_path_args are declared with the hooks above.) */
 void win32_normalize_path(char *path);
-
-/* Called from main() before anything else. */
-void win32_init(void);
 
 #endif /* RSYNC_WIN32COMPAT_H */
