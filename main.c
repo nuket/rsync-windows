@@ -72,7 +72,7 @@ extern int rsync_port;
 extern int whole_file;
 extern int read_batch;
 extern int write_batch;
-extern int batch_fd;
+extern RSYNC_TLS int batch_fd;
 extern RSYNC_TLS int sock_f_in;
 extern RSYNC_TLS int sock_f_out;
 extern int filesfrom_fd;

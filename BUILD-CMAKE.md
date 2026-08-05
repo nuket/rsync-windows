@@ -264,19 +264,10 @@ nothing.
 * ACLs, xattrs, devices and Unix ownership are compiled out; none of them map
   onto Windows. `--archive` therefore behaves like `-rt` plus permissions,
   and only the read-only bit of a file's mode is representable.
-* **`--read-batch`.** Replaying a batch has no sender, so the generator's
-  index stream loops back to the receiver through a pipe. How much of that
-  stream `recv_files()` consumes depends on incremental recursion — which
-  this port must force off while receiving, because the receiver is a thread
-  sharing the generator's heap rather than a forked process. With it off the
-  del-stats marker is left unread and the two halves wait on each other.
-  rsync refuses the option up front (`win32/win32args.c`) rather than writing
-  every file correctly and then hanging on the closing handshake, which is
-  what it did before the check was added.
-
-  **`--write-batch` and `--only-write-batch` do work**, and the batch is
-  portable: `win32/tests/test_batch.py` replays one on a Linux peer and
-  compares the result against the source.
+Batch mode (`--write-batch`, `--only-write-batch`, `--read-batch`) does work,
+and the batch is portable in both directions:
+`win32/tests/test_batch.py` replays one on a Linux peer and compares the
+result against the source.
 
 ## Design notes
 
@@ -369,6 +360,25 @@ values); fork gives the child the parent's *current* values, so
 before any rsync code runs. Pointers in that block still refer to shared
 heap, so the buffers holding in-flight protocol data are deep-copied by
 `io_fork_child_fixup()`.
+
+Deciding what belongs in that set is the subtle part, and the symptom of
+getting it wrong is a hang rather than a wrong answer. `batch_fd` is the
+clearest example: `io.c` sets it to -1 when the input stream reaches EOF,
+which under `--read-batch` happens in the receiving half only. Sharing one
+copy meant the receiver finishing the batch also stopped the *generator*
+selecting for input —
+
+```c
+if (iobuf.in_fd >= 0 && iobuf.in.size - iobuf.in.len) {
+    if (!read_batch || batch_fd >= 0) {     /* <-- generator blinded here */
+        FD_SET(iobuf.in_fd, &r_fds);
+```
+
+— so the generator sat in a `select()` with an empty read set, waiting for a
+`MSG_DONE` it had made itself unable to hear, with every file already
+correctly written. The line above it already tests `am_generator`, which is
+`RSYNC_TLS`: this variable was always fork-private, and the port simply had
+not marked it.
 
 Two consequences worth knowing:
 
