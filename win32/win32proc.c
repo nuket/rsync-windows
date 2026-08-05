@@ -7,7 +7,7 @@
  * is what win32_piped_child() does, replacing the fork/dup2/execvp dance in
  * pipe.c wholesale.
  *
- * Copyright (C) 2026 rsync CMake/Windows port.
+ * Copyright (C) 2026 Max Vilimpoc, rsync CMake/Windows port.
  * Distributed under the same GPL-3.0-or-later terms as the rest of rsync.
  */
 
