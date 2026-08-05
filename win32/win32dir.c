@@ -42,8 +42,7 @@ DIR *win32_opendir(const char *path)
 	if (dirp->handle == INVALID_HANDLE_VALUE) {
 		DWORD err = GetLastError();
 		free(dirp);
-		errno = (err == ERROR_PATH_NOT_FOUND || err == ERROR_FILE_NOT_FOUND)
-		      ? ENOENT : EACCES;
+		errno = win32_oserr_to_errno(err);
 		return NULL;
 	}
 	dirp->pending = 1;
@@ -84,7 +83,12 @@ struct dirent *win32_readdir(DIR *dirp)
 	}
 	dirp->ent.d_ino = 0;
 
-	if (dirp->find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+	/* dwReserved0 carries the reparse tag, so use the same tag-checked
+	 * test the stat layer uses rather than calling every reparse point a
+	 * link.  rsync reads d_type nowhere today; getting it wrong anyway
+	 * would just be a trap for whoever starts. */
+	if (win32_attrs_are_symlink(dirp->find.dwFileAttributes,
+				    dirp->find.dwReserved0))
 		dirp->ent.d_type = DT_LNK;
 	else if (dirp->find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
 		dirp->ent.d_type = DT_DIR;

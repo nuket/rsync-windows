@@ -66,13 +66,6 @@ static HANDLE find_child(pid_t pid, int *slot)
 	return NULL;
 }
 
-static int child_is_thread(pid_t pid)
-{
-	int slot = -1;
-
-	return find_child(pid, &slot) && children[slot].is_thread;
-}
-
 /* --------------------------------------------------- command-line quoting */
 
 /*
@@ -283,7 +276,8 @@ pid_t win32_waitpid(pid_t pid, int *status, int options)
 
 int win32_kill(pid_t pid, int sig)
 {
-	HANDLE h = find_child(pid, NULL);
+	int slot = -1;
+	HANDLE h = find_child(pid, &slot);
 
 	if (!h) {
 		errno = ESRCH;
@@ -296,7 +290,7 @@ int win32_kill(pid_t pid, int sig)
 	 * linger in read_final_goodbye().  Our receiver half returns on its
 	 * own instead (see receiver_half()), so there is nothing to signal --
 	 * and killing the thread outright could strand a CRT lock. */
-	if (child_is_thread(pid))
+	if (children[slot].is_thread)
 		return 0;
 
 	if (!TerminateProcess(h, 1)) {

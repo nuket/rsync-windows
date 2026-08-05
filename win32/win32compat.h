@@ -164,6 +164,8 @@ int win32_fstat(int fd, struct win32_stat *st);
 #define WIN32_LINK_SYMLINK  0
 #define WIN32_LINK_HARDLINK 1
 
+int  win32_oserr_to_errno(unsigned long err);
+int  win32_attrs_are_symlink(unsigned long attrs, unsigned long tag);
 void win32_links_init(void);
 void win32_note_link(const char *path, int kind);
 
