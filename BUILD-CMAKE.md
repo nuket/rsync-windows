@@ -31,6 +31,7 @@ against real `awk` on a Linux host.
 | `RSYNC_ENABLE_ICONV` | `OFF` | `--iconv` character conversion |
 | `RSYNC_ENABLE_SIMD` | `OFF` | SIMD/asm checksum acceleration (x86-64) |
 | `RSYNC_EXTERNAL_ZLIB` | `OFF` | Link system zlib instead of the bundled copy |
+| `RSYNC_STATIC_CRT` | `ON` | Link the C runtime statically (MSVC only; see below) |
 
 `RSYNC_PATH`, `RSYNC_RSH`, `NOBODY_USER` and `NOBODY_GROUP` are cache strings
 with the same meaning as the corresponding `configure` options.
@@ -63,6 +64,28 @@ cmake --build build
 
 `rsync.exe` is self-contained — no Cygwin or MSYS DLLs. It uses the Windows
 OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
+
+### A standalone binary
+
+`RSYNC_STATIC_CRT` (on by default) links the C runtime with `/MT` rather than
+`/MD`. A `/MD` build imports from `VCRUNTIME140.dll` and the
+`api-ms-win-crt-*.dll` UCRT stubs, so it only runs where the Visual C++
+redistributable is installed and the UCRT is current — which is not something
+you can assume of a machine you have just copied a binary onto. With `/MT`
+the only imports left are part of Windows itself:
+
+```
+> dumpbin /dependents build\rsync.exe
+    WS2_32.dll
+    ADVAPI32.dll
+    KERNEL32.dll
+```
+
+It costs about 250 KB. Turn it off with `-DRSYNC_STATIC_CRT=OFF` if you are
+packaging rsync alongside other `/MD` binaries and would rather they share one
+runtime. Note that mixing the two in a single process is the thing to avoid —
+each CRT has its own heap and its own fd table — but rsync links no C libraries
+outside its own tree, so there is nothing here to mix with.
 
 ## What works
 
