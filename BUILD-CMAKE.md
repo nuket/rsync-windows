@@ -121,6 +121,8 @@ in the Winsock catalog:
   pointed at a UNC path, and this stops a DLL being loaded from the very share
   it is copying to or from.
 * Heap termination on corruption (already the 64-bit default; stated anyway).
+* `SetSearchPathMode(SAFE_SEARCHMODE)` — `SearchPath()` otherwise looks in the
+  current directory first, which is the same class of problem.
 
 Verify what actually landed:
 
@@ -144,9 +146,57 @@ for a file copier:
 * **Strict handle checks** — using a closed handle raises instead of returning
   an error. Good discipline and a good way to find a double-close, but it turns
   a latent bug into a crash.
+* **Side-channel isolation** — `SmtBranchTargetIsolation` (STIBP, Spectre v2),
+  `SpeculativeStoreBypassDisable` (SSBD, Spectre v4), `IsolateSecurityDomain`,
+  `DisablePageCombine`. See the note on Spectre below.
+* **CFG strict mode** — every image loaded must itself be built with CFG, so
+  one DLL without it cannot become the gadget source.
 
 All twelve tests pass with these on, but that is one machine — treat it as an
 opt-in for a controlled environment.
+
+### On Spectre
+
+`/Qspectre` handles **variant 1** (bounds-check bypass) and is on by default:
+it is a codegen mitigation, so the compiler can insert the barriers.
+
+**Variant 2** (branch target injection) has no MSVC flag, and asking for one is
+a category error — it is mitigated in microcode and by the kernel (IBRS/eIBRS,
+IBPB, STIBP), not in the code a compiler emits. Retpoline exists but Microsoft
+does not expose it for user-mode builds. What a *process* can ask for is that
+its branch predictors not be shared with the sibling SMT thread, which is the
+`SmtBranchTargetIsolation` field above; **variant 4** (speculative store
+bypass) is `SpeculativeStoreBypassDisable` next to it.
+
+Both are off by default, for two reasons. They are not free — STIBP gives up
+most of what SMT buys, and rsync spends its time in checksums — and they
+address a threat this program rarely faces: code already running on the same
+machine, trying to read a daemon password out of rsync's address space.
+
+Two further compiler options were evaluated and not adopted:
+`/Qspectre-load` and `/Qspectre-load-cf` harden *every* load rather than the
+ones the heuristic picks, at a cost that is real and a benefit that is
+speculative here; `/guard:xfg` (eXtended Flow Guard) is accepted by cl.exe but
+XFG never shipped as a supported OS mitigation. `/guard:ehcont` is likewise
+skipped — it protects exception continuation records, and this is C with no
+structured exception handling.
+
+Two runtime policies are *not* attempted because a process cannot apply them to
+itself; both were measured returning `ERROR_INVALID_PARAMETER` and
+`ERROR_ACCESS_DENIED` on Windows 10 22H2. `ProcessASLRPolicy` is fixed at
+process creation — the `/DYNAMICBASE` and `/HIGHENTROPYVA` image flags are what
+cover rsync.exe. `ProcessUserShadowStackPolicy` likewise: `/CETCOMPAT` opts in,
+and the loader turns the shadow stack on from that where the CPU has one.
+
+`ProcessChildProcessPolicy` (`NoChildProcessCreation`) is an obvious candidate
+and is simply incompatible with rsync, which spawns `ssh.exe` and re-execs
+itself as `--server` for local copies.
+
+The largest remaining step is not a flag: **Authenticode signing**. It is what
+SmartScreen reputation is built on, what lets an administrator apply CIG or
+WDAC policy to rsync elsewhere, and a precondition for `/INTEGRITYCHECK`
+(which makes the loader refuse to run the binary unless the signature
+verifies).
 
 ### AddressSanitizer
 

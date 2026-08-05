@@ -31,6 +31,12 @@ void win32_harden(void)
 	if (!k32)
 		return;
 
+	/* SearchPath() looks in the current directory before the system
+	 * directories unless told otherwise, which is the same class of problem
+	 * as the DLL search order below. */
+	SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE
+			  | BASE_SEARCH_PATH_PERMANENT);
+
 	/* Resolved rather than imported so the executable still loads on a
 	 * Windows too old to have them. */
 	set_policy = (set_mitigation_fn)GetProcAddress(k32, "SetProcessMitigationPolicy");
@@ -70,6 +76,21 @@ void win32_harden(void)
 	il.PreferSystem32Images = 1;
 	set_policy(ProcessImageLoadPolicy, &il, sizeof il);
 
+	/* Not attempted here, because a process cannot apply them to itself --
+	 * they are fixed when it is created, and SetProcessMitigationPolicy
+	 * rejects them (measured: ERROR_INVALID_PARAMETER and
+	 * ERROR_ACCESS_DENIED respectively on Windows 10 22H2):
+	 *
+	 *   ProcessASLRPolicy            -- the image flags /DYNAMICBASE and
+	 *                                   /HIGHENTROPYVA cover rsync.exe
+	 *                                   itself, which is what matters.
+	 *   ProcessUserShadowStackPolicy -- /CETCOMPAT already opts in, and the
+	 *                                   loader turns the shadow stack on
+	 *                                   from that where the CPU has one.
+	 *
+	 * Both would need a parent willing to pass them through
+	 * UpdateProcThreadAttribute at CreateProcess time. */
+
 	/* The rest are off by default because each can break a working setup on
 	 * someone else's machine, which is a poor trade for a file copier.
 	 * -DRSYNC_STRICT_MITIGATIONS=ON turns them on; see BUILD-CMAKE.md. */
@@ -77,6 +98,8 @@ void win32_harden(void)
 		PROCESS_MITIGATION_DYNAMIC_CODE_POLICY dc;
 		PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY sig;
 		PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY hc;
+		PROCESS_MITIGATION_SIDE_CHANNEL_ISOLATION_POLICY sc;
+		PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg;
 
 		/* ACG: no page may become executable after the fact.  rsync
 		 * generates no code, but an injected profiler or anti-virus
@@ -100,5 +123,32 @@ void win32_harden(void)
 		hc.RaiseExceptionOnInvalidHandleReference = 1;
 		hc.HandleExceptionsPermanentlyEnabled = 1;
 		set_policy(ProcessStrictHandleCheckPolicy, &hc, sizeof hc);
+
+		/* Speculative execution.  This is where Spectre v2 is actually
+		 * addressed: there is no compiler flag for it, because branch
+		 * target injection is mitigated in microcode and by the kernel
+		 * rather than in the generated code the way v1 is.  What a
+		 * process can ask for is that its branch predictors not be
+		 * shared with whatever runs on the sibling SMT thread, and that
+		 * store-bypass speculation (v4) be disabled for it.
+		 *
+		 * Off by default because it is not free: STIBP gives up most of
+		 * what SMT buys, and rsync spends its time in checksums.  It is
+		 * also aimed at a threat this program rarely faces -- code
+		 * already running on the same machine, trying to read the far
+		 * end's daemon password out of rsync's address space. */
+		memset(&sc, 0, sizeof sc);
+		sc.SmtBranchTargetIsolation = 1;      /* Spectre v2 (STIBP) */
+		sc.SpeculativeStoreBypassDisable = 1; /* Spectre v4 (SSBD) */
+		sc.IsolateSecurityDomain = 1;
+		sc.DisablePageCombine = 1;
+		set_policy(ProcessSideChannelIsolationPolicy, &sc, sizeof sc);
+
+		/* CFG strict mode: every image loaded must itself be built with
+		 * CFG, so one DLL without it cannot become the gadget source. */
+		memset(&cfg, 0, sizeof cfg);
+		cfg.EnableControlFlowGuard = 1;
+		cfg.StrictMode = 1;
+		set_policy(ProcessControlFlowGuardPolicy, &cfg, sizeof cfg);
 	}
 }
