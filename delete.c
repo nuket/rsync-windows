@@ -23,7 +23,7 @@
 #include "rsync.h"
 
 extern int am_root;
-extern int make_backups;
+extern RSYNC_TLS int make_backups;
 extern int max_delete;
 extern char *backup_dir;
 extern char *backup_suffix;

@@ -36,7 +36,7 @@ extern int preserve_xattrs;
 extern int always_checksum;
 extern int do_compression;
 extern int inplace;
-extern int append_mode;
+extern RSYNC_TLS int append_mode;
 extern int write_batch;
 extern int protocol_version;
 extern int raw_argc, cooked_argc;

@@ -52,7 +52,7 @@ extern int inplace;
 extern int flist_eof;
 extern int file_old_total;
 extern int keep_dirlinks;
-extern int make_backups;
+extern RSYNC_TLS int make_backups;
 extern int sanitize_paths;
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
 extern struct chmod_mode_struct *daemon_chmod_modes;
