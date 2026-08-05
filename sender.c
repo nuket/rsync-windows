@@ -33,7 +33,7 @@ extern int stdout_format_has_i;
 extern int logfile_format_has_i;
 extern int want_xattr_optim;
 extern int xfer_sum_len;
-extern int csum_length;
+extern RSYNC_TLS int csum_length;
 extern int append_mode;
 extern int copy_links;
 extern int copy_unsafe_links;
@@ -42,7 +42,7 @@ extern int insecure_links;
 extern int io_error;
 extern int flist_eof;
 extern int whole_file;
-extern int allowed_lull;
+extern RSYNC_TLS int allowed_lull;
 extern int copy_devices;
 extern int preserve_xattrs;
 extern int protocol_version;
@@ -57,10 +57,9 @@ extern int module_dirfd;
 extern int write_batch;
 extern int file_old_total;
 extern BOOL want_progress_now;
-extern struct stats stats;
+extern RSYNC_TLS struct stats stats;
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
-extern char num_dev_ino_buf[4 + 8 + 8];
-
+extern RSYNC_TLS char num_dev_ino_buf[4 + 8 + 8];
 BOOL extra_flist_sending_enabled;
 
 /**

@@ -23,9 +23,10 @@ extern int blocking_io;
 static struct {
 	pid_t  pid;
 	HANDLE handle;
+	int    is_thread;   /* the do_recv() receiver half; see win32fork.c */
 } children[MAX_CHILDREN];
 
-static void remember_child(pid_t pid, HANDLE h)
+static void remember_child_kind(pid_t pid, HANDLE h, int is_thread)
 {
 	int i;
 
@@ -33,10 +34,22 @@ static void remember_child(pid_t pid, HANDLE h)
 		if (!children[i].pid) {
 			children[i].pid = pid;
 			children[i].handle = h;
+			children[i].is_thread = is_thread;
 			return;
 		}
 	}
 	CloseHandle(h);   /* table full: we lose the exit status, not the child */
+}
+
+static void remember_child(pid_t pid, HANDLE h)
+{
+	remember_child_kind(pid, h, 0);
+}
+
+/* Called by win32_fork_thread() for the receiver half. */
+void win32_remember_thread_child(pid_t pid, HANDLE h)
+{
+	remember_child_kind(pid, h, 1);
 }
 
 static HANDLE find_child(pid_t pid, int *slot)
@@ -51,6 +64,13 @@ static HANDLE find_child(pid_t pid, int *slot)
 		}
 	}
 	return NULL;
+}
+
+static int child_is_thread(pid_t pid)
+{
+	int slot = -1;
+
+	return find_child(pid, &slot) && children[slot].is_thread;
 }
 
 /* --------------------------------------------------- command-line quoting */
@@ -246,10 +266,14 @@ pid_t win32_waitpid(pid_t pid, int *status, int options)
 		return -1;
 	}
 
-	GetExitCodeProcess(h, &code);
+	if (children[slot].is_thread)
+		GetExitCodeThread(h, &code);
+	else
+		GetExitCodeProcess(h, &code);
 	CloseHandle(h);
 	children[slot].pid = 0;
 	children[slot].handle = NULL;
+	children[slot].is_thread = 0;
 
 	/* Encode as a Unix wait status: exited normally with `code`. */
 	if (status)
@@ -267,6 +291,13 @@ int win32_kill(pid_t pid, int sig)
 	}
 	if (sig == 0)
 		return 0;   /* existence check only */
+
+	/* The generator sends SIGUSR2 to stop a receiver that would otherwise
+	 * linger in read_final_goodbye().  Our receiver half returns on its
+	 * own instead (see receiver_half()), so there is nothing to signal --
+	 * and killing the thread outright could strand a CRT lock. */
+	if (child_is_thread(pid))
+		return 0;
 
 	if (!TerminateProcess(h, 1)) {
 		errno = EPERM;

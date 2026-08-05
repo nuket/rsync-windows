@@ -200,6 +200,9 @@ if(WIN32)
     set(HAVE_SETMODE 0)
     set(HAVE_GETCWD 1)
     set(HAVE_CHMOD 1)
+    # win32_utimes() can set times on directories (via CreateFile with
+    # FILE_FLAG_BACKUP_SEMANTICS); the CRT's _utime() cannot.
+    set(HAVE_UTIMES 1)
     set(HAVE_UTIME 1)
     set(HAVE_MKTIME 1)
     set(HAVE_STRCHR 1)
@@ -574,7 +577,8 @@ if(WIN32)
         win32/win32compat.c
         win32/win32proc.c
         win32/win32io.c
-        win32/win32dir.c)
+        win32/win32dir.c
+        win32/win32fork.c)
 endif()
 
 if(RSYNC_ENABLE_SIMD AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")

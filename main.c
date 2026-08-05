@@ -46,11 +46,11 @@ extern int inc_recurse;
 extern int blocking_io;
 extern int always_checksum;
 extern int remove_source_files;
-extern int output_needs_newline;
+extern RSYNC_TLS int output_needs_newline;
 extern int called_from_signal_handler;
 extern int need_messages_from_generator;
-extern int kluge_around_eof;
-extern int got_xfer_error;
+extern RSYNC_TLS int kluge_around_eof;
+extern RSYNC_TLS int got_xfer_error;
 extern volatile sig_atomic_t got_sigusr2;
 extern int old_style_args;
 extern int msgs2stderr;
@@ -77,25 +77,25 @@ extern int whole_file;
 extern int read_batch;
 extern int write_batch;
 extern int batch_fd;
-extern int sock_f_in;
-extern int sock_f_out;
+extern RSYNC_TLS int sock_f_in;
+extern RSYNC_TLS int sock_f_out;
 extern int filesfrom_fd;
 extern int connect_timeout;
-extern int send_msgs_to_gen;
+extern RSYNC_TLS int send_msgs_to_gen;
 extern dev_t filesystem_dev;
-extern pid_t cleanup_child_pid;
-extern size_t bwlimit_writemax;
+extern RSYNC_TLS pid_t cleanup_child_pid;
+extern RSYNC_TLS size_t bwlimit_writemax;
 extern unsigned int module_dirlen;
-extern BOOL flist_receiving_enabled;
+extern RSYNC_TLS BOOL flist_receiving_enabled;
 extern BOOL want_progress_now;
-extern BOOL shutting_down;
+extern RSYNC_TLS BOOL shutting_down;
 extern int backup_dir_len;
 extern int basis_dir_cnt;
 extern int default_af_hint;
 extern int stdout_format_has_i;
 extern int trust_sender_filter;
 extern int trust_sender_args;
-extern struct stats stats;
+extern RSYNC_TLS struct stats stats;
 extern char *stdout_format;
 extern char *logfile_format;
 extern char *filesfrom_host;
@@ -114,8 +114,8 @@ extern filter_rule_list daemon_filter_list, implied_filter_list;
 
 uid_t our_uid;
 gid_t our_gid;
-int am_receiver = 0;  /* Only set to 1 after the receiver/generator fork. */
-int am_generator = 0; /* Only set to 1 after the receiver/generator fork. */
+RSYNC_TLS int am_receiver = 0;  /* Only set to 1 after the receiver/generator fork. */
+RSYNC_TLS int am_generator = 0; /* Only set to 1 after the receiver/generator fork. */
 int local_server = 0;
 int daemon_connection = 0; /* 0 = no daemon, 1 = daemon via remote shell, -1 = daemon via socket */
 mode_t orig_umask = 0;
@@ -1002,6 +1002,118 @@ static void do_server_sender(int f_in, int f_out, int argc, char *argv[])
 	exit_cleanup(0);
 }
 
+/* The receiving half of do_recv(), which runs concurrently with the
+ * generator.  Under fork() this is the child and it never returns; on
+ * Windows it is a thread body (see win32_fork_thread) and it does return,
+ * because a thread cannot _exit() without taking the generator with it. */
+static void receiver_half(int f_in, int f_out, char *local_name,
+			  int error_pipe_r, int error_pipe_w)
+{
+	am_receiver = 1;
+	send_msgs_to_gen = am_server;
+
+#ifdef _WIN32
+	/* Threads share one fd table, so closing the generator's ends here
+	 * would close them for the generator too. */
+	(void)error_pipe_r;
+#else
+	close(error_pipe_r);
+#endif
+
+	/* We can't let two processes write to the socket at one time. */
+	io_end_multiplex_out(MPLX_SWITCHING);
+#ifndef _WIN32
+	if (f_in != f_out)
+		close(f_out);
+#endif
+	sock_f_out = -1;
+	f_out = error_pipe_w;
+
+	bwlimit_writemax = 0; /* receiver doesn't need to do this */
+
+	if (read_batch)
+		io_start_buffering_in(f_in);
+	io_start_multiplex_out(f_out);
+
+	recv_files(f_in, f_out, local_name);
+	io_flush(FULL_FLUSH);
+	handle_stats(f_in);
+
+	if (output_needs_newline) {
+		fputc('\n', stdout);
+		output_needs_newline = 0;
+	}
+
+	write_int(f_out, NDX_DONE);
+	send_msg(MSG_STATS, (char*)&stats.total_read, sizeof stats.total_read, 0);
+	io_flush(FULL_FLUSH);
+
+#ifdef _WIN32
+	/* The generator is still waiting for one more MSG_DONE, which the
+	 * protocol-31 half of read_final_goodbye() emits.  Do that exchange,
+	 * then return: the Unix code goes on to block in read_ndx_and_attrs()
+	 * until SIGUSR2 arrives, and a thread has no such signal.  Returning
+	 * lets the generator's wait_process() collect this half instead. */
+	if (protocol_version >= 29) {
+		uchar fnamecmp_type;
+		char xname[MAXPATHLEN];
+		int iflags, xlen, i;
+
+		kluge_around_eof = -1;
+		shutting_down = True;
+
+		i = read_ndx_and_attrs(f_in, f_out, &iflags, &fnamecmp_type,
+				       xname, &xlen);
+		if (protocol_version >= 31 && i == NDX_DONE)
+			write_int(f_out, NDX_DONE);
+		io_flush(FULL_FLUSH);
+	}
+
+	/* The Unix receiver prints this from sigusr2_handler(), because the
+	 * transfer counters live in this half, not the generator's. */
+	if (!am_server)
+		output_summary();
+	return;
+#else
+	/* Handle any keep-alive packets from the post-processing work
+	 * that the generator does. */
+	if (protocol_version >= 29) {
+		kluge_around_eof = -1;
+
+		/* This should only get stopped via a USR2 signal. */
+		read_final_goodbye(f_in, f_out);
+
+		rprintf(FERROR, "Invalid packet at end of run [%s]\n",
+			who_am_i());
+		exit_cleanup(RERR_PROTOCOL);
+	}
+
+	/* Finally, we go to sleep until our parent tells us to wrap up
+	 * with a USR2 signal.  We sleep for a short time, as on some OSes
+	 * a signal won't interrupt a sleep, then act on the flag the
+	 * (async-signal-safe) handler set. */
+	while (!got_sigusr2)
+		msleep(20);
+	receive_sigusr2();
+#endif
+}
+
+#ifdef _WIN32
+/* Thin adapter so win32_fork_thread() can start receiver_half(). */
+struct recv_half_args {
+	int f_in, f_out;
+	char *local_name;
+	int error_pipe_r, error_pipe_w;
+};
+
+static void receiver_half_entry(void *arg)
+{
+	struct recv_half_args *a = (struct recv_half_args *)arg;
+
+	receiver_half(a->f_in, a->f_out, a->local_name,
+		      a->error_pipe_r, a->error_pipe_w);
+}
+#endif
 
 static int do_recv(int f_in, int f_out, char *local_name)
 {
@@ -1065,64 +1177,35 @@ static int do_recv(int f_in, int f_out, char *local_name)
 
 	io_flush(FULL_FLUSH);
 
+#ifdef _WIN32
+	/* No fork() here: the receiver runs as a thread that inherits a copy of
+	 * this thread's divergent state (see RSYNC_TLS and win32_fork_thread).
+	 * Because threads share one fd table, the hand-off must not close the
+	 * sibling's ends of the pipes the way the forked version does. */
+	{
+		static struct recv_half_args rha;
+
+		rha.f_in = f_in;
+		rha.f_out = f_out;
+		rha.local_name = local_name;
+		rha.error_pipe_r = error_pipe[0];
+		rha.error_pipe_w = error_pipe[1];
+
+		pid = win32_fork_thread(receiver_half_entry, &rha);
+		if (pid == -1) {
+			rsyserr(FERROR, errno, "failed to start receiver thread in do_recv");
+			exit_cleanup(RERR_IPC);
+		}
+	}
+#else
 	if ((pid = do_fork()) == -1) {
 		rsyserr(FERROR, errno, "fork failed in do_recv");
 		exit_cleanup(RERR_IPC);
 	}
 
-	if (pid == 0) {
-		am_receiver = 1;
-		send_msgs_to_gen = am_server;
-
-		close(error_pipe[0]);
-
-		/* We can't let two processes write to the socket at one time. */
-		io_end_multiplex_out(MPLX_SWITCHING);
-		if (f_in != f_out)
-			close(f_out);
-		sock_f_out = -1;
-		f_out = error_pipe[1];
-
-		bwlimit_writemax = 0; /* receiver doesn't need to do this */
-
-		if (read_batch)
-			io_start_buffering_in(f_in);
-		io_start_multiplex_out(f_out);
-
-		recv_files(f_in, f_out, local_name);
-		io_flush(FULL_FLUSH);
-		handle_stats(f_in);
-
-		if (output_needs_newline) {
-			fputc('\n', stdout);
-			output_needs_newline = 0;
-		}
-
-		write_int(f_out, NDX_DONE);
-		send_msg(MSG_STATS, (char*)&stats.total_read, sizeof stats.total_read, 0);
-		io_flush(FULL_FLUSH);
-
-		/* Handle any keep-alive packets from the post-processing work
-		 * that the generator does. */
-		if (protocol_version >= 29) {
-			kluge_around_eof = -1;
-
-			/* This should only get stopped via a USR2 signal. */
-			read_final_goodbye(f_in, f_out);
-
-			rprintf(FERROR, "Invalid packet at end of run [%s]\n",
-				who_am_i());
-			exit_cleanup(RERR_PROTOCOL);
-		}
-
-		/* Finally, we go to sleep until our parent tells us to wrap up
-		 * with a USR2 signal.  We sleep for a short time, as on some OSes
-		 * a signal won't interrupt a sleep, then act on the flag the
-		 * (async-signal-safe) handler set. */
-		while (!got_sigusr2)
-			msleep(20);
-		receive_sigusr2();
-	}
+	if (pid == 0)
+		receiver_half(f_in, f_out, local_name, error_pipe[0], error_pipe[1]);
+#endif
 
 	am_generator = 1;
 	implied_filter_list.head = implied_filter_list.tail = NULL;
@@ -1132,9 +1215,12 @@ static int do_recv(int f_in, int f_out, char *local_name)
 	if (write_batch && !am_server)
 		stop_write_batch();
 
+#ifndef _WIN32
+	/* Shared fd table under threads -- see receiver_half(). */
 	close(error_pipe[1]);
 	if (f_in != f_out)
 		close(f_in);
+#endif
 	sock_f_in = -1;
 	f_in = error_pipe[0];
 
