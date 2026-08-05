@@ -64,19 +64,43 @@ OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
 * Names containing spaces, quotes and shell metacharacters.
 * **Local-to-local copies** (`rsync -rt C:\a\ D:\b\`), including `--delete`,
   `--exclude` and `--remove-source-files`.
-* **Symlinks** (`-l`). Reading always works, including of directory
-  junctions. *Creating* one needs Developer Mode or the
-  SeCreateSymbolicLinkPrivilege — without either, Windows refuses, and rsync
-  reports the `EPERM` per link and finishes the rest of the transfer.
 
-* **Hard links** (`-H`), via `CreateHardLink` on NTFS.
+## Links
+
+Neither symlinks nor hard links are a first-class concept for ordinary
+Windows users — creating a symlink needs Developer Mode or the
+SeCreateSymbolicLinkPrivilege, which most accounts do not hold — so this
+build leaves `SUPPORT_LINKS` and `SUPPORT_HARD_LINKS` off and treats each as
+the ordinary file it resolves to:
+
+* a **symlink** (or directory junction) is followed, and its referent copied;
+* files sharing an inode through a **hard link** are copied as that many
+  independent files.
+
+Flattening a tree silently would be a poor outcome, so any links met during
+a run are listed as it ends:
+
+```
+rsync: 1 symlink was followed and copied as an ordinary file:
+    junc
+rsync: 2 hard-linked files were copied as independent files:
+    a.txt
+    b.txt
+This build does not reproduce links: Windows needs a privilege most
+accounts lack to create a symlink, so neither is treated as first-class.
+```
+
+A transfer that meets no links prints nothing. Detection lives in the stat
+layer (`win32/win32compat.c`), which already sees every file rsync looks at,
+and the report in `win32/win32links.c` — so this costs the shared sources
+nothing.
 
 ## What does not work
 
 * **Daemon mode** (`--daemon`, `rsync://`), which needs `fork()`, `chroot()`
   and Unix users.
 * ACLs, xattrs, devices and Unix ownership are compiled out; none of them map
-  onto Windows. `--archive` therefore behaves like `-rlt` plus permissions,
+  onto Windows. `--archive` therefore behaves like `-rt` plus permissions,
   and only the read-only bit of a file's mode is representable.
 
 ## Design notes
@@ -125,6 +149,9 @@ or the other, rather than interleaved.
 | `win32/win32compat.c` | stat/link/attribute/time calls, users and groups, `getpass`, signal filtering. |
 | `win32/win32fork.c` | `fork()` stand-in for the generator/receiver split (below). |
 | `win32/win32pipe.c` | Replaces `pipe.c`: process plumbing and the split. |
+| `win32/win32links.c` | Records the links met and lists them as the run ends. |
+| `win32/win32args.c` | The `platform_fix_path_args()` hook. |
+| `win32/tests/` | The Windows test suite. |
 | `win32/include/` | Stand-ins for headers MSVC lacks. |
 | `win32/rsync.manifest` | Selects the UTF-8 active code page. |
 
@@ -202,7 +229,50 @@ Set `RSYNC_WIN32_DEBUG=1` to trace the shim's fd operations to stderr.
 
 ## Testing
 
-Against an Ubuntu 22.04 host running rsync 3.2.7 (protocol 31), over ssh:
+`testsuite/` is written against Unix semantics throughout -- ACLs, xattrs,
+uid/gid, devices, a POSIX shell for its remote-shell stand-in -- so most of it
+cannot run here, and bending it into shape would mean editing shared test code
+for one platform's benefit. `win32/tests/` covers what this port supports
+instead, and **skips** what Windows genuinely cannot do rather than failing:
+
+```powershell
+cmake --build build --target win32-tests
+```
+
+or directly, to pick individual tests:
+
+```powershell
+python win32	estsun.py --rsync-bin buildsync.exe [TEST ...]
+```
+
+Set `RSYNC_WIN_TEST_HOST=user@host` (key-based login, rsync installed) to
+include the ssh push/pull tests; they skip without it. All 12 currently
+pass.
+
+| Test | Covers |
+| --- | --- |
+| `wildmatch` | rsync's own wildmatch unit test, all 12 option sets |
+| `unsafe_symlink` | rsync's own `unsafe_symlink()` unit test, plus a drive-letter case |
+| `basics` | `--version`/`--help`, 64-bit capabilities, exact sizes, `-t` mtimes |
+| `local_copy` | local copy, incremental no-op, `--delete` |
+| `delete_exclude` | `--delete` must not delete what `--exclude` protects |
+| `delta` | block matching, and byte-exactness after a delta |
+| `filenames` | Unicode, spaces and shell metacharacters |
+| `paths` | drive letters, backslashes, trailing slashes, `h:relative` |
+| `links_reported` | links followed and copied as plain files, and listed at the end |
+| `inplace_append` | `--inplace` (including truncation) and `--append` |
+| `options` | `--remove-source-files`, `--dry-run`, filters, `-z`, `--backup` |
+| `remote` | push, pull and delta over ssh |
+
+The first two are rsync's own unit tests: `wildmatch()` and
+`unsafe_symlink()` are pure string and path arithmetic, so the upstream
+helpers run unmodified. CMake builds all of `Makefile.in`'s `CHECK_PROGS`,
+so `runtests.py` on a Unix host can use a CMake build tree too.
+
+### Manual verification
+
+Beyond the suite, against an Ubuntu 22.04 host running rsync 3.2.7
+(protocol 31), over ssh:
 
 * Push and pull of a 443-file / 23 MB tree, compared byte-for-byte with an
   MD5 manifest on both sides; the Windows→Linux→Windows round trip is
@@ -221,6 +291,8 @@ Against an Ubuntu 22.04 host running rsync 3.2.7 (protocol 31), over ssh:
 * Local-to-local copy of a 457-file tree, byte-for-byte identical to the
   source; `--delete --exclude` correctly spares the excluded files;
   `--remove-source-files` empties the source.
+* Symlinks and hard links met during a transfer are followed/copied as plain
+  files and listed at the end of the run.
 
 The `RSYNC_TLS` changes are inert off Windows, and the CMake-built binary
 still passes rsync's own test suite there: on both Ubuntu 22.04.5 and

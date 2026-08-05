@@ -261,14 +261,13 @@ if(WIN32)
     set(HAVE_GETPASS 1)
     # win32/include supplies these, so rsync.h can include them plainly.
     set(HAVE_DIRENT_H 1)
-    # Symlinks: reparse points, read back with FSCTL_GET_REPARSE_POINT.
-    # Creating one needs Developer Mode or SeCreateSymbolicLinkPrivilege;
-    # without either, rsync reports the EPERM per link and carries on.
-    set(HAVE_READLINK 1)
-    # Hard links: CreateHardLink on NTFS.  Safe now that STRUCT_STAT carries
-    # the full 64-bit NTFS file index as st_ino (see win32/win32compat.h);
-    # with the CRT's 16-bit st_ino, rsync would link unrelated files.
-    set(HAVE_LINK 1)
+    # Deliberately NOT setting HAVE_READLINK or HAVE_LINK.  Symlinks and hard
+    # links are not a first-class concept for ordinary Windows users --
+    # creating a symlink needs Developer Mode or a privilege most accounts
+    # lack -- so rsync treats them as the plain files they resolve to and
+    # win32/win32links.c lists any it met at the end of the run.
+    # _chsize_s() behind the POSIX name; enables --inplace/--append.
+    set(HAVE_FTRUNCATE 1)
 else()
     check_function_exists(setmode HAVE_SETMODE)
 endif()
@@ -602,12 +601,15 @@ if(NOT RSYNC_EXTERNAL_ZLIB)
 endif()
 
 if(WIN32)
+    enable_language(RC)   # for win32/rsync.rc
     list(APPEND RSYNC_ALL_SOURCES
         win32/win32compat.c
         win32/win32proc.c
         win32/win32io.c
         win32/win32dir.c
-        win32/win32fork.c)
+        win32/win32fork.c
+        win32/win32args.c
+        win32/win32links.c)
 
 endif()
 
@@ -648,13 +650,10 @@ if(WIN32)
         # Keep the noise down: rsync is old-school C and trips a lot of
         # MSVC's signed/unsigned and deprecation warnings.
         target_compile_options(rsync PRIVATE /W2 /wd4996 /wd4267 /wd4244 /wd4018)
-        # Merge our manifest (UTF-8 active code page) into the executable.
-        # CMake already passes /MANIFEST:EMBED, so this only adds the input.
-        target_link_options(rsync PRIVATE
-            "/MANIFEST:EMBED"
-            "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/win32/rsync.manifest")
-        set_property(TARGET rsync APPEND PROPERTY LINK_DEPENDS
-            "${CMAKE_CURRENT_SOURCE_DIR}/win32/rsync.manifest")
+        # Embed the manifest (UTF-8 active code page) as a resource, and
+        # turn off the linker's own manifest so there is exactly one.
+        target_sources(rsync PRIVATE win32/rsync.rc)
+        target_link_options(rsync PRIVATE "/MANIFEST:NO")
     endif()
 endif()
 
@@ -663,6 +662,107 @@ if(NOT WIN32)
     if(M_LIBRARY)
         target_link_libraries(rsync PRIVATE ${M_LIBRARY})
     endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Test helpers
+#
+# runtests.py refuses to start without these; they are the C parts of the
+# suite (Makefile.in's CHECK_PROGS).  Small enough to build unconditionally.
+# ---------------------------------------------------------------------------
+set(HELPER_WIN32_SOURCES "")
+if(WIN32)
+    # The compat layer these need; win32pipe.c and win32fork.c are left out
+    # because they reach into main.c/io.c, which no helper links.
+    set(HELPER_WIN32_SOURCES
+        win32/win32compat.c win32/win32io.c win32/win32dir.c
+        win32/win32proc.c win32/win32links.c)
+endif()
+
+function(rsync_test_helper name)
+    add_executable(${name} ${ARGN} ${HELPER_WIN32_SOURCES})
+    target_include_directories(${name} PRIVATE
+        "${RSYNC_PLATFORM_INCLUDE_DIR}"
+        "${GEN_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/popt")
+    target_compile_definitions(${name} PRIVATE HAVE_CONFIG_H)
+    target_link_libraries(${name} PRIVATE ${RSYNC_EXTRA_LIBS})
+    # Land beside rsync itself: runtests.py looks for them in one place.
+    set_target_properties(${name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32 advapi32 shell32 userenv)
+        target_compile_definitions(${name} PRIVATE
+            _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS
+            _WINSOCK_DEPRECATED_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
+        if(MSVC)
+            target_compile_options(${name} PRIVATE
+                /W2 /wd4996 /wd4267 /wd4244 /wd4018)
+            # Same UTF-8 code page as rsync, so they agree about file names.
+            target_sources(${name} PRIVATE win32/rsync.rc)
+            target_link_options(${name} PRIVATE "/MANIFEST:NO")
+        endif()
+    endif()
+endfunction()
+
+set(HELPER_COMMON syscall.c android.c util2.c t_stub.c
+                  lib/compat.c lib/snprintf.c lib/permstring.c)
+
+# Makefile.in links tls and trimslash against syscall.c but not util1.c.
+# That works where AT_FDCWD exists, because syscall.c then compiles the
+# openat()-based secure_relative_open(); Windows has no AT_FDCWD, so it takes
+# the portable fallback instead, which calls pathjoin() from util1.c.  util1.c
+# in turn wants wildmatch and the log-level arrays that those two helpers --
+# unlike the other three -- do not declare themselves.
+set(HELPER_PATHJOIN "")
+if(WIN32)
+    set(HELPER_PATHJOIN util1.c lib/wildmatch.c win32/win32helperstubs.c)
+endif()
+
+# tls prints a Unix-style listing -- mode bits, uid/gid and a symlink's
+# target -- and calls do_readlink() unconditionally, which this build does
+# not provide because it has no symlink support.  It is only needed by
+# testsuite/runtests.py, which does not run on Windows; win32/tests/ compares
+# trees directly instead.
+if(NOT WIN32)
+    rsync_test_helper(tls    tls.c ${HELPER_COMMON} ${HELPER_PATHJOIN}
+                             lib/sysxattrs.c ${POPT_SOURCES})
+endif()
+rsync_test_helper(trimslash  trimslash.c ${HELPER_COMMON} ${HELPER_PATHJOIN})
+rsync_test_helper(t_unsafe   t_unsafe.c ${HELPER_COMMON}
+                             util1.c lib/wildmatch.c)
+rsync_test_helper(t_chmod_secure  t_chmod_secure.c ${HELPER_COMMON}
+                             util1.c lib/wildmatch.c)
+rsync_test_helper(t_secure_relpath t_secure_relpath.c ${HELPER_COMMON}
+                             util1.c lib/wildmatch.c)
+# No lib/wildmatch.c here: wildtest.c #includes it directly.
+rsync_test_helper(wildtest   wildtest.c lib/compat.c lib/snprintf.c
+                             ${POPT_SOURCES})
+rsync_test_helper(getgroups  getgroups.c)
+rsync_test_helper(getfsdev   getfsdev.c)
+
+# ---------------------------------------------------------------------------
+# The Windows test suite
+#
+# testsuite/ assumes Unix semantics throughout, so win32/tests/ covers what
+# this port supports instead and skips what Windows genuinely cannot do:
+#
+#     cmake --build build --target win32-tests
+#
+# Set RSYNC_WIN_TEST_HOST=user@host first to include the ssh transfer tests.
+# ---------------------------------------------------------------------------
+if(WIN32)
+    add_custom_target(win32-tests
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_SOURCE_DIR}/win32/tests/run.py"
+                --rsync-bin $<TARGET_FILE:rsync>
+                --tooldir  $<TARGET_FILE_DIR:rsync>
+                --srcdir   "${CMAKE_CURRENT_SOURCE_DIR}"
+        DEPENDS rsync trimslash t_unsafe t_chmod_secure t_secure_relpath
+                wildtest getgroups getfsdev
+        COMMENT "Running the Windows test suite"
+        USES_TERMINAL)
 endif()
 
 install(TARGETS rsync RUNTIME DESTINATION bin)
