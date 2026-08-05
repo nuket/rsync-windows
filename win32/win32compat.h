@@ -84,6 +84,15 @@
 #define IS_DRIVE_PATH(s) (isalpha((uchar)(s)[0]) && (s)[1] == ':' \
 			  && ((s)[2] == '\\' || (s)[2] == '/' || (s)[2] == '\0'))
 
+/* rsync.h defines NORETURN only if nobody else has, and its own definition is
+ * spelled the GCC way -- which the same header expands to nothing for a
+ * non-GCC compiler.  MSVC is therefore told nothing about _exit_cleanup(),
+ * _out_of_memory() and the rest, and assumes execution continues past them.
+ * Saying it in MSVC's dialect costs one line, improves codegen at every call
+ * site, and stops the "potentially uninitialized local" diagnostics that /sdl
+ * turns into errors from firing on code paths that in fact end the process. */
+#define NORETURN __declspec(noreturn)
+
 #define platform_init()                   win32_init()
 #define platform_fix_path_args(argc, argv) win32_fix_path_args((argc), (argv))
 
@@ -92,6 +101,7 @@
 #define close_sibling_fd(fd) ((void)0)
 
 void win32_init(void);
+void win32_harden(void);
 void win32_fix_path_args(int argc, char *argv[]);
 
 /* ------------------------------------------------------------------ types */

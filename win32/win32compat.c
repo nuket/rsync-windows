@@ -19,6 +19,10 @@ void win32_init(void)
 {
 	WSADATA wsa;
 
+	/* First, so that the policies are in force before anything below can
+	 * cause a DLL to be loaded -- WSAStartup pulls in the Winsock catalog. */
+	win32_harden();
+
 	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
 		fprintf(stderr, "rsync: WSAStartup failed\n");
 		exit(1);
