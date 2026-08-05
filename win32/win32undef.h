@@ -41,9 +41,6 @@
 #undef ftruncate64
 #undef mkstemp64
 
-#undef readlink
-#undef symlink
-#undef link
 #undef chown
 #undef lchown
 #undef chmod
