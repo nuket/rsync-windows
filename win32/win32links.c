@@ -45,11 +45,6 @@ void win32_links_init(void)
 	lock_ready = 1;
 }
 
-static const char *kind_name(int kind)
-{
-	return kind == WIN32_LINK_SYMLINK ? "symlink" : "hard link";
-}
-
 static void print_summary(void)
 {
 	int kind, i;

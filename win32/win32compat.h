@@ -336,9 +336,6 @@ struct flock {
 
 /* ------------------------------------------------------------- filesystem */
 
-int  win32_readlink(const char *path, char *buf, size_t bufsiz);
-int  win32_symlink(const char *target, const char *linkpath);
-int  win32_link(const char *oldpath, const char *newpath);
 int  win32_chown(const char *path, uid_t uid, gid_t gid);
 int  win32_chmod(const char *path, mode_t mode);
 int  win32_mkdir(const char *path, mode_t mode);
@@ -349,9 +346,6 @@ int  win32_utimes(const char *path, const struct timeval tv[2]);
 int  win32_ftruncate64(int fd, off64_t length);
 int  win32_fsync(int fd);
 
-#define readlink(p, b, n)   win32_readlink((p), (b), (n))
-#define symlink(t, l)       win32_symlink((t), (l))
-#define link(o, n)          win32_link((o), (n))
 #define chown(p, u, g)      win32_chown((p), (u), (g))
 #define lchown(p, u, g)     win32_chown((p), (u), (g))
 #define chmod(p, m)         win32_chmod((p), (m))
