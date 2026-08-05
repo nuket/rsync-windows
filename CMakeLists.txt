@@ -45,6 +45,7 @@ option(RSYNC_ENABLE_XXHASH    "Support xxhash checksums"        OFF)
 option(RSYNC_ENABLE_ICONV     "Support --iconv character conversion" OFF)
 option(RSYNC_ENABLE_SIMD      "Use SIMD/asm checksum acceleration" OFF)
 option(RSYNC_EXTERNAL_ZLIB    "Link the system zlib instead of the bundled copy" OFF)
+option(RSYNC_STATIC_CRT       "Link the C runtime statically (MSVC only)" ON)
 # Note: the test suite (runtests.py) and its C helpers are driven by the
 # autoconf Makefile's "make check"; CMake builds only rsync itself.
 
@@ -66,6 +67,19 @@ if(WIN32)
 else()
     set(RSYNCD_SYSCONF  "/etc/rsyncd.conf")
     set(POPT_SYSCONFDIR "/etc")
+endif()
+
+# A default /MD build imports the C runtime from VCRUNTIME140.dll and the
+# api-ms-win-crt-*.dll UCRT stubs, so the binary only runs where the VC++
+# redistributable is installed and the UCRT is up to date.  rsync.exe is the
+# sort of thing that gets copied onto a machine and run, so link the runtime
+# in: what is left is ws2_32, advapi32 and kernel32, which are part of Windows
+# itself.  Costs about 245 KB (485 KB -> 737 KB for a Release build).
+#
+# This must be set before any target is created; CMake seeds each target's
+# MSVC_RUNTIME_LIBRARY property from it (policy CMP0091, NEW since 3.15).
+if(MSVC AND RSYNC_STATIC_CRT)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 set(GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}")
@@ -779,4 +793,7 @@ message(STATUS "  ACLs ................ ${SUPPORT_ACLS}")
 message(STATUS "  xattrs .............. ${SUPPORT_XATTRS}")
 message(STATUS "  OpenSSL ............. ${USE_OPENSSL}")
 message(STATUS "  bundled zlib ........ ${RSYNC_EXTERNAL_ZLIB}")
+if(MSVC)
+    message(STATUS "  static CRT .......... ${RSYNC_STATIC_CRT}")
+endif()
 message(STATUS "")
