@@ -75,7 +75,10 @@ int win32_open(const char *path, int flags, ...)
 	flags &= ~(O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC | O_NOATIME | O_NONBLOCK);
 	flags |= _O_BINARY;
 
-	fd = _open(path, flags, mode ? _S_IREAD | _S_IWRITE : 0);
+	/* Windows keeps one bit of a Unix mode: whether the file is writable.
+	 * Carry that bit across rather than making every created file
+	 * read-write and relying on the chmod that follows. */
+	fd = _open(path, flags, _S_IREAD | ((mode & 0200) ? _S_IWRITE : 0));
 	return fd;
 }
 
@@ -479,7 +482,15 @@ int win32_unlink(const char *path)
 
 int win32_rename(const char *from, const char *to)
 {
-	/* POSIX rename() replaces the destination; MoveFile does not. */
+	/*
+	 * POSIX rename() replaces the destination; MoveFile does not, hence
+	 * REPLACE_EXISTING.  COPY_ALLOWED then makes a cross-volume move work
+	 * by copying, which is why the EXDEV case below cannot actually be
+	 * reached: robust_rename() would otherwise catch EXDEV and do the copy
+	 * itself.  Letting Windows do it keeps --temp-dir on another drive
+	 * working; the cost is that what looks like a rename can move a whole
+	 * file's worth of bytes.
+	 */
 	if (!MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
 		switch (GetLastError()) {
 		case ERROR_FILE_NOT_FOUND:

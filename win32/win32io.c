@@ -324,10 +324,19 @@ int win32_socketpair(int domain, int type, int protocol, int sv[2])
 
 	closesocket(listener);
 
+	/* sockfd_alloc() closes the socket it was handed if the table is full,
+	 * so only the half that succeeded still needs releasing. */
 	sv[0] = win32_sockfd_alloc(a);
 	sv[1] = win32_sockfd_alloc(b);
-	if (sv[0] < 0 || sv[1] < 0)
+	if (sv[0] < 0 || sv[1] < 0) {
+		if (sv[0] >= 0)
+			win32_close(sv[0]);
+		if (sv[1] >= 0)
+			win32_close(sv[1]);
+		sv[0] = sv[1] = -1;
+		errno = EMFILE;
 		return -1;
+	}
 	return 0;
 
 fail:
@@ -345,12 +354,17 @@ fail:
 
 int win32_fcntl(int fd, int cmd, ...)
 {
-	va_list ap;
 	long arg = 0;
 
-	va_start(ap, cmd);
-	arg = va_arg(ap, long);
-	va_end(ap);
+	/* Only the setters are called with a third argument; reading one that
+	 * was never passed is undefined, however well it happens to work. */
+	if (cmd == F_SETFL || cmd == F_SETFD) {
+		va_list ap;
+
+		va_start(ap, cmd);
+		arg = va_arg(ap, long);
+		va_end(ap);
+	}
 
 	switch (cmd) {
 	case F_GETFL:

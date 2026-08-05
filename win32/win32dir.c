@@ -58,8 +58,17 @@ struct dirent *win32_readdir(DIR *dirp)
 	}
 
 	if (!dirp->pending) {
-		if (!FindNextFileA(dirp->handle, &dirp->find))
-			return NULL;   /* end of directory */
+		if (!FindNextFileA(dirp->handle, &dirp->find)) {
+			/* Callers cannot tell "directory ended" from "the read
+			 * failed" by the NULL alone, so they look at errno --
+			 * flist.c clears it before every readdir() and reports
+			 * whatever is left afterwards.  Staying silent here would
+			 * turn a share that dropped mid-enumeration into a
+			 * short file list, which --delete then acts on. */
+			if (GetLastError() != ERROR_NO_MORE_FILES)
+				errno = EIO;
+			return NULL;
+		}
 	}
 	dirp->pending = 0;
 

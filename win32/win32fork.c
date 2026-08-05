@@ -75,7 +75,11 @@ static unsigned __stdcall fork_thread_trampoline(void *p)
  */
 pid_t win32_fork_thread(void (*fn)(void *), void *arg)
 {
-	static struct fork_thread_ctx ctx;   /* lives past this call */
+	/* A local, not a static: every field is consumed before the child
+	 * signals `started`, and we do not return until then, so the frame
+	 * outlives the child's use of it.  A static would also mean two
+	 * concurrent forks silently sharing one context. */
+	struct fork_thread_ctx ctx;
 	uintptr_t th;
 	unsigned tid = 0;
 
@@ -109,6 +113,7 @@ pid_t win32_fork_thread(void (*fn)(void *), void *arg)
 	 * writes to TLS state can't race the memcpy. */
 	WaitForSingleObject(ctx.started, INFINITE);
 	CloseHandle(ctx.started);
+	free(ctx.parent_tls);   /* the child has its own copy now */
 
 	win32_remember_thread_child((pid_t)tid, (HANDLE)th);
 	return (pid_t)tid;
