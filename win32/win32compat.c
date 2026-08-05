@@ -138,24 +138,6 @@ int win32_attrs_are_symlink(unsigned long attrs, unsigned long tag)
 	    && (tag == IO_REPARSE_TAG_SYMLINK || tag == IO_REPARSE_TAG_MOUNT_POINT);
 }
 
-static int path_is_symlink(const char *path)
-{
-	WIN32_FIND_DATAA fd;
-	HANDLE h;
-	DWORD attrs = GetFileAttributesA(path);
-
-	if (attrs == INVALID_FILE_ATTRIBUTES
-	 || !(attrs & FILE_ATTRIBUTE_REPARSE_POINT))
-		return 0;
-
-	h = FindFirstFileA(path, &fd);
-	if (h == INVALID_HANDLE_VALUE)
-		return 0;
-	FindClose(h);
-
-	return win32_attrs_are_symlink(attrs, fd.dwReserved0);
-}
-
 /* Trailing slashes upset the file APIs on plain files; drop all but a root's. */
 static const char *trim_path(const char *path, char *buf, size_t bufsz)
 {
@@ -232,26 +214,43 @@ static int stat_by_handle(HANDLE h, const char *path,
 
 static int stat_path(const char *path, struct win32_stat *st, int follow)
 {
+	static const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE
+				 | FILE_SHARE_DELETE;
 	char buf[MAXPATHLEN];
 	const char *p = trim_path(path, buf, sizeof buf);
-	DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+	FILE_ATTRIBUTE_TAG_INFO tag;
 	int is_link = 0;
 	HANDLE h;
 	int rc;
 
-	if (path_is_symlink(p)) {
-		win32_note_link(p, WIN32_LINK_SYMLINK);
-		if (!follow) {
-			is_link = 1;
-			flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-		}
-	}
-
-	h = CreateFileA(p, FILE_READ_ATTRIBUTES,
-			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-			NULL, OPEN_EXISTING, flags, NULL);
+	/*
+	 * Open without following first.  Asking the handle what it is answers
+	 * both questions -- "is this a link" and "what are its attributes" --
+	 * from one path resolution, where testing the path beforehand cost a
+	 * second (and a third, FindFirstFile, to read the reparse tag).  stat()
+	 * runs once per file in the tree, so that is the walk's inner loop.
+	 */
+	h = CreateFileA(p, FILE_READ_ATTRIBUTES, share, NULL, OPEN_EXISTING,
+			FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+			NULL);
 	if (h == INVALID_HANDLE_VALUE)
 		return os_fail();
+
+	if (GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof tag)
+	 && win32_attrs_are_symlink(tag.FileAttributes, tag.ReparseTag)) {
+		win32_note_link(p, WIN32_LINK_SYMLINK);
+		if (follow) {
+			/* stat() reports the target, so pay for a second open
+			 * -- but only for the links, which are the rare case. */
+			CloseHandle(h);
+			h = CreateFileA(p, FILE_READ_ATTRIBUTES, share, NULL,
+					OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
+					NULL);
+			if (h == INVALID_HANDLE_VALUE)
+				return os_fail();
+		} else
+			is_link = 1;
+	}
 
 	rc = stat_by_handle(h, p, st, is_link);
 	CloseHandle(h);
