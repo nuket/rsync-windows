@@ -56,6 +56,48 @@ void win32_normalize_path(char *path)
 	}
 }
 
+/* ----------------------------------------------------------------- errors */
+
+/*
+ * The file APIs report through GetLastError(), so every wrapper below ends up
+ * translating it.  One table beats four hand-written switches that had drifted
+ * apart -- ERROR_INVALID_NAME meant ENOENT in stat() and EIO in unlink(), for
+ * instance.  This is the Win32 counterpart of wsa_to_errno() in win32io.c.
+ */
+int win32_oserr_to_errno(unsigned long err)
+{
+	switch (err) {
+	case ERROR_FILE_NOT_FOUND:
+	case ERROR_PATH_NOT_FOUND:
+	case ERROR_INVALID_NAME:
+	case ERROR_BAD_NETPATH:
+	case ERROR_BAD_PATHNAME:        return ENOENT;
+	case ERROR_ACCESS_DENIED:
+	case ERROR_SHARING_VIOLATION:
+	case ERROR_LOCK_VIOLATION:      return EACCES;
+	case ERROR_ALREADY_EXISTS:
+	case ERROR_FILE_EXISTS:         return EEXIST;
+	case ERROR_NOT_SAME_DEVICE:     return EXDEV;
+	case ERROR_PRIVILEGE_NOT_HELD:  return EPERM;
+	case ERROR_DIR_NOT_EMPTY:       return ENOTEMPTY;
+	case ERROR_TOO_MANY_OPEN_FILES: return EMFILE;
+	case ERROR_NOT_ENOUGH_MEMORY:
+	case ERROR_OUTOFMEMORY:         return ENOMEM;
+	case ERROR_DISK_FULL:           return ENOSPC;
+	case ERROR_WRITE_PROTECT:       return EROFS;
+	case ERROR_INVALID_HANDLE:      return EBADF;
+	default:                        return EIO;
+	}
+}
+
+/* Set errno from the last Win32 error and return -1, the way sock_fail()
+ * does for Winsock. */
+static int os_fail(void)
+{
+	errno = win32_oserr_to_errno(GetLastError());
+	return -1;
+}
+
 /* ------------------------------------------------------------------ open */
 
 int win32_open(const char *path, int flags, ...)
@@ -83,8 +125,14 @@ int win32_open(const char *path, int flags, ...)
 
 /* ------------------------------------------------------------------ stat */
 
-/* Windows reports a symlink only via a reparse point plus its tag. */
-static int attrs_are_symlink(DWORD attrs, DWORD tag)
+/*
+ * Windows reports a symlink only via a reparse point plus its tag.  The tag
+ * matters: plenty of things are reparse points without being links -- a
+ * OneDrive placeholder, a deduplicated file -- and calling those symlinks
+ * would be wrong twice over, in what gets reported and in what readdir()
+ * claims.  Shared with win32dir.c for exactly that reason.
+ */
+int win32_attrs_are_symlink(unsigned long attrs, unsigned long tag)
 {
 	return (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
 	    && (tag == IO_REPARSE_TAG_SYMLINK || tag == IO_REPARSE_TAG_MOUNT_POINT);
@@ -105,7 +153,7 @@ static int path_is_symlink(const char *path)
 		return 0;
 	FindClose(h);
 
-	return attrs_are_symlink(attrs, fd.dwReserved0);
+	return win32_attrs_are_symlink(attrs, fd.dwReserved0);
 }
 
 /* Trailing slashes upset the file APIs on plain files; drop all but a root's. */
@@ -147,10 +195,8 @@ static int stat_by_handle(HANDLE h, const char *path,
 {
 	BY_HANDLE_FILE_INFORMATION bhfi;
 
-	if (!GetFileInformationByHandle(h, &bhfi)) {
-		errno = EACCES;
-		return -1;
-	}
+	if (!GetFileInformationByHandle(h, &bhfi))
+		return os_fail();
 
 	memset(st, 0, sizeof *st);
 
@@ -204,16 +250,8 @@ static int stat_path(const char *path, struct win32_stat *st, int follow)
 	h = CreateFileA(p, FILE_READ_ATTRIBUTES,
 			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 			NULL, OPEN_EXISTING, flags, NULL);
-	if (h == INVALID_HANDLE_VALUE) {
-		switch (GetLastError()) {
-		case ERROR_FILE_NOT_FOUND:
-		case ERROR_PATH_NOT_FOUND:
-		case ERROR_INVALID_NAME:   errno = ENOENT; break;
-		case ERROR_ACCESS_DENIED:  errno = EACCES; break;
-		default:                   errno = EIO;    break;
-		}
-		return -1;
-	}
+	if (h == INVALID_HANDLE_VALUE)
+		return os_fail();
 
 	rc = stat_by_handle(h, p, st, is_link);
 	CloseHandle(h);
@@ -253,10 +291,8 @@ int win32_chmod(const char *path, mode_t mode)
 {
 	DWORD attrs = GetFileAttributesA(path);
 
-	if (attrs == INVALID_FILE_ATTRIBUTES) {
-		errno = ENOENT;
-		return -1;
-	}
+	if (attrs == INVALID_FILE_ATTRIBUTES)
+		return os_fail();
 
 	/* The only bit Windows can represent is "read-only". */
 	if (mode & S_IWUSR)
@@ -264,10 +300,8 @@ int win32_chmod(const char *path, mode_t mode)
 	else
 		attrs |= FILE_ATTRIBUTE_READONLY;
 
-	if (!SetFileAttributesA(path, attrs)) {
-		errno = EACCES;
-		return -1;
-	}
+	if (!SetFileAttributesA(path, attrs))
+		return os_fail();
 	return 0;
 }
 
@@ -291,19 +325,11 @@ int win32_unlink(const char *path)
 	 && (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
 		if (RemoveDirectoryA(path))
 			return 0;
-		errno = EACCES;
-		return -1;
+		return os_fail();
 	}
 
-	if (!DeleteFileA(path)) {
-		switch (GetLastError()) {
-		case ERROR_FILE_NOT_FOUND:
-		case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
-		case ERROR_ACCESS_DENIED:  errno = EACCES; break;
-		default:                   errno = EIO;    break;
-		}
-		return -1;
-	}
+	if (!DeleteFileA(path))
+		return os_fail();
 	return 0;
 }
 
@@ -318,16 +344,8 @@ int win32_rename(const char *from, const char *to)
 	 * working; the cost is that what looks like a rename can move a whole
 	 * file's worth of bytes.
 	 */
-	if (!MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
-		switch (GetLastError()) {
-		case ERROR_FILE_NOT_FOUND:
-		case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
-		case ERROR_ACCESS_DENIED:  errno = EACCES; break;
-		case ERROR_NOT_SAME_DEVICE: errno = EXDEV; break;
-		default:                   errno = EIO;    break;
-		}
-		return -1;
-	}
+	if (!MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+		return os_fail();
 	return 0;
 }
 

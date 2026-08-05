@@ -645,6 +645,13 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 
 /* --------------------------------------------------------- socket wrappers */
 
+/* Winsock reports failure the same way everywhere, so the wrappers below are
+ * all the same shape: hand the call its SOCKET, translate SOCKET_ERROR. */
+static int sock_result(int rc)
+{
+	return rc == SOCKET_ERROR ? sock_fail() : 0;
+}
+
 int win32_socket(int af, int type, int protocol)
 {
 	SOCKET s = socket(af, type, protocol);
@@ -665,58 +672,40 @@ int win32_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
 
 int win32_bind(int fd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	if (bind(win32_sockfd_handle(fd), addr, addrlen) == SOCKET_ERROR)
-		return sock_fail();
-	return 0;
+	return sock_result(bind(win32_sockfd_handle(fd), addr, addrlen));
 }
 
 int win32_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	if (connect(win32_sockfd_handle(fd), addr, addrlen) == SOCKET_ERROR)
-		return sock_fail();
-	return 0;
+	return sock_result(connect(win32_sockfd_handle(fd), addr, addrlen));
 }
 
 int win32_listen(int fd, int backlog)
 {
-	if (listen(win32_sockfd_handle(fd), backlog) == SOCKET_ERROR)
-		return sock_fail();
-	return 0;
+	return sock_result(listen(win32_sockfd_handle(fd), backlog));
 }
 
 int win32_setsockopt(int fd, int level, int opt, const void *val, socklen_t len)
 {
-	if (setsockopt(win32_sockfd_handle(fd), level, opt, (const char *)val, len)
-	    == SOCKET_ERROR)
-		return sock_fail();
-	return 0;
+	return sock_result(setsockopt(win32_sockfd_handle(fd), level, opt, (const char *)val, len));
 }
 
 int win32_getsockopt(int fd, int level, int opt, void *val, socklen_t *len)
 {
-	if (getsockopt(win32_sockfd_handle(fd), level, opt, (char *)val, len)
-	    == SOCKET_ERROR)
-		return sock_fail();
-	return 0;
+	return sock_result(getsockopt(win32_sockfd_handle(fd), level, opt, (char *)val, len));
 }
 
 int win32_getpeername(int fd, struct sockaddr *addr, socklen_t *len)
 {
-	if (getpeername(win32_sockfd_handle(fd), addr, len) == SOCKET_ERROR)
-		return sock_fail();
-	return 0;
+	return sock_result(getpeername(win32_sockfd_handle(fd), addr, len));
 }
 
 int win32_getsockname(int fd, struct sockaddr *addr, socklen_t *len)
 {
-	if (getsockname(win32_sockfd_handle(fd), addr, len) == SOCKET_ERROR)
-		return sock_fail();
-	return 0;
+	return sock_result(getsockname(win32_sockfd_handle(fd), addr, len));
 }
 
 int win32_shutdown(int fd, int how)
 {
-	if (shutdown(win32_sockfd_handle(fd), how) == SOCKET_ERROR)
-		return sock_fail();
-	return 0;
+	return sock_result(shutdown(win32_sockfd_handle(fd), how));
 }
