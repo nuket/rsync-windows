@@ -87,6 +87,7 @@
  * would call itself forever. */
 #undef signal
 #undef localtime_r
+#undef gmtime_r
 #undef getpass
 #undef access
 #undef alarm

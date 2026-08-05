@@ -149,12 +149,23 @@ int win32_stat(const char *path, struct win32_stat *st);
 int win32_lstat(const char *path, struct win32_stat *st);
 int win32_fstat(int fd, struct win32_stat *st);
 
+/* Links are not reproduced on Windows (see win32/win32links.c); the stat
+ * layer notes any it meets so the run can end with a list of them. */
+#define WIN32_LINK_SYMLINK  0
+#define WIN32_LINK_HARDLINK 1
+
+void win32_links_init(void);
+void win32_note_link(const char *path, int kind);
+
 /* syscall.c calls these under USE_STAT64_FUNCS. */
 #define stat64(p, b)    win32_stat((p), (b))
 #define lstat64(p, b)   win32_lstat((p), (b))
 #define fstat64(f, b)   win32_fstat((f), (b))
 #define lseek64         _lseeki64
 #define ftruncate64     win32_ftruncate64
+/* _chsize_s() under the POSIX name, which is what enables --inplace and
+ * --append (see usage.c's HAVE_FTRUNCATE capability). */
+#define ftruncate(f, n) win32_ftruncate64((f), (n))
 
 /* -------------------------------------------------------------- file mode */
 
@@ -528,7 +539,9 @@ int win32_no_fork(void);
 #endif
 
 struct tm *win32_localtime_r(const time_t *timep, struct tm *result);
+struct tm *win32_gmtime_r(const time_t *timep, struct tm *result);
 #define localtime_r(t, r) win32_localtime_r((t), (r))
+#define gmtime_r(t, r)    win32_gmtime_r((t), (r))
 
 /* Daemon-only calls with no Windows equivalent; rsync never reaches these
  * because --daemon and chroot aren't supported here. */

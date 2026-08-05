@@ -32,34 +32,15 @@ void win32_init(void)
 	setlocale(LC_ALL, ".UTF8");
 	SetConsoleOutputCP(CP_UTF8);
 	SetConsoleCP(CP_UTF8);
+
+	/* Must precede any stat() call, which is what records links. */
+	win32_links_init();
 }
 
 int win32_no_fork(void)
 {
 	errno = ENOSYS;
 	return -1;
-}
-
-/*
- * rsync splits and rebuilds paths around '/', so translate the user's
- * backslashes once, here, for the local (non-remote) operands only -- a
- * remote spec's path belongs to the peer and is left untouched.  Called from
- * main() via the platform_fix_path_args() hook once popt has consumed the
- * options and argv holds just the path operands.
- */
-void win32_fix_path_args(int argc, char *argv[])
-{
-	int i;
-
-	for (i = 0; i < argc; i++) {
-		char *host = NULL;
-		int port = 0;
-
-		if (!check_for_hostspec(argv[i], &host, &port))
-			win32_normalize_path(argv[i]);
-		if (host)
-			free(host);
-	}
 }
 
 void win32_normalize_path(char *path)
@@ -155,7 +136,8 @@ static __time64_t filetime_to_time(const FILETIME *ft)
  * what gives us a usable st_ino: the 64-bit NTFS file index, which is what
  * --hard-links compares.  It also reports the real link count.
  */
-static int stat_by_handle(HANDLE h, struct win32_stat *st, int is_link)
+static int stat_by_handle(HANDLE h, const char *path,
+			  struct win32_stat *st, int is_link)
 {
 	BY_HANDLE_FILE_INFORMATION bhfi;
 
@@ -171,6 +153,8 @@ static int stat_by_handle(HANDLE h, struct win32_stat *st, int is_link)
 	st->st_ino = ((unsigned __int64)bhfi.nFileIndexHigh << 32)
 		   | bhfi.nFileIndexLow;
 	st->st_nlink = (nlink_t)(bhfi.nNumberOfLinks ? bhfi.nNumberOfLinks : 1);
+	if (bhfi.nNumberOfLinks > 1 && path)
+		win32_note_link(path, WIN32_LINK_HARDLINK);
 	st->st_size = ((__int64)bhfi.nFileSizeHigh << 32) | bhfi.nFileSizeLow;
 	st->st_uid = WIN32_FAKE_UID;
 	st->st_gid = WIN32_FAKE_GID;
@@ -203,9 +187,12 @@ static int stat_path(const char *path, struct win32_stat *st, int follow)
 	HANDLE h;
 	int rc;
 
-	if (!follow && path_is_symlink(p)) {
-		is_link = 1;
-		flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+	if (path_is_symlink(p)) {
+		win32_note_link(p, WIN32_LINK_SYMLINK);
+		if (!follow) {
+			is_link = 1;
+			flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+		}
 	}
 
 	h = CreateFileA(p, FILE_READ_ATTRIBUTES,
@@ -222,7 +209,7 @@ static int stat_path(const char *path, struct win32_stat *st, int follow)
 		return -1;
 	}
 
-	rc = stat_by_handle(h, st, is_link);
+	rc = stat_by_handle(h, p, st, is_link);
 	CloseHandle(h);
 	return rc;
 }
@@ -245,7 +232,7 @@ int win32_fstat(int fd, struct win32_stat *st)
 		errno = EBADF;
 		return -1;
 	}
-	return stat_by_handle(h, st, 0);
+	return stat_by_handle(h, NULL, st, 0);
 }
 
 /* ------------------------------------------------------------------ links */
@@ -633,6 +620,13 @@ win32_sighandler_t win32_signal(int sig, win32_sighandler_t handler)
 struct tm *win32_localtime_r(const time_t *timep, struct tm *result)
 {
 	if (localtime_s(result, timep) != 0)
+		return NULL;
+	return result;
+}
+
+struct tm *win32_gmtime_r(const time_t *timep, struct tm *result)
+{
+	if (gmtime_s(result, timep) != 0)
 		return NULL;
 	return result;
 }

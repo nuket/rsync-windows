@@ -12,6 +12,7 @@ config.h.in
 config.h.in.old
 # ...but cmake/config.h.in is a source file, not an autoconf artifact.
 !cmake/config.h.in
+__pycache__/
 config.log
 config.status
 aclocal.m4

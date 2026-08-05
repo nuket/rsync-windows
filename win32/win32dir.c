@@ -63,7 +63,16 @@ struct dirent *win32_readdir(DIR *dirp)
 	}
 	dirp->pending = 0;
 
-	strlcpy(dirp->ent.d_name, dirp->find.cFileName, sizeof dirp->ent.d_name);
+	/* A plain bounded copy rather than strlcpy(), so that the test helpers
+	 * can link this file without also pulling in lib/compat.c. */
+	{
+		size_t n = strlen(dirp->find.cFileName);
+
+		if (n >= sizeof dirp->ent.d_name)
+			n = sizeof dirp->ent.d_name - 1;
+		memcpy(dirp->ent.d_name, dirp->find.cFileName, n);
+		dirp->ent.d_name[n] = '\0';
+	}
 	dirp->ent.d_ino = 0;
 
 	if (dirp->find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
