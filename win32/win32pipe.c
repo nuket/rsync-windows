@@ -37,6 +37,10 @@ extern RSYNC_TLS BOOL shutting_down;
  */
 int inc_recurse_when_receiving = 0;
 
+/* local_child() starts a separate process, which inherits nothing; the
+ * protocol exchanges a forked server could skip must actually happen. */
+int local_server_shares_memory = 0;
+
 /* ------------------------------------------------------------ piped_child */
 
 pid_t piped_child(char **command, int *f_in, int *f_out)
@@ -59,16 +63,54 @@ pid_t piped_child(char **command, int *f_in, int *f_out)
 
 /* ------------------------------------------------------------ local_child */
 
+/*
+ * pipe.c forks a child that keeps the parent's already-parsed options in
+ * memory and jumps straight to child_main().  Without fork() we start a
+ * second copy of this executable instead, and hand it the options the way a
+ * remote server would receive them: server_options() builds exactly the
+ * argument vector do_cmd() would have built for an ssh invocation, so the
+ * child is an ordinary --server run that happens to be on this machine.
+ *
+ * child_main is therefore unused here -- the new process reaches the same
+ * code through its own main().
+ */
 pid_t local_child(int argc, char **argv, int *f_in, int *f_out,
 		  int (*child_main)(int, char*[]))
 {
-	(void)argc; (void)argv; (void)f_in; (void)f_out; (void)child_main;
+	char *args[MAX_ARGS];
+	char self[MAXPATHLEN];
+	int i, ac = 0;
+	pid_t pid;
 
-	rprintf(FERROR,
-		"Local (non-remote) copies are not supported on Windows.\n"
-		"Use a remote source or destination, e.g. user@host:/path\n");
-	exit_cleanup(RERR_UNSUPPORTED);
-	return -1;
+	(void)child_main;
+
+	if (!GetModuleFileNameA(NULL, self, sizeof self)) {
+		rprintf(FERROR, "failed to determine our own executable path\n");
+		exit_cleanup(RERR_IPC);
+	}
+
+	args[ac++] = self;
+	server_options(args, &ac);        /* adds --server and the rest */
+
+	if (ac + argc >= MAX_ARGS) {
+		rprintf(FERROR, "argc overflow in local_child().\n");
+		exit_cleanup(RERR_MALLOC);
+	}
+	for (i = 0; i < argc; i++)
+		args[ac++] = argv[i];
+	args[ac] = NULL;
+
+	if (DEBUG_GTE(CMD, 1))
+		print_child_argv("starting local server:", args);
+
+	pid = win32_piped_child(args, f_in, f_out);
+	if (pid == -1) {
+		rsyserr(FERROR, errno, "failed to start the local server");
+		exit_cleanup(RERR_IPC);
+	}
+
+	set_blocking(*f_out);
+	return pid;
 }
 
 /* -------------------------------------------------- generator/receiver split */

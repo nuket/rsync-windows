@@ -42,6 +42,7 @@ extern int am_sender;
 extern RSYNC_TLS int am_receiver;
 extern RSYNC_TLS int am_generator;
 extern int local_server;
+extern int local_server_shares_memory;
 extern int msgs2stderr;
 extern int inc_recurse;
 extern int io_error;
@@ -1070,7 +1071,7 @@ void send_msg_int(enum msgcode code, int num)
 
 void send_msg_success(const char *fname, int num)
 {
-	if (local_server) {
+	if (LOCAL_SERVER_SHARES_STATE) {
 		STRUCT_STAT st;
 
 		if (DEBUG_GTE(IO, 1))
@@ -1104,7 +1105,7 @@ static void got_flist_entry_status(enum festatus status, int ndx)
 	switch (status) {
 	case FES_SUCCESS:
 		if (remove_source_files) {
-			if (local_server)
+			if (LOCAL_SERVER_SHARES_STATE)
 				send_msg(MSG_SUCCESS, num_dev_ino_buf, sizeof num_dev_ino_buf, -1);
 			else
 				send_msg_int(MSG_SUCCESS, ndx);
@@ -1621,7 +1622,7 @@ static void read_a_msg(void)
 		}
 		break;
 	case MSG_SUCCESS:
-		if (msg_bytes != (local_server ? 4+8+8 : 4)) {
+		if (msg_bytes != (LOCAL_SERVER_SHARES_STATE ? 4+8+8 : 4)) {
 		  invalid_msg:
 			rprintf(FERROR, "invalid multi-message %d:%lu [%s%s]\n",
 				tag, (unsigned long)msg_bytes, who_am_i(),

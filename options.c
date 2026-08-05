@@ -26,6 +26,7 @@
 
 extern int module_id;
 extern int local_server;
+extern int local_server_shares_memory;
 extern int sanitize_paths;
 extern int trust_sender_args;
 extern int trust_sender_filter;
@@ -2740,7 +2741,7 @@ void server_options(char **args, int *argc_p)
 	}
 #endif
 
-	if (protect_args && !local_server) /* unprotected args stop here */
+	if (protect_args && !LOCAL_SERVER_SHARES_STATE) /* unprotected args stop here */
 		args[ac++] = NULL;
 
 	if (list_only > 1)

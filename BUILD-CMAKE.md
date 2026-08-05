@@ -62,13 +62,11 @@ OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
   manifest selecting the UTF-8 active code page, so names like
   `naïve-café-日本.txt` round-trip byte-for-byte to a UTF-8 Unix peer.
 * Names containing spaces, quotes and shell metacharacters.
+* **Local-to-local copies** (`rsync -rt C:\a\ D:\b\`), including `--delete`,
+  `--exclude` and `--remove-source-files`.
 
 ## What does not work
 
-* **Local-to-local copies** (`rsync C:\a\ C:\b\`). `local_child()` forks an
-  in-process server, and unlike the generator/receiver split there is no
-  shared-nothing state to isolate — the child re-runs rsync's whole argument
-  and option machinery. Exits with a clear message.
 * **Daemon mode** (`--daemon`, `rsync://`), which needs `fork()`, `chroot()`
   and Unix users.
 * Symlinks, hard links, ACLs, xattrs, devices and Unix ownership are compiled
@@ -123,6 +121,29 @@ or the other, rather than interleaved.
 | `win32/win32pipe.c` | Replaces `pipe.c`: process plumbing and the split. |
 | `win32/include/` | Stand-ins for headers MSVC lacks. |
 | `win32/rsync.manifest` | Selects the UTF-8 active code page. |
+
+### Local copies
+
+`local_child()` normally forks a child that keeps the parent's parsed options
+in memory and jumps straight into `child_main()`. This port starts a second
+copy of the executable instead and hands it the options the way a remote
+server would receive them: `server_options()` builds exactly the argument
+vector `do_cmd()` would have built for an ssh invocation, so the child is an
+ordinary `--server` run that happens to be on this machine.
+
+That makes the local server a separate process, which matters for more than
+startup. `local_server` in the shared code means two things at once — "the
+peer is on this machine" and "the peer inherited our memory, so don't bother
+transmitting what it already has". Only the first still holds.
+`LOCAL_SERVER_SHARES_STATE` (`rsync.h`) separates them, and the three places
+that skip transmission now test that instead: the filter list in
+`exclude.c`, the shape of a `MSG_SUCCESS` in `io.c`, and the protected-args
+terminator in `options.c`. Both ends evaluate it identically, which is what
+keeps the protocol in step.
+
+This is not cosmetic. Without it, `--delete --exclude=PATTERN` would delete
+the excluded files, because the server would never receive the filter list
+that protects them.
 
 ### The generator/receiver split
 
@@ -186,6 +207,9 @@ Against an Ubuntu 22.04 host running rsync 3.2.7 (protocol 31), over ssh:
   deletions, verified against the remote's own manifest each round.
 * Five repeated pulls with and without `-z`, all byte-exact.
 * Unicode, spaces and shell metacharacters in file names.
+* Local-to-local copy of a 457-file tree, byte-for-byte identical to the
+  source; `--delete --exclude` correctly spares the excluded files;
+  `--remove-source-files` empties the source.
 
 The `RSYNC_TLS` changes are inert off Windows, and the CMake-built binary
 still passes rsync's own test suite there: on both Ubuntu 22.04.5 and
