@@ -233,8 +233,42 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     # rev and emit "3.5.0dev-gv3.4.3-182-gc9dc4749-dirty".
     string(REGEX REPLACE "-dirty$" "" RSYNC_GITVER "${RSYNC_GITVER}")
 endif()
+# Compose the version rsync reports.  Builds come off git HEAD routinely, so
+# it names the commit; where there is no tag to anchor to, it still says which
+# release the source is, which a bare rev does not:
+#
+#   git describe    v3.4.3-182-gc9dc4749   ->  3.4.3-182-gc9dc4749
+#   on a tag        v3.4.3                 ->  3.4.3
+#   no tag at all   c9dc4749               ->  3.5.0dev-gc9dc4749
+#   no git                                 ->  3.5.0dev
+#
+# The last case is the one that matters in CI: a fresh clone of a fork has no
+# tags, and writing describe's raw output there made `rsync --version` report
+# "e176e5f0" and nothing else.  mkgitver avoids that by writing git-version.h
+# only when describe produced a v3.x.y string, falling back to RSYNC_VERSION;
+# this keeps the rev as well, which is strictly more useful.
+set(RSYNC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}")
+set(RSYNC_GIT_TAG "")
+set(RSYNC_GIT_COUNT 0)
+
+if(RSYNC_GITVER MATCHES "^v?([0-9]+(\\.[0-9]+)*)-([0-9]+)-g([0-9a-fA-F]+)$")
+    set(RSYNC_GIT_TAG "${CMAKE_MATCH_1}")
+    set(RSYNC_GIT_COUNT "${CMAKE_MATCH_3}")
+    set(RSYNC_VERSION_DISPLAY "${RSYNC_GIT_TAG}-${RSYNC_GIT_COUNT}-g${CMAKE_MATCH_4}")
+elseif(RSYNC_GITVER MATCHES "^v?([0-9]+(\\.[0-9]+)*)$")
+    # Sitting exactly on a tag: no rev to add, and nothing since it.
+    set(RSYNC_GIT_TAG "${CMAKE_MATCH_1}")
+    set(RSYNC_VERSION_DISPLAY "${RSYNC_GIT_TAG}")
+elseif(RSYNC_GITVER)
+    # No tag reachable -- describe --always gave a bare rev.
+    set(RSYNC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}-g${RSYNC_GITVER}")
+endif()
+
+# usage.c prints RSYNC_GITVER when it is defined, so this is what
+# `rsync --version` says -- and what the Windows version resource says too.
 if(RSYNC_GITVER)
-    file(WRITE "${GEN_DIR}/git-version.h" "#define RSYNC_GITVER \"${RSYNC_GITVER}\"\n")
+    file(WRITE "${GEN_DIR}/git-version.h"
+         "#define RSYNC_GITVER \"${RSYNC_VERSION_DISPLAY}\"\n")
 else()
     file(WRITE "${GEN_DIR}/git-version.h" "")
 endif()
@@ -243,38 +277,18 @@ endif()
 # Version resource (Explorer's Details tab, and what inventory tools read)
 # ---------------------------------------------------------------------------
 if(WIN32)
-    # Builds come off git HEAD routinely, so the version has to name the
-    # commit.  Take the release from the nearest tag, the identity from the
-    # short rev, and the ordering from the commit count:
+    # The strings are the version composed above, so the resource, the release
+    # name and `rsync --version` all say the same thing.  The binary
+    # FILEVERSION is four 16-bit numbers and cannot hold a rev, so it carries
+    # the tag plus the commit count -- which advances with every commit, so
+    # Windows can tell two HEAD builds apart and order them:
     #
     #   git describe    v3.4.3-182-gc9dc4749
-    #   displayed       3.4.3-182-gc9dc4749   <- tag, commits since, rev
-    #   binary          3,4,3,182             <- tag + commits since
-    #
-    # The commit count is what makes the binary field useful: it advances
-    # with every commit, so Windows can tell two HEAD builds apart and order
-    # them.  A fixed 3,5,0,0 from version.h could not.
-    # Default to version.h, for a tree with no git information at all.
-    set(_tag "")
-    set(_twk 0)
-    set(RSYNC_RC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}")
-
-    if(RSYNC_GITVER MATCHES "^v?([0-9]+(\\.[0-9]+)*)-([0-9]+)-g([0-9a-fA-F]+)$")
-        set(_tag "${CMAKE_MATCH_1}")
-        set(_twk "${CMAKE_MATCH_3}")
-        # Tag, commits since, rev: the whole describe minus git's "v".  That
-        # is also exactly what rsync --version prints, so the two agree
-        # character for character.
-        set(RSYNC_RC_VERSION_DISPLAY "${_tag}-${_twk}-g${CMAKE_MATCH_4}")
-    elseif(RSYNC_GITVER MATCHES "^v?([0-9]+(\\.[0-9]+)*)$")
-        # Sitting exactly on a tag: no rev to add, and nothing since it.
-        set(_tag "${CMAKE_MATCH_1}")
-        set(RSYNC_RC_VERSION_DISPLAY "${_tag}")
-    elseif(RSYNC_GITVER)
-        # No tag reachable -- describe --always gave a bare rev.  Keep
-        # version.h's numbers and still name the commit.
-        set(RSYNC_RC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}-g${RSYNC_GITVER}")
-    endif()
+    #   strings         3.4.3-182-gc9dc4749
+    #   binary          3,4,3,182
+    set(RSYNC_RC_VERSION_DISPLAY "${RSYNC_VERSION_DISPLAY}")
+    set(_tag "${RSYNC_GIT_TAG}")
+    set(_twk "${RSYNC_GIT_COUNT}")
 
     # Take major.minor.patch from the tag whenever there is one, so the string
     # and the numbers tell the same story rather than one saying 3.4.3 and the
