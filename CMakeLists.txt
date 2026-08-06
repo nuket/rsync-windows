@@ -14,8 +14,20 @@
 #
 cmake_minimum_required(VERSION 3.20)
 
+# version.h is where rsync itself keeps the version -- configure.ac greps it
+# out of there too -- so read it rather than repeating it.  A literal here
+# goes stale silently: it said 3.4.4 while version.h said 3.5.0dev.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/version.h" _version_h)
+string(REGEX MATCH "RSYNC_VERSION[ \t]+\"([^\"]+)\"" _m "${_version_h}")
+set(RSYNC_VERSION_STRING "${CMAKE_MATCH_1}")
+if(NOT RSYNC_VERSION_STRING)
+    message(FATAL_ERROR "Could not read RSYNC_VERSION from version.h")
+endif()
+# project(VERSION) takes numbers only, so drop any "dev"/"pre1" suffix.
+string(REGEX MATCH "^[0-9]+(\\.[0-9]+)*" RSYNC_VERSION_NUMERIC "${RSYNC_VERSION_STRING}")
+
 project(rsync
-        VERSION 3.4.4
+        VERSION ${RSYNC_VERSION_NUMERIC}
         DESCRIPTION "fast incremental file transfer"
         HOMEPAGE_URL "https://rsync.samba.org/"
         LANGUAGES C)
@@ -207,16 +219,110 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 set(RSYNC_GITVER "")
 find_package(Git QUIET)
 if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
-    execute_process(COMMAND ${GIT_EXECUTABLE} describe --always --dirty
+    # Same arguments mkgitver uses, so the two build systems produce the same
+    # version string: --abbrev=8 pins the rev length (git's default grows with
+    # the repo), and no --dirty, so an uncommitted tree does not get a marker.
+    execute_process(COMMAND ${GIT_EXECUTABLE} describe --always --abbrev=8
                     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                     OUTPUT_VARIABLE RSYNC_GITVER
                     OUTPUT_STRIP_TRAILING_WHITESPACE
                     ERROR_QUIET)
+    # Belt and braces: nothing above asks for the marker, so this only fires
+    # if RSYNC_GITVER is supplied by hand.  Strip it here rather than let it
+    # reach the version parser, which would read the whole string as a bare
+    # rev and emit "3.5.0dev-gv3.4.3-182-gc9dc4749-dirty".
+    string(REGEX REPLACE "-dirty$" "" RSYNC_GITVER "${RSYNC_GITVER}")
 endif()
 if(RSYNC_GITVER)
     file(WRITE "${GEN_DIR}/git-version.h" "#define RSYNC_GITVER \"${RSYNC_GITVER}\"\n")
 else()
     file(WRITE "${GEN_DIR}/git-version.h" "")
+endif()
+
+# ---------------------------------------------------------------------------
+# Version resource (Explorer's Details tab, and what inventory tools read)
+# ---------------------------------------------------------------------------
+if(WIN32)
+    # Builds come off git HEAD routinely, so the version has to name the
+    # commit.  Take the release from the nearest tag, the identity from the
+    # short rev, and the ordering from the commit count:
+    #
+    #   git describe    v3.4.3-182-gc9dc4749
+    #   displayed       3.4.3-182-gc9dc4749   <- tag, commits since, rev
+    #   binary          3,4,3,182             <- tag + commits since
+    #
+    # The commit count is what makes the binary field useful: it advances
+    # with every commit, so Windows can tell two HEAD builds apart and order
+    # them.  A fixed 3,5,0,0 from version.h could not.
+    # Default to version.h, for a tree with no git information at all.
+    set(_tag "")
+    set(_twk 0)
+    set(RSYNC_RC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}")
+
+    if(RSYNC_GITVER MATCHES "^v?([0-9]+(\\.[0-9]+)*)-([0-9]+)-g([0-9a-fA-F]+)$")
+        set(_tag "${CMAKE_MATCH_1}")
+        set(_twk "${CMAKE_MATCH_3}")
+        # Tag, commits since, rev: the whole describe minus git's "v".  That
+        # is also exactly what rsync --version prints, so the two agree
+        # character for character.
+        set(RSYNC_RC_VERSION_DISPLAY "${_tag}-${_twk}-g${CMAKE_MATCH_4}")
+    elseif(RSYNC_GITVER MATCHES "^v?([0-9]+(\\.[0-9]+)*)$")
+        # Sitting exactly on a tag: no rev to add, and nothing since it.
+        set(_tag "${CMAKE_MATCH_1}")
+        set(RSYNC_RC_VERSION_DISPLAY "${_tag}")
+    elseif(RSYNC_GITVER)
+        # No tag reachable -- describe --always gave a bare rev.  Keep
+        # version.h's numbers and still name the commit.
+        set(RSYNC_RC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}-g${RSYNC_GITVER}")
+    endif()
+
+    # Take major.minor.patch from the tag whenever there is one, so the string
+    # and the numbers tell the same story rather than one saying 3.4.3 and the
+    # other 3.5.0.  A short tag like "v4.0" zeroes the rest rather than leaving
+    # version.h's patch level showing under someone else's major version.
+    if(_tag)
+        string(REPLACE "." ";" _tagparts "${_tag}")
+        list(LENGTH _tagparts _n)
+        set(_maj 0)
+        set(_min 0)
+        set(_pat 0)
+        list(GET _tagparts 0 _maj)
+        if(_n GREATER 1)
+            list(GET _tagparts 1 _min)
+        endif()
+        if(_n GREATER 2)
+            list(GET _tagparts 2 _pat)
+        endif()
+    else()
+        set(_maj ${PROJECT_VERSION_MAJOR})
+        set(_min ${PROJECT_VERSION_MINOR})
+        set(_pat ${PROJECT_VERSION_PATCH})
+    endif()
+
+    # Four fields, always: an absent component is 0, and building this from a
+    # list would drop the empty ones and emit "3,4,3" -- which rc.exe accepts
+    # and then reports as a different version than intended.
+    foreach(_f _maj _min _pat _twk)
+        if(NOT ${_f})
+            set(${_f} 0)
+        endif()
+    endforeach()
+    set(RSYNC_RC_FILEVERSION "${_maj},${_min},${_pat},${_twk}")
+    # Only the binary field is capped at 16 bits per component.
+    if(_twk GREATER 65535)
+        message(WARNING "commit count ${_twk} exceeds the 16 bits FILEVERSION "
+                        "allows; the build number will wrap")
+    endif()
+
+    # Flag anything that is not a plain released version, so the properties
+    # dialog says so rather than implying a release build.
+    set(RSYNC_RC_FILEFLAGS "0")
+    if(RSYNC_RC_VERSION_DISPLAY MATCHES "dev|pre|-g[0-9a-fA-F]+")
+        set(RSYNC_RC_FILEFLAGS "VS_FF_PRERELEASE")
+    endif()
+
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/win32/rsync-version.rc.in"
+                   "${GEN_DIR}/rsync-version.rc" @ONLY)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -728,8 +834,10 @@ if(WIN32)
         # MSVC's signed/unsigned and deprecation warnings.
         target_compile_options(rsync PRIVATE /W2 /wd4996 /wd4267 /wd4244 /wd4018)
         # Embed the manifest (UTF-8 active code page) as a resource, and
-        # turn off the linker's own manifest so there is exactly one.
-        target_sources(rsync PRIVATE win32/rsync.rc)
+        # turn off the linker's own manifest so there is exactly one.  The
+        # version resource is separate and goes on rsync.exe alone: the test
+        # helpers want the same manifest but must not claim to be rsync.
+        target_sources(rsync PRIVATE win32/rsync.rc "${GEN_DIR}/rsync-version.rc")
         target_link_options(rsync PRIVATE "/MANIFEST:NO")
     endif()
 endif()
