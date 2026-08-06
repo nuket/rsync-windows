@@ -9,11 +9,12 @@ Unix ownership and link *creation* do not (see BUILD-CMAKE.md).
 
     windows-build-and-test.bat
 
-builds it and runs the test suite. The result is a standalone `rsync.exe`
-importing only `WS2_32`, `ADVAPI32` and `KERNEL32` — all shipped with
-Windows — with the C runtime linked in and the usual exploit mitigations
-enabled (Control Flow Guard, CET shadow stack, strict `/GS`, Spectre v1
-hardening, ASLR, DEP, and a System32-only DLL search path).
+builds it and runs the test suite, for x64 (`build\rsync.exe`) and x86
+(`build-x86\rsync-x86.exe`) in turn. Either result is standalone, importing
+only `WS2_32`, `ADVAPI32` and `KERNEL32` — all shipped with Windows — with the
+C runtime linked in and the usual exploit mitigations enabled (Control Flow
+Guard, CET shadow stack, strict `/GS`, Spectre v1 hardening, ASLR, DEP, and a
+System32-only DLL search path).
 
 ### The guiding constraint
 
@@ -75,11 +76,11 @@ All new, all Windows-only (`win32/`, ~3,100 lines):
 
 | File | Lines | Role |
 | --- | --- | --- |
-| `CMakeLists.txt` | 861 | full autoconf replacement: feature probes, generated headers, source lists, test helpers, mitigation and static-CRT options |
-| `BUILD-CMAKE.md` | 551 | build instructions, design notes, and what does not work |
+| `CMakeLists.txt` | 1032 | full autoconf replacement: feature probes, generated headers, source lists, test helpers, mitigation and static-CRT options |
+| `BUILD-CMAKE.md` | 571 | build instructions, design notes, and what does not work |
 | `cmake/gen-headers.py` | 304 | Python ports of the `awk` generators (`proto.h`, `daemon-parm.h`, `help-*.h`, `default-*.h`), byte-exact against real `awk` |
 | `cmake/config.h.in` | 257 | the `config.h` template |
-| `windows-build-and-test.bat` | 289 | one-command build and test; finds MSVC via `vswhere`, so no Developer Command Prompt is needed |
+| `windows-build-and-test.bat` | 392 | one-command build and test of both architectures; finds MSVC via `vswhere`, so no Developer Command Prompt is needed |
 | `setup-linux.sh` | 272 | installs the build dependencies on Ubuntu 22.04 and 26.04 |
 
 Python 3.6+ is the only new hard requirement, and only because it replaces

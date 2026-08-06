@@ -1,4 +1,4 @@
-# Build rsync.exe for Windows, and publish it when a tag is pushed.
+# Build rsync for Windows -- x64 and x86 -- and publish both.
 #
 # This is the only workflow that runs on this branch.  Every other workflow in
 # .github/workflows/ is triggered by `push: branches: [ master ]`, and the
@@ -19,7 +19,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
-    name: Build rsync.exe
+    name: Build rsync.exe and rsync-x86.exe
     steps:
     - uses: actions/checkout@v7
       with:
@@ -40,23 +40,20 @@ jobs:
 
     - name: Build and test
       shell: cmd
-      # windows-build-and-test.bat finds MSVC through vswhere and calls
-      # vcvars64 itself, so no toolchain action is needed.  The ssh transfer
+      # windows-build-and-test.bat finds MSVC through vswhere and calls the
+      # right vcvars itself, so no toolchain action is needed.  It defaults to
+      # --arch both: x64 into build\, x86 into build-x86\, each configured,
+      # built and run through the test suite separately.  The ssh transfer
       # tests skip on their own without RSYNC_WIN_TEST_HOST.
       run: windows-build-and-test.bat --clean
 
-    - name: Show what was built, and check it is self-contained
+    - name: Show what was built, and check both are self-contained
       shell: pwsh
       run: |
-        $vi = (Get-Item build\rsync.exe).VersionInfo
-        Write-Host "FileVersion    : $($vi.FileVersion)"
-        Write-Host "ProductVersion : $($vi.ProductVersion)"
-        Write-Host "FileDescription: $($vi.FileDescription)"
-        Write-Host "LegalCopyright : $($vi.LegalCopyright)"
-
         # Each step gets a fresh shell, so the vcvars environment the build
         # step set up is gone and dumpbin is not on PATH.  Find it the way
-        # windows-build-and-test.bat finds the compiler.
+        # windows-build-and-test.bat finds the compiler.  The x64 dumpbin
+        # reads a 32-bit image perfectly well, so one copy covers both.
         $vswhere = "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
         $vs = & $vswhere -latest -products * `
                 -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
@@ -65,31 +62,73 @@ jobs:
                     Select-Object -Last 1).FullName
         if (-not $dumpbin) { Write-Error "dumpbin not found under $vs"; exit 1 }
 
-        $dlls = & $dumpbin /dependents build\rsync.exe |
-                Select-String -Pattern '\.dll' | ForEach-Object { $_.Line.Trim() }
-        Write-Host "imports: $($dlls -join ', ')"
+        # Machine type as well as imports: the whole point of shipping two
+        # binaries is that they are for different architectures, and a build
+        # directory that somehow configured for the wrong one would otherwise
+        # sail through as a duplicate of the other.
+        $builds = @(
+          @{ Path = 'build\rsync.exe';             Arch = 'x64'; Machine = 'x64' },
+          @{ Path = 'build-x86\rsync-x86.exe';     Arch = 'x86'; Machine = 'x86' }
+        )
 
-        # The point of the static CRT: these three ship with Windows, so the
-        # binary runs on a machine with no redistributable installed.  If a
-        # VCRUNTIME or api-ms-win-crt import ever reappears, fail here rather
-        # than ship something that will not start on a clean machine.
-        $unexpected = $dlls | Where-Object { $_ -notmatch '^(WS2_32|ADVAPI32|KERNEL32)\.dll$' }
-        if ($unexpected) {
-          Write-Error "rsync.exe imports something outside the Windows base set: $($unexpected -join ', ')"
-          exit 1
+        foreach ($b in $builds) {
+          if (-not (Test-Path $b.Path)) { Write-Error "$($b.Path) was not built"; exit 1 }
+          $vi = (Get-Item $b.Path).VersionInfo
+          Write-Host "--- $($b.Path)  ($((Get-Item $b.Path).Length) bytes)"
+          Write-Host "  FileVersion    : $($vi.FileVersion)"
+          Write-Host "  ProductVersion : $($vi.ProductVersion)"
+          Write-Host "  FileDescription: $($vi.FileDescription)"
+          Write-Host "  LegalCopyright : $($vi.LegalCopyright)"
+
+          $headers = & $dumpbin /headers $b.Path
+          $machine = $headers | Select-String -Pattern 'machine \((.+)\)' |
+                     Select-Object -First 1
+          if (-not $machine -or $machine.Matches[0].Groups[1].Value -ne $b.Machine) {
+            Write-Error "$($b.Path) is not a $($b.Machine) image: $machine"
+            exit 1
+          }
+          Write-Host "  machine        : $($b.Machine)"
+
+          $dlls = & $dumpbin /dependents $b.Path |
+                  Select-String -Pattern '\.dll' | ForEach-Object { $_.Line.Trim() }
+          Write-Host "  imports        : $($dlls -join ', ')"
+
+          # The point of the static CRT: these three ship with Windows, so the
+          # binary runs on a machine with no redistributable installed.  If a
+          # VCRUNTIME or api-ms-win-crt import ever reappears, fail here rather
+          # than ship something that will not start on a clean machine.
+          $unexpected = $dlls | Where-Object { $_ -notmatch '^(WS2_32|ADVAPI32|KERNEL32)\.dll$' }
+          if ($unexpected) {
+            Write-Error "$($b.Path) imports something outside the Windows base set: $($unexpected -join ', ')"
+            exit 1
+          }
         }
-        Write-Host "self-contained: only Windows base DLLs are imported"
+        Write-Host "both are self-contained: only Windows base DLLs are imported"
 
     - name: Stage the files to ship
       shell: pwsh
       run: |
-        $ver = (Get-Item build\rsync.exe).VersionInfo.ProductVersion
+        $ver    = (Get-Item build\rsync.exe).VersionInfo.ProductVersion
+        $ver86  = (Get-Item build-x86\rsync-x86.exe).VersionInfo.ProductVersion
+
+        # One release, one version: both binaries come out of the same
+        # checkout, so a disagreement means one of the two build directories
+        # is stale and the release would be labelled for only one of them.
+        if ($ver -ne $ver86) {
+          Write-Error "version mismatch: x64 is $ver, x86 is $ver86"
+          exit 1
+        }
+
         New-Item -ItemType Directory dist | Out-Null
         Copy-Item build\rsync.exe dist\
+        Copy-Item build-x86\rsync-x86.exe dist\
         Copy-Item COPYING dist\COPYING.txt
         Copy-Item BUILD-CMAKE.md dist\
-        $hash = (Get-FileHash dist\rsync.exe -Algorithm SHA256).Hash.ToLower()
-        "$hash  rsync.exe" | Out-File -Encoding ascii dist\rsync.exe.sha256
+        foreach ($exe in 'rsync.exe', 'rsync-x86.exe') {
+          $hash = (Get-FileHash "dist\$exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $exe" | Out-File -Encoding ascii "dist\$exe.sha256"
+          Write-Host "$exe  $hash"
+        }
         "VER=$ver" >>$Env:GITHUB_ENV
 
         # Split <release>-g<upstream rev>-g<port rev> so the release notes can
@@ -108,7 +147,7 @@ jobs:
           "RSYNC_VER_UPSTREAM="  >>$Env:GITHUB_ENV
           "RSYNC_VER_PORT="      >>$Env:GITHUB_ENV
         }
-        Write-Host "staged rsync $ver (sha256 $hash)"
+        Write-Host "staged rsync $ver, x64 and x86"
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v7
@@ -116,7 +155,7 @@ jobs:
         # Loose files, not an archive: upload-artifact always zips what it is
         # given, so handing it a zip produced a zip inside a zip.  The
         # artifact name is what GitHub calls the zip it builds.
-        name: rsync-${{ env.VER }}-windows-x64
+        name: rsync-${{ env.VER }}-windows
         path: dist/*
         if-no-files-found: error
 
@@ -166,14 +205,26 @@ jobs:
           $upstreamRow = "| _(absent)_ | no upstream master ref was available at build time |"
         }
 
+        # Lines here are not wrapped, deliberately: GitHub renders a single
+        # newline in release notes as a line break, so text wrapped to 80
+        # columns in this file comes out ragged on a narrow screen.  One
+        # paragraph is one line, and the browser wraps it to whatever width it
+        # actually has.
         $notes = @"
-        Native Windows build of rsync (x64).
+        Native Windows build of rsync, for 64-bit and 32-bit Windows.
+
+        ## Downloads
+
+        | download | for |
+        | --- | --- |
+        | ``rsync.exe`` | 64-bit Windows -- the one to take unless you know you need the other |
+        | ``rsync-x86.exe`` | 32-bit Windows, and 64-bit machines running something that will only load a 32-bit image |
+
+        Same source, same options, same behaviour -- the two differ only in the architecture they were compiled for, and each has a ``.sha256`` beside it.
 
         ## Reading the version
 
-        This port is a branch that gets rebased onto rsync's upstream master as
-        that moves, so "which commit is this?" has two answers, and the version
-        gives both:
+        This port is a branch that gets rebased onto rsync's upstream master as that moves, so "which commit is this?" has two answers, and the version gives both:
 
         ``````
         $tag
@@ -185,31 +236,28 @@ jobs:
         $upstreamRow
         | ``g$Env:RSYNC_VER_PORT`` | the commit in this repository that was built ([browse](https://github.com/$Env:GITHUB_REPOSITORY/commit/$Env:GITHUB_SHA)) |
 
-        So the upstream rev tells you which rsync you are getting, and the port
-        rev tells you which build of the Windows work you are getting. The two
-        move independently: a rebase changes the first, a fix here changes the
-        second. ``rsync --version`` prints the same string.
+        So the upstream rev tells you which rsync you are getting, and the port rev tells you which build of the Windows work you are getting. The two move independently: a rebase changes the first, a fix here changes the second. ``rsync --version`` prints the same string, and both binaries carry it in their file properties.
 
-        ## Verifying the download
+        ## Verifying a download
 
         ``````
         certutil -hashfile rsync.exe SHA256
+        certutil -hashfile rsync-x86.exe SHA256
         ``````
 
-        and compare against ``rsync.exe.sha256``.
+        and compare each against the matching ``.sha256`` file.
 
         ## Notes
 
-        No Visual C++ redistributable is needed: the C runtime is linked in and
-        the only imports are WS2_32, ADVAPI32 and KERNEL32.
+        No Visual C++ redistributable is needed by either build: the C runtime is linked in, and the only imports are WS2_32, ADVAPI32 and KERNEL32, all of which ship with Windows.
 
-        Source, licence (GPL-3.0-or-later), and what is and is not supported
-        are in this repository -- see BUILD-CMAKE.md. Symlinks, hard links,
-        daemon mode, ACLs and xattrs are **not** supported on Windows.
+        Source, licence (GPL-3.0-or-later), and what is and is not supported are in this repository -- see BUILD-CMAKE.md. Symlinks, hard links, daemon mode, ACLs and xattrs are **not** supported on Windows.
         "@
 
-        gh release create $tag dist\rsync.exe dist\rsync.exe.sha256 `
-          --title "rsync $tag for Windows (x64)" `
+        gh release create $tag `
+          dist\rsync.exe dist\rsync.exe.sha256 `
+          dist\rsync-x86.exe dist\rsync-x86.exe.sha256 `
+          --title "rsync $tag for Windows" `
           --notes $notes `
           --target $Env:GITHUB_SHA `
           @extra

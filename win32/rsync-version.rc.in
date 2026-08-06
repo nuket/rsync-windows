@@ -14,6 +14,10 @@
  * count instead ("3.4.3.181"), so it still advances with every commit and
  * still orders two builds correctly.
  *
+ * The 32-bit build is rsync-x86.exe, so OriginalFilename and the description
+ * follow the rename -- everything else about the two builds is identical, and
+ * the properties dialog is where someone looks to tell them apart.
+ *
  * Only rsync.exe gets this; the C test helpers share rsync.manifest but must
  * not claim to be rsync.
  *
@@ -41,14 +45,14 @@ BEGIN
 		BLOCK "040904b0"
 		BEGIN
 			VALUE "CompanyName",      "The rsync project"
-			VALUE "FileDescription",  "rsync - fast incremental file transfer"
+			VALUE "FileDescription",  "@RSYNC_RC_DESCRIPTION@"
 			VALUE "FileVersion",      "@RSYNC_RC_VERSION_DISPLAY@"
 			VALUE "InternalName",     "rsync"
-			VALUE "OriginalFilename", "rsync.exe"
+			VALUE "OriginalFilename", "@RSYNC_RC_ORIGINAL_FILENAME@"
 			VALUE "ProductName",      "rsync"
 			VALUE "ProductVersion",   "@RSYNC_RC_VERSION_DISPLAY@"
 			VALUE "LegalCopyright",   "Copyright (C) 1996-2026 by Andrew Tridgell, Wayne Davison, and others. GPL-3.0-or-later."
-			VALUE "Comments",         "Native Windows build of rsync @RSYNC_VERSION_STRING@. CMake/Windows port by Max Vilimpoc. https://rsync.samba.org/"
+			VALUE "Comments",         "Native Windows build of rsync @RSYNC_VERSION_STRING@ (@RSYNC_WIN_ARCH@). CMake/Windows port by Max Vilimpoc. https://rsync.samba.org/"
 		END
 	END
 	BLOCK "VarFileInfo"

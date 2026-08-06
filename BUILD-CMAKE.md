@@ -43,21 +43,32 @@ with the same meaning as the corresponding `configure` options.
 
 # The Windows port
 
-Built and tested with **MSVC 2022 (x64) + Ninja** on Windows 10. The
-compatibility layer lives entirely in `win32/`; the shared sources carry no
-`#ifdef _WIN32` at all (see Design notes).
+Built and tested with **MSVC 2022 + Ninja** on Windows 10, for x64 and x86.
+The compatibility layer lives entirely in `win32/`; the shared sources carry
+no `#ifdef _WIN32` at all (see Design notes).
 
 ```powershell
 windows-build-and-test.bat
 ```
 
 That finds the MSVC toolchain with `vswhere` (so no Developer Command Prompt
-is needed), configures, builds, and runs the test suite. Useful options:
-`--clean`, `--config Debug`, `--build-dir DIR`, `--no-tests`,
-`--tests PATTERN`, and `--host USER@HOST` to include the ssh transfer tests.
-It exits 0 on success, 1 on failure, 2 on a usage error.
+is needed), then configures, builds and tests **both** architectures in turn:
 
-Or drive CMake directly:
+| Architecture | Build directory | Binary |
+| --- | --- | --- |
+| x64 (default) | `build\` | `rsync.exe` |
+| x86 | `build-x86\` | `rsync-x86.exe` |
+
+Ninja generates for one compiler, and which compiler that is comes from the
+environment vcvars set up, so the two cannot share a configure — the script
+calls itself once per architecture instead, each call with its own vcvars and
+its own build directory. `--arch x64` or `--arch x86` builds just the one.
+Other useful options: `--clean`, `--config Debug`, `--build-dir DIR`,
+`--no-tests`, `--tests PATTERN`, and `--host USER@HOST` to include the ssh
+transfer tests. It exits 0 on success, 1 on failure, 2 on a usage error.
+
+Or drive CMake directly, from a shell where vcvars has already run — the
+architecture is whichever that targets, and the output name follows from it:
 
 ```powershell
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -65,8 +76,11 @@ cmake --build build
 .\build\rsync.exe --version
 ```
 
-`rsync.exe` is self-contained — no Cygwin or MSYS DLLs. It uses the Windows
-OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`) as its remote shell.
+Both binaries are self-contained — no Cygwin or MSYS DLLs — and identical but
+for the architecture they were compiled for. They use the Windows OpenSSH
+client (`C:\Windows\System32\OpenSSH\ssh.exe`) as their remote shell. Take the
+x64 build unless you are on 32-bit Windows, or something in the way you are
+invoking rsync will only load a 32-bit image.
 
 ### A standalone binary
 
@@ -104,8 +118,14 @@ Baked into the image by the toolchain:
 | CET shadow stack | `/CETCOMPAT` | the CPU keeps its own copy of return addresses, which defeats ROP at the return |
 | Strict stack cookies | `/GS /sdl` | `/sdl` puts a cookie on functions the default `/GS` heuristic skips |
 | Spectre v1 | `/Qspectre` | speculation barriers on bounds-check patterns |
-| ASLR + DEP | `/DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT` | MSVC defaults, pinned so they cannot quietly lapse |
+| ASLR + DEP | `/DYNAMICBASE /NXCOMPAT`, plus `/HIGHENTROPYVA` on x64 | MSVC defaults, pinned so they cannot quietly lapse |
 | Import path | `/DEPENDENTLOADFLAG:0x800` | static imports resolve from System32 alone, so a DLL planted beside the exe cannot win |
+
+The x86 build gets all of that except `/HIGHENTROPYVA`, which is a hard error
+on a 32-bit target (`LNK1246`) rather than a warning — there is no high half
+of the address space to rebase into. It takes `/LARGEADDRESSAWARE` instead, so
+it can use the top 2 GB of its own address space rather than being capped at
+half of it; rsync's file list is the one structure large enough to care.
 
 Switched on at runtime by `win32/win32harden.c`, before `WSAStartup()` can pull
 in the Winsock catalog:
