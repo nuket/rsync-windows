@@ -104,17 +104,95 @@ jobs:
         if-no-files-found: error
 
     - name: Publish release
-      # Only for a tag; an ordinary branch push just leaves the artifact above.
-      if: startsWith(github.ref, 'refs/tags/v')
+      # Every push to the branch gets one, so a build is always downloadable
+      # without digging through Actions.  Not for pull requests: a PR from a
+      # fork must not be able to publish.
+      if: github.event_name != 'pull_request'
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        # A release asset has to be a single file, so this is the one place an
-        # archive is genuinely wanted -- unlike the artifact above, which
-        # GitHub zips on our behalf.
-        $zip = "rsync-$Env:VER-windows-x64.zip"
-        Compress-Archive -Path dist\* -DestinationPath $zip
-        gh release create "${{ github.ref_name }}" $zip `
-          --title "rsync ${{ github.ref_name }} for Windows" `
-          --notes "Native Windows build of rsync (x64). Requires no Visual C++ redistributable: the C runtime is linked in and the only imports are WS2_32, ADVAPI32 and KERNEL32.`n`nSee BUILD-CMAKE.md in the archive for what is supported and what is not."
+        # `gh release view` exits non-zero when the release is absent, which is
+        # a question here rather than a failure.  The runner sets
+        # ErrorActionPreference to Stop, and PowerShell 7.4 can turn a native
+        # command's exit code into a terminating error, so ask for exit codes
+        # and check them by hand.
+        $ErrorActionPreference = 'Continue'
+        $PSNativeCommandUseErrorActionPreference = $false
+
+        # A tag push releases under the tag; anything else releases under the
+        # version, which is already <version>-<shortrev> and unique per commit.
+        if ($Env:GITHUB_REF -like 'refs/tags/*') {
+          $tag = $Env:GITHUB_REF_NAME
+          $extra = @()
+        } else {
+          $tag = $Env:VER
+          # Not a tagged release, so say so rather than let it look like one,
+          # and leave whatever real release exists as "latest".
+          $extra = @('--prerelease', '--latest=false')
+        }
+
+        # Re-running a job for the same commit would otherwise fail on the
+        # release that already exists.  --cleanup-tag takes the tag with it,
+        # so the retry starts from nothing.
+        gh release view $tag *> $null
+        if ($LASTEXITCODE -eq 0) {
+          Write-Host "release $tag exists; replacing it"
+          gh release delete $tag --yes --cleanup-tag
+        }
+
+        $notes = @"
+        Native Windows build of rsync (x64), built from ``$Env:GITHUB_SHA``.
+
+        Requires no Visual C++ redistributable: the C runtime is linked in and
+        the only imports are WS2_32, ADVAPI32 and KERNEL32.
+
+        Verify with:
+
+            certutil -hashfile rsync.exe SHA256
+
+        and compare against ``rsync.exe.sha256``.
+
+        Source, licence (GPL-3.0-or-later) and what is and is not supported are
+        in this repository; see BUILD-CMAKE.md.
+        "@
+
+        gh release create $tag dist\rsync.exe dist\rsync.exe.sha256 `
+          --title "rsync $tag for Windows (x64)" `
+          --notes $notes `
+          --target $Env:GITHUB_SHA `
+          @extra
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "gh release create failed with exit code $LASTEXITCODE"
+          exit 1
+        }
+        Write-Host "published release $tag"
+
+    - name: Keep only the three most recent per-push releases
+      if: github.event_name != 'pull_request'
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $PSNativeCommandUseErrorActionPreference = $false
+
+        # Prereleases only.  These are the per-push builds and there is one per
+        # commit, so they are what accumulates; a real tagged release is not
+        # something to delete behind someone's back.
+        $all = gh release list --limit 100 --json tagName,isPrerelease,createdAt |
+               ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) { Write-Error "gh release list failed"; exit 1 }
+
+        $stale = @($all | Where-Object { $_.isPrerelease } |
+                   Sort-Object { [datetime]$_.createdAt } -Descending |
+                   Select-Object -Skip 3)
+        if (-not $stale) {
+          Write-Host "nothing to prune"
+        } else {
+          foreach ($r in $stale) {
+            Write-Host "pruning $($r.tagName)"
+            # --cleanup-tag, or the tags pile up instead of the releases.
+            gh release delete $r.tagName --yes --cleanup-tag
+          }
+        }
