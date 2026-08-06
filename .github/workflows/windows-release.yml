@@ -91,6 +91,23 @@ jobs:
         $hash = (Get-FileHash dist\rsync.exe -Algorithm SHA256).Hash.ToLower()
         "$hash  rsync.exe" | Out-File -Encoding ascii dist\rsync.exe.sha256
         "VER=$ver" >>$Env:GITHUB_ENV
+
+        # Split <release>-g<upstream rev>-g<port rev> so the release notes can
+        # explain each part.  The one-rev form is what a checkout with no
+        # master ref to compare against produces.
+        if ($ver -match '^(.*)-g([0-9a-fA-F]+)-g([0-9a-fA-F]+)$') {
+          "RSYNC_VER_BASE=$($Matches[1])"     >>$Env:GITHUB_ENV
+          "RSYNC_VER_UPSTREAM=$($Matches[2])" >>$Env:GITHUB_ENV
+          "RSYNC_VER_PORT=$($Matches[3])"     >>$Env:GITHUB_ENV
+        } elseif ($ver -match '^(.*)-g([0-9a-fA-F]+)$') {
+          "RSYNC_VER_BASE=$($Matches[1])" >>$Env:GITHUB_ENV
+          "RSYNC_VER_UPSTREAM="           >>$Env:GITHUB_ENV
+          "RSYNC_VER_PORT=$($Matches[2])" >>$Env:GITHUB_ENV
+        } else {
+          "RSYNC_VER_BASE=$ver"  >>$Env:GITHUB_ENV
+          "RSYNC_VER_UPSTREAM="  >>$Env:GITHUB_ENV
+          "RSYNC_VER_PORT="      >>$Env:GITHUB_ENV
+        }
         Write-Host "staged rsync $ver (sha256 $hash)"
 
     - name: Upload build artifact
@@ -141,20 +158,54 @@ jobs:
           gh release delete $tag --yes --cleanup-tag
         }
 
+        # The upstream row only makes sense when there was a master ref to
+        # compare against; without one the version carries a single rev.
+        if ($Env:RSYNC_VER_UPSTREAM) {
+          $upstreamRow = "| ``g$Env:RSYNC_VER_UPSTREAM`` | the upstream commit this branch is based on ([browse](https://github.com/RsyncProject/rsync/commit/$Env:RSYNC_VER_UPSTREAM)) |"
+        } else {
+          $upstreamRow = "| _(absent)_ | no upstream master ref was available at build time |"
+        }
+
         $notes = @"
-        Native Windows build of rsync (x64), built from ``$Env:GITHUB_SHA``.
+        Native Windows build of rsync (x64).
 
-        Requires no Visual C++ redistributable: the C runtime is linked in and
-        the only imports are WS2_32, ADVAPI32 and KERNEL32.
+        ## Reading the version
 
-        Verify with:
+        This port is a branch that gets rebased onto rsync's upstream master as
+        that moves, so "which commit is this?" has two answers, and the version
+        gives both:
 
-            certutil -hashfile rsync.exe SHA256
+        ``````
+        $tag
+        ``````
+
+        | part | meaning |
+        | --- | --- |
+        | ``$Env:RSYNC_VER_BASE`` | the rsync release this source is, from ``version.h`` |
+        $upstreamRow
+        | ``g$Env:RSYNC_VER_PORT`` | the commit in this repository that was built ([browse](https://github.com/$Env:GITHUB_REPOSITORY/commit/$Env:GITHUB_SHA)) |
+
+        So the upstream rev tells you which rsync you are getting, and the port
+        rev tells you which build of the Windows work you are getting. The two
+        move independently: a rebase changes the first, a fix here changes the
+        second. ``rsync --version`` prints the same string.
+
+        ## Verifying the download
+
+        ``````
+        certutil -hashfile rsync.exe SHA256
+        ``````
 
         and compare against ``rsync.exe.sha256``.
 
-        Source, licence (GPL-3.0-or-later) and what is and is not supported are
-        in this repository; see BUILD-CMAKE.md.
+        ## Notes
+
+        No Visual C++ redistributable is needed: the C runtime is linked in and
+        the only imports are WS2_32, ADVAPI32 and KERNEL32.
+
+        Source, licence (GPL-3.0-or-later), and what is and is not supported
+        are in this repository -- see BUILD-CMAKE.md. Symlinks, hard links,
+        daemon mode, ACLs and xattrs are **not** supported on Windows.
         "@
 
         gh release create $tag dist\rsync.exe dist\rsync.exe.sha256 `

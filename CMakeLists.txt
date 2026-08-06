@@ -215,60 +215,82 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/rsync.1.md"
     "${GEN_SCRIPT}")
 
-# git-version.h (mkgitver's job)
-set(RSYNC_GITVER "")
+# ---------------------------------------------------------------------------
+# Version
+#
+# The port is a branch that gets rebased onto upstream master as that moves,
+# so "which commit" is two questions: which upstream commit the source is
+# based on, and which port commit built it.  The version names both:
+#
+#     3.5.0dev-g3b84610c-g9273e229
+#     |        |         `-- this branch's HEAD
+#     |        `------------ upstream commit the branch sits on
+#     `--------------------- rsync release, from version.h
+#
+# Tags deliberately play no part.  A fork has none until someone pushes them,
+# which is why CI once reported a bare "e176e5f0" as the whole version, and
+# pushing ~170 upstream tags to get them back would fire this repo's release
+# workflow once per tag.  Two revs answer the question tags were being asked
+# to answer, and answer it the same way locally and in CI.
+# ---------------------------------------------------------------------------
+set(RSYNC_UPSTREAM_REV "")
+set(RSYNC_PORT_REV "")
+set(RSYNC_PORT_COUNT 0)
+
 find_package(Git QUIET)
 if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
-    # Same arguments mkgitver uses, so the two build systems produce the same
-    # version string: --abbrev=8 pins the rev length (git's default grows with
-    # the repo), and no --dirty, so an uncommitted tree does not get a marker.
-    execute_process(COMMAND ${GIT_EXECUTABLE} describe --always --abbrev=8
+    execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=8 HEAD
                     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-                    OUTPUT_VARIABLE RSYNC_GITVER
-                    OUTPUT_STRIP_TRAILING_WHITESPACE
-                    ERROR_QUIET)
-    # Belt and braces: nothing above asks for the marker, so this only fires
-    # if RSYNC_GITVER is supplied by hand.  Strip it here rather than let it
-    # reach the version parser, which would read the whole string as a bare
-    # rev and emit "3.5.0dev-gv3.4.3-182-gc9dc4749-dirty".
-    string(REGEX REPLACE "-dirty$" "" RSYNC_GITVER "${RSYNC_GITVER}")
-endif()
-# Compose the version rsync reports.  Builds come off git HEAD routinely, so
-# it names the commit; where there is no tag to anchor to, it still says which
-# release the source is, which a bare rev does not:
-#
-#   git describe    v3.4.3-182-gc9dc4749   ->  3.4.3-182-gc9dc4749
-#   on a tag        v3.4.3                 ->  3.4.3
-#   no tag at all   c9dc4749               ->  3.5.0dev-gc9dc4749
-#   no git                                 ->  3.5.0dev
-#
-# The last case is the one that matters in CI: a fresh clone of a fork has no
-# tags, and writing describe's raw output there made `rsync --version` report
-# "e176e5f0" and nothing else.  mkgitver avoids that by writing git-version.h
-# only when describe produced a v3.x.y string, falling back to RSYNC_VERSION;
-# this keeps the rev as well, which is strictly more useful.
-set(RSYNC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}")
-set(RSYNC_GIT_TAG "")
-set(RSYNC_GIT_COUNT 0)
+                    OUTPUT_VARIABLE RSYNC_PORT_REV
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 
-if(RSYNC_GITVER MATCHES "^v?([0-9]+(\\.[0-9]+)*)-([0-9]+)-g([0-9a-fA-F]+)$")
-    set(RSYNC_GIT_TAG "${CMAKE_MATCH_1}")
-    set(RSYNC_GIT_COUNT "${CMAKE_MATCH_3}")
-    set(RSYNC_VERSION_DISPLAY "${RSYNC_GIT_TAG}-${RSYNC_GIT_COUNT}-g${CMAKE_MATCH_4}")
-elseif(RSYNC_GITVER MATCHES "^v?([0-9]+(\\.[0-9]+)*)$")
-    # Sitting exactly on a tag: no rev to add, and nothing since it.
-    set(RSYNC_GIT_TAG "${CMAKE_MATCH_1}")
-    set(RSYNC_VERSION_DISPLAY "${RSYNC_GIT_TAG}")
-elseif(RSYNC_GITVER)
-    # No tag reachable -- describe --always gave a bare rev.
-    set(RSYNC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}-g${RSYNC_GITVER}")
+    # Whichever of these exists.  A developer clone usually has an "upstream"
+    # remote pointing at RsyncProject/rsync; a CI checkout of the fork has
+    # only origin, whose master tracks upstream.
+    foreach(_ref upstream/master origin/master master)
+        if(NOT _base)
+            execute_process(COMMAND ${GIT_EXECUTABLE} merge-base HEAD ${_ref}
+                            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                            OUTPUT_VARIABLE _base
+                            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if(_base)
+                set(RSYNC_UPSTREAM_BASE_REF "${_ref}")
+            endif()
+        endif()
+    endforeach()
+
+    if(_base)
+        execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=8 ${_base}
+                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                        OUTPUT_VARIABLE RSYNC_UPSTREAM_REV
+                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        # Commits this branch adds on top: monotonic while the base holds
+        # still, which is what the binary FILEVERSION needs.
+        execute_process(COMMAND ${GIT_EXECUTABLE} rev-list --count ${_base}..HEAD
+                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                        OUTPUT_VARIABLE RSYNC_PORT_COUNT
+                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    endif()
+endif()
+
+set(RSYNC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}")
+if(RSYNC_UPSTREAM_REV AND RSYNC_PORT_REV)
+    set(RSYNC_VERSION_DISPLAY
+        "${RSYNC_VERSION_STRING}-g${RSYNC_UPSTREAM_REV}-g${RSYNC_PORT_REV}")
+elseif(RSYNC_PORT_REV)
+    # No upstream ref to compare against; still say which commit built this.
+    set(RSYNC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}-g${RSYNC_PORT_REV}")
+endif()
+if(NOT RSYNC_PORT_COUNT)
+    set(RSYNC_PORT_COUNT 0)
 endif()
 
 # usage.c prints RSYNC_GITVER when it is defined, so this is what
 # `rsync --version` says -- and what the Windows version resource says too.
-if(RSYNC_GITVER)
+if(RSYNC_PORT_REV)
     file(WRITE "${GEN_DIR}/git-version.h"
-         "#define RSYNC_GITVER \"${RSYNC_VERSION_DISPLAY}\"\n")
+         "#define RSYNC_GITVER \"${RSYNC_VERSION_DISPLAY}\"
+")
 else()
     file(WRITE "${GEN_DIR}/git-version.h" "")
 endif()
@@ -279,39 +301,18 @@ endif()
 if(WIN32)
     # The strings are the version composed above, so the resource, the release
     # name and `rsync --version` all say the same thing.  The binary
-    # FILEVERSION is four 16-bit numbers and cannot hold a rev, so it carries
-    # the tag plus the commit count -- which advances with every commit, so
-    # Windows can tell two HEAD builds apart and order them:
+    # FILEVERSION is four 16-bit numbers and can hold neither rev, so it takes
+    # the release from version.h and the build number from how many commits
+    # this branch adds on top of its upstream base -- which advances with
+    # every commit here, so Windows can order two builds:
     #
-    #   git describe    v3.4.3-182-gc9dc4749
-    #   strings         3.4.3-182-gc9dc4749
-    #   binary          3,4,3,182
+    #   strings   3.5.0dev-g3b84610c-g9273e229
+    #   binary    3,5,0,<commits on top of 3b84610c>
     set(RSYNC_RC_VERSION_DISPLAY "${RSYNC_VERSION_DISPLAY}")
-    set(_tag "${RSYNC_GIT_TAG}")
-    set(_twk "${RSYNC_GIT_COUNT}")
-
-    # Take major.minor.patch from the tag whenever there is one, so the string
-    # and the numbers tell the same story rather than one saying 3.4.3 and the
-    # other 3.5.0.  A short tag like "v4.0" zeroes the rest rather than leaving
-    # version.h's patch level showing under someone else's major version.
-    if(_tag)
-        string(REPLACE "." ";" _tagparts "${_tag}")
-        list(LENGTH _tagparts _n)
-        set(_maj 0)
-        set(_min 0)
-        set(_pat 0)
-        list(GET _tagparts 0 _maj)
-        if(_n GREATER 1)
-            list(GET _tagparts 1 _min)
-        endif()
-        if(_n GREATER 2)
-            list(GET _tagparts 2 _pat)
-        endif()
-    else()
-        set(_maj ${PROJECT_VERSION_MAJOR})
-        set(_min ${PROJECT_VERSION_MINOR})
-        set(_pat ${PROJECT_VERSION_PATCH})
-    endif()
+    set(_maj ${PROJECT_VERSION_MAJOR})
+    set(_min ${PROJECT_VERSION_MINOR})
+    set(_pat ${PROJECT_VERSION_PATCH})
+    set(_twk "${RSYNC_PORT_COUNT}")
 
     # Four fields, always: an absent component is 0, and building this from a
     # list would drop the empty ones and emit "3,4,3" -- which rc.exe accepts
@@ -967,7 +968,13 @@ endif()
 install(TARGETS rsync RUNTIME DESTINATION bin)
 
 message(STATUS "")
-message(STATUS "rsync ${PROJECT_VERSION} configuration:")
+message(STATUS "rsync ${RSYNC_VERSION_DISPLAY} configuration:")
+if(RSYNC_UPSTREAM_REV)
+    message(STATUS "  upstream base ....... ${RSYNC_UPSTREAM_REV} "
+                   "(via ${RSYNC_UPSTREAM_BASE_REF}), +${RSYNC_PORT_COUNT} commits")
+else()
+    message(STATUS "  upstream base ....... unknown (no master ref to compare against)")
+endif()
 message(STATUS "  system .............. ${CMAKE_SYSTEM_NAME}")
 message(STATUS "  compiler ............ ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
 message(STATUS "  ACLs ................ ${SUPPORT_ACLS}")
