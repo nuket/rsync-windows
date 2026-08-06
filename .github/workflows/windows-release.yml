@@ -1,0 +1,113 @@
+# Build rsync.exe for Windows, and publish it when a tag is pushed.
+#
+# This is the only workflow that runs on this branch.  Every other workflow in
+# .github/workflows/ is triggered by `push: branches: [ master ]`, and the
+# Windows port lives on windows-cmake-port, so none of them fire here.
+name: Windows build and release
+
+on:
+  push:
+    branches: [ windows-cmake-port ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ windows-cmake-port ]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to create a release; read would be enough otherwise
+
+jobs:
+  build:
+    runs-on: windows-2022
+    name: Build rsync.exe
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # Not shallow: the version resource comes from `git describe`, which
+        # needs the tags and the commits since one.  A depth-1 checkout would
+        # silently produce a bare-rev version instead.
+        fetch-depth: 0
+
+    - name: Install Ninja if the image lacks it
+      shell: pwsh
+      run: |
+        if (Get-Command ninja -ErrorAction SilentlyContinue) {
+          Write-Host "ninja already present: $((Get-Command ninja).Source)"
+        } else {
+          choco install -y --no-progress ninja
+          echo "C:\ProgramData\chocolatey\bin" >>$Env:GITHUB_PATH
+        }
+
+    - name: Build and test
+      shell: cmd
+      # windows-build-and-test.bat finds MSVC through vswhere and calls
+      # vcvars64 itself, so no toolchain action is needed.  The ssh transfer
+      # tests skip on their own without RSYNC_WIN_TEST_HOST.
+      run: windows-build-and-test.bat --clean
+
+    - name: Show what was built, and check it is self-contained
+      shell: pwsh
+      run: |
+        $vi = (Get-Item build\rsync.exe).VersionInfo
+        Write-Host "FileVersion    : $($vi.FileVersion)"
+        Write-Host "ProductVersion : $($vi.ProductVersion)"
+        Write-Host "FileDescription: $($vi.FileDescription)"
+        Write-Host "LegalCopyright : $($vi.LegalCopyright)"
+
+        # Each step gets a fresh shell, so the vcvars environment the build
+        # step set up is gone and dumpbin is not on PATH.  Find it the way
+        # windows-build-and-test.bat finds the compiler.
+        $vswhere = "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products * `
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                -property installationPath
+        $dumpbin = (Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+                    Select-Object -Last 1).FullName
+        if (-not $dumpbin) { Write-Error "dumpbin not found under $vs"; exit 1 }
+
+        $dlls = & $dumpbin /dependents build\rsync.exe |
+                Select-String -Pattern '\.dll' | ForEach-Object { $_.Line.Trim() }
+        Write-Host "imports: $($dlls -join ', ')"
+
+        # The point of the static CRT: these three ship with Windows, so the
+        # binary runs on a machine with no redistributable installed.  If a
+        # VCRUNTIME or api-ms-win-crt import ever reappears, fail here rather
+        # than ship something that will not start on a clean machine.
+        $unexpected = $dlls | Where-Object { $_ -notmatch '^(WS2_32|ADVAPI32|KERNEL32)\.dll$' }
+        if ($unexpected) {
+          Write-Error "rsync.exe imports something outside the Windows base set: $($unexpected -join ', ')"
+          exit 1
+        }
+        Write-Host "self-contained: only Windows base DLLs are imported"
+
+    - name: Package
+      shell: pwsh
+      run: |
+        $ver = (Get-Item build\rsync.exe).VersionInfo.ProductVersion
+        New-Item -ItemType Directory dist | Out-Null
+        Copy-Item build\rsync.exe dist\
+        Copy-Item COPYING dist\COPYING.txt
+        Copy-Item BUILD-CMAKE.md dist\
+        $hash = (Get-FileHash dist\rsync.exe -Algorithm SHA256).Hash.ToLower()
+        "$hash  rsync.exe" | Out-File -Encoding ascii dist\rsync.exe.sha256
+        Compress-Archive -Path dist\* -DestinationPath "rsync-$ver-windows-x64.zip"
+        "ZIP=rsync-$ver-windows-x64.zip" >>$Env:GITHUB_ENV
+        Write-Host "packaged rsync-$ver-windows-x64.zip (sha256 $hash)"
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rsync-windows-x64
+        path: ${{ env.ZIP }}
+        if-no-files-found: error
+
+    - name: Publish release
+      # Only for a tag; an ordinary branch push just leaves the artifact above.
+      if: startsWith(github.ref, 'refs/tags/v')
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create "${{ github.ref_name }}" "$Env:ZIP" `
+          --title "rsync ${{ github.ref_name }} for Windows" `
+          --notes "Native Windows build of rsync (x64). Requires no Visual C++ redistributable: the C runtime is linked in and the only imports are WS2_32, ADVAPI32 and KERNEL32.`n`nSee BUILD-CMAKE.md in the archive for what is supported and what is not."
