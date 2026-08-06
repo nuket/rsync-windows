@@ -6,6 +6,7 @@ rem  Usage:
 rem      windows-build-and-test.bat [options]
 rem
 rem  Options:
+rem      --arch ARCH        x64, x86, or both (default)
 rem      --clean            delete the build directory first
 rem      --config CFG       Release (default), Debug or RelWithDebInfo
 rem      --build-dir DIR    build directory (default: build)
@@ -18,6 +19,19 @@ rem  Requires Visual Studio 2022 with the C++ tools, and Python 3.6+.
 rem  CMake and Ninja ship with Visual Studio, and the MSVC environment is set
 rem  up automatically via vswhere, so this does not have to be run from a
 rem  Developer Command Prompt.
+rem
+rem  Two architectures, and each gets its own everything:
+rem
+rem      x64   build\rsync.exe          the build people want
+rem      x86   build-x86\rsync-x86.exe  for 32-bit Windows, and for the
+rem                                     occasional 64-bit machine running
+rem                                     something that will only load a
+rem                                     32-bit image
+rem
+rem  Ninja generates for one compiler, and which compiler that is comes from
+rem  the environment vcvars set up -- so "both" cannot be one configure.  This
+rem  script calls itself once per architecture instead, each call with its own
+rem  vcvars, its own build directory and its own run of the test suite.
 rem
 rem  Note on style: variables are expanded as !VAR! rather than %VAR% inside
 rem  every parenthesised block.  %VAR% is substituted while the block is being
@@ -33,10 +47,20 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "SRC_DIR=%~dp0"
 if "%SRC_DIR:~-1%"=="\" set "SRC_DIR=%SRC_DIR:~0,-1%"
 
+rem Kept verbatim so an "--arch both" run can hand them to its two children.
+rem The children get "--arch <one>" appended, and the last --arch wins.
+rem
+rem SELF has to be taken before the argument loop: `shift` renumbers %0 along
+rem with everything else, so by the time parsing is done %~f0 names an option
+rem rather than this script.
+set "SELF=%~f0"
+set "ORIG_ARGS=%*"
+
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 
 set "BUILD_DIR=build"
 set "CONFIG=Release"
+set "ARCH=both"
 set "RUN_TESTS=1"
 set "DO_CLEAN=0"
 set "TEST_ARGS="
@@ -60,6 +84,13 @@ if /i "%~1"=="--no-tests" (
 if /i "%~1"=="--config" (
     if "%~2"=="" goto missing_value
     set "CONFIG=%~2"
+    shift
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--arch" (
+    if "%~2"=="" goto missing_value
+    set "ARCH=%~2"
     shift
     shift
     goto parse_args
@@ -96,6 +127,52 @@ goto usage
 
 :args_done
 
+if /i "!ARCH!"=="both"  goto build_both
+if /i "!ARCH!"=="x64"   goto arch_ok
+if /i "!ARCH!"=="x86"   goto arch_ok
+echo ERROR: --arch must be x64, x86 or both, not "!ARCH!"
+echo.
+goto usage
+
+rem ------------------------------------------------------------ both, in turn
+rem
+rem Once per architecture, by calling this script again with the architecture
+rem pinned.  Each call gets its own setlocal, so the vcvars environment it sets
+rem up is discarded at its endlocal and the next call starts from a clean one --
+rem which matters, because vcvars is what decides which compiler a configure
+rem finds.  x64 goes first, so the build people actually want fails fast.
+
+:build_both
+echo ##########################################################################
+echo #  1 of 2: x64
+echo ##########################################################################
+echo.
+call "!SELF!" !ORIG_ARGS! --arch x64
+if errorlevel 1 goto fail
+echo.
+echo ##########################################################################
+echo #  2 of 2: x86
+echo ##########################################################################
+echo.
+call "!SELF!" !ORIG_ARGS! --arch x86
+if errorlevel 1 goto fail
+echo.
+echo Both architectures built and tested.
+goto success
+
+:arch_ok
+
+rem Each architecture needs its own build directory -- Ninja caches the
+rem compiler it configured with -- and its own name for the result.
+if /i "!ARCH!"=="x86" (
+    set "BUILD_DIR=!BUILD_DIR!-x86"
+    set "EXE_NAME=rsync-x86.exe"
+    set "VCVARS=vcvarsamd64_x86.bat"
+) else (
+    set "EXE_NAME=rsync.exe"
+    set "VCVARS=vcvars64.bat"
+)
+
 rem Make the build directory absolute, so a step that needs a different
 rem working directory still finds it.
 for %%d in ("!BUILD_DIR!") do set "BUILD_DIR=%%~fd"
@@ -105,17 +182,30 @@ echo  rsync for Windows
 echo    source     : !SRC_DIR!
 echo    build      : !BUILD_DIR!
 echo    config     : !CONFIG!
+echo    target     : !ARCH! ^(!EXE_NAME!^)
 echo ==========================================================================
 echo.
 
 rem ------------------------------------------------------- MSVC environment
 
+rem An environment that is already set up is only usable if it targets the
+rem architecture being built -- otherwise a Developer Command Prompt, or the
+rem parent of an "--arch both" run, would silently hand x64 tools to the x86
+rem build.  vcvars records its target in VSCMD_ARG_TGT_ARCH; re-running it for
+rem a different target in the same process is supported and does the right
+rem thing, so a mismatch is not an error, just a reason to run it again.
 if defined INCLUDE (
-    echo [1/5] MSVC environment already set, using it.
-    goto have_msvc
+    if /i "!VSCMD_ARG_TGT_ARCH!"=="!ARCH!" (
+        echo [1/5] MSVC environment already targets !ARCH!, using it.
+        goto have_msvc
+    )
+    echo [1/5] MSVC environment targets "!VSCMD_ARG_TGT_ARCH!", re-targeting to !ARCH!...
+    goto setup_msvc
 )
 
-echo [1/5] Setting up the MSVC environment...
+echo [1/5] Setting up the MSVC environment for !ARCH!...
+
+:setup_msvc
 if not exist "!VSWHERE!" (
     echo ERROR: cannot find vswhere.exe at:
     echo        !VSWHERE!
@@ -133,18 +223,27 @@ if not defined VS_PATH (
     goto fail
 )
 
-if not exist "!VS_PATH!\VC\Auxiliary\Build\vcvars64.bat" (
+rem The x86 build is cross-compiled from the 64-bit toolchain (vcvarsamd64_x86)
+rem rather than built with the 32-bit one: it is the same compiler with more
+rem address space to work in, and the component this script already requires,
+rem VC.Tools.x86.x64, provides it.  vcvars32 is the fallback for a 32-bit host.
+if not exist "!VS_PATH!\VC\Auxiliary\Build\!VCVARS!" (
+    if /i "!ARCH!"=="x86" (
+        if exist "!VS_PATH!\VC\Auxiliary\Build\vcvars32.bat" set "VCVARS=vcvars32.bat"
+    )
+)
+if not exist "!VS_PATH!\VC\Auxiliary\Build\!VCVARS!" (
     echo ERROR: found Visual Studio at "!VS_PATH!"
-    echo        but not VC\Auxiliary\Build\vcvars64.bat under it.
+    echo        but not VC\Auxiliary\Build\!VCVARS! under it.
     goto fail
 )
 
-call "!VS_PATH!\VC\Auxiliary\Build\vcvars64.bat" >nul
+call "!VS_PATH!\VC\Auxiliary\Build\!VCVARS!" >nul
 if errorlevel 1 (
-    echo ERROR: vcvars64.bat failed.
+    echo ERROR: !VCVARS! failed.
     goto fail
 )
-echo       using !VS_PATH!
+echo       using !VS_PATH! ^(!VCVARS!^)
 
 :have_msvc
 
@@ -218,16 +317,16 @@ if errorlevel 1 (
     goto fail
 )
 
-if not exist "!BUILD_DIR!\rsync.exe" (
-    echo ERROR: the build reported success but rsync.exe is missing from
+if not exist "!BUILD_DIR!\!EXE_NAME!" (
+    echo ERROR: the build reported success but !EXE_NAME! is missing from
     echo        "!BUILD_DIR!".
     goto fail
 )
 
 echo.
-"!BUILD_DIR!\rsync.exe" --version
+"!BUILD_DIR!\!EXE_NAME!" --version
 if errorlevel 1 (
-    echo ERROR: the freshly built rsync.exe would not run.
+    echo ERROR: the freshly built !EXE_NAME! would not run.
     goto fail
 )
 
@@ -235,27 +334,27 @@ rem ------------------------------------------------------------------- tests
 
 if "!RUN_TESTS!"=="0" (
     echo.
-    echo Build complete ^(tests skipped^): !BUILD_DIR!\rsync.exe
+    echo Build complete ^(tests skipped^): !BUILD_DIR!\!EXE_NAME!
     goto success
 )
 
 echo.
 if defined RSYNC_WIN_TEST_HOST (
-    echo Running the test suite, including ssh transfers to !RSYNC_WIN_TEST_HOST!...
+    echo Running the !ARCH! test suite, including ssh transfers to !RSYNC_WIN_TEST_HOST!...
 ) else (
-    echo Running the test suite ^(pass --host USER@HOST to add the ssh tests^)...
+    echo Running the !ARCH! test suite ^(pass --host USER@HOST to add the ssh tests^)...
 )
 echo.
 
-!PYTHON! "!SRC_DIR!\win32\tests\run.py" --rsync-bin "!BUILD_DIR!\rsync.exe"!TEST_ARGS!
+!PYTHON! "!SRC_DIR!\win32\tests\run.py" --rsync-bin "!BUILD_DIR!\!EXE_NAME!"!TEST_ARGS!
 if errorlevel 1 (
     echo.
-    echo ERROR: one or more tests failed.
+    echo ERROR: one or more !ARCH! tests failed.
     goto fail
 )
 
 echo.
-echo Build and tests passed: !BUILD_DIR!\rsync.exe
+echo Build and tests passed: !BUILD_DIR!\!EXE_NAME!
 goto success
 
 rem ----------------------------------------------------------------- usage
@@ -265,6 +364,7 @@ echo Build rsync on Windows and run its test suite.
 echo.
 echo   windows-build-and-test.bat [options]
 echo.
+echo   --arch ARCH        x64, x86, or both ^(default^)
 echo   --clean            delete the build directory first
 echo   --config CFG       Release ^(default^), Debug or RelWithDebInfo
 echo   --build-dir DIR    build directory ^(default: build^)
@@ -272,6 +372,9 @@ echo   --host USER@HOST   also run the ssh transfer tests against HOST
 echo   --tests PATTERN    run only matching tests ^(may be repeated^)
 echo   --no-tests         build only
 echo   -h, --help         show this text
+echo.
+echo x64 builds build\rsync.exe; x86 builds build-x86\rsync-x86.exe.  Both
+echo builds and tests each in turn.
 echo.
 echo Requires Visual Studio 2022 with the C++ tools, and Python 3.6+.
 echo CMake and Ninja ship with Visual Studio; the MSVC environment is set up

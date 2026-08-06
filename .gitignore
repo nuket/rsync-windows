@@ -71,6 +71,9 @@ aclocal.m4
 /patches
 /patches.gen
 /build
+# The CMake build puts anything that is not the default x64 Release build in a
+# directory named for what it is: build-x86, build-asan, and so on.
+/build-*
 /auto-build-save
 .deps
 /*.exe

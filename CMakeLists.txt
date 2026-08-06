@@ -74,6 +74,20 @@ set(RSYNC_PLATFORM_INCLUDE "")
 set(RSYNC_PLATFORM_INCLUDE_DIR "")
 
 if(WIN32)
+    # The 64-bit build is the one people want, so it keeps the plain name; a
+    # 32-bit build is named for what it is, so both can sit in one directory
+    # and neither can be mistaken for the other.  The toolchain decides which
+    # this is -- with Ninja that is whichever vcvars was run -- and everything
+    # downstream (the version resource, the test suite, what CI ships) follows
+    # from these two variables rather than guessing again.
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        set(RSYNC_WIN_ARCH "x86")
+        set(RSYNC_EXE_NAME "rsync-x86")
+    else()
+        set(RSYNC_WIN_ARCH "x64")
+        set(RSYNC_EXE_NAME "rsync")
+    endif()
+
     set(RSYNCD_SYSCONF  "rsyncd.conf")
     set(POPT_SYSCONFDIR ".")
     set(RSYNC_PLATFORM_INCLUDE "#include \"win32/win32compat.h\"")
@@ -128,7 +142,17 @@ if(MSVC AND RSYNC_HARDEN)
         /guard:cf                  # the other half of CFG: emit the table
         /CETCOMPAT                 # opt in to the CPU shadow stack where there
                                    # is one, which defeats ROP at the return
-        /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT)  # ASLR and DEP, pinned as above
+        /DYNAMICBASE /NXCOMPAT)    # ASLR and DEP, pinned as above
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        # 64-bit ASLR has nothing to randomise in a 32-bit address space, and
+        # asking for it is a hard error (LNK1246) rather than a warning.  What
+        # a 32-bit build can use instead is the top half of its own address
+        # space: without this the loader caps it at 2 GB, and rsync's file
+        # list is the one structure that can get big enough to care.
+        add_link_options(/LARGEADDRESSAWARE)
+    else()
+        add_link_options(/HIGHENTROPYVA)   # 64-bit ASLR: full-entropy rebasing
+    endif()
     if(NOT RSYNC_ENABLE_ASAN)
         # LOAD_LIBRARY_SEARCH_SYSTEM32: resolve the static imports from
         # System32 alone, so a DLL planted beside the executable cannot win.
@@ -309,6 +333,15 @@ if(WIN32)
     #   strings   3.5.0dev-g3b84610c-g9273e229
     #   binary    3,5,0,<commits on top of 3b84610c>
     set(RSYNC_RC_VERSION_DISPLAY "${RSYNC_VERSION_DISPLAY}")
+    # OriginalFilename is defined as the name the file was built under, so it
+    # has to follow the rename; the description says which build this is,
+    # since the two are otherwise identical in the properties dialog.
+    set(RSYNC_RC_ORIGINAL_FILENAME "${RSYNC_EXE_NAME}.exe")
+    if(RSYNC_WIN_ARCH STREQUAL "x86")
+        set(RSYNC_RC_DESCRIPTION "rsync - fast incremental file transfer (32-bit)")
+    else()
+        set(RSYNC_RC_DESCRIPTION "rsync - fast incremental file transfer")
+    endif()
     set(_maj ${PROJECT_VERSION_MAJOR})
     set(_min ${PROJECT_VERSION_MINOR})
     set(_pat ${PROJECT_VERSION_PATCH})
@@ -811,7 +844,8 @@ if(WIN32)
 
 endif()
 
-if(RSYNC_ENABLE_SIMD AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+if(RSYNC_ENABLE_SIMD AND CMAKE_SIZEOF_VOID_P EQUAL 8
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     enable_language(CXX)
     set(CMAKE_CXX_STANDARD 17)
     set(USE_ROLL_SIMD 1)
@@ -837,6 +871,11 @@ target_compile_definitions(rsync PRIVATE HAVE_CONFIG_H)
 target_link_libraries(rsync PRIVATE ${RSYNC_EXTRA_LIBS})
 
 if(WIN32)
+    # rsync.exe for x64, rsync-x86.exe for 32-bit.  Everything that consumes
+    # the binary goes through $<TARGET_FILE:rsync>, so this is the only place
+    # the name is decided.
+    set_target_properties(rsync PROPERTIES OUTPUT_NAME "${RSYNC_EXE_NAME}")
+
     target_link_libraries(rsync PRIVATE ws2_32 advapi32 shell32 userenv)
     target_compile_definitions(rsync PRIVATE
         _CRT_SECURE_NO_WARNINGS
@@ -976,6 +1015,9 @@ else()
     message(STATUS "  upstream base ....... unknown (no master ref to compare against)")
 endif()
 message(STATUS "  system .............. ${CMAKE_SYSTEM_NAME}")
+if(WIN32)
+    message(STATUS "  target .............. ${RSYNC_WIN_ARCH} -> ${RSYNC_EXE_NAME}.exe")
+endif()
 message(STATUS "  compiler ............ ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
 message(STATUS "  ACLs ................ ${SUPPORT_ACLS}")
 message(STATUS "  xattrs .............. ${SUPPORT_XATTRS}")
