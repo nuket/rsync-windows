@@ -183,9 +183,14 @@ jobs:
           $extra = @()
         } else {
           $tag = $Env:VER
-          # Not a tagged release, so say so rather than let it look like one,
-          # and leave whatever real release exists as "latest".
-          $extra = @('--prerelease', '--latest=false')
+          # The newest build is the one to download, so it is the one GitHub
+          # should point "Latest" at -- that is what the repo sidebar and
+          # /releases/latest resolve to.  Not marked --prerelease, because
+          # GitHub will not make a prerelease the latest release: the flag and
+          # the badge are mutually exclusive, and being findable matters more
+          # here than the badge.  These are still per-push builds; what makes
+          # one of them stable is a v* tag, which takes the branch above.
+          $extra = @('--latest')
         }
 
         # Re-running a job for the same commit would otherwise fail on the
@@ -276,14 +281,18 @@ jobs:
         $ErrorActionPreference = 'Continue'
         $PSNativeCommandUseErrorActionPreference = $false
 
-        # Prereleases only.  These are the per-push builds and there is one per
-        # commit, so they are what accumulates; a real tagged release is not
-        # something to delete behind someone's back.
-        $all = gh release list --limit 100 --json tagName,isPrerelease,createdAt |
+        # Per-push builds only, recognised by their tag.  Those are named
+        # <version>-g<rev>[-g<rev>] and there is one per commit, so they are
+        # what accumulates; a release tagged v* is a deliberate act and not
+        # something to delete behind someone's back.  The tag is what says
+        # which is which -- the prerelease flag used to, but the per-push
+        # builds now have to be non-prereleases for GitHub to let one of them
+        # be the latest release.
+        $all = gh release list --limit 100 --json tagName,createdAt |
                ConvertFrom-Json
         if ($LASTEXITCODE -ne 0) { Write-Error "gh release list failed"; exit 1 }
 
-        $stale = @($all | Where-Object { $_.isPrerelease } |
+        $stale = @($all | Where-Object { $_.tagName -match '-g[0-9a-fA-F]{7,}$' } |
                    Sort-Object { [datetime]$_.createdAt } -Descending |
                    Select-Object -Skip 3)
         if (-not $stale) {
