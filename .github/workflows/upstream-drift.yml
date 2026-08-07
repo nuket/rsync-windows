@@ -104,10 +104,20 @@ jobs:
 
         compare="https://github.com/${UPSTREAM}/compare/${base}...${UPSTREAM_BRANCH}"
 
-        # One issue, reused.  Found by title rather than by label, so nothing
-        # has to exist in the repository beforehand for this to work.
-        existing="$(gh issue list --state open --limit 50 --json number,title \
-                    --jq "[.[] | select(.title | startswith(\"${TITLE_PREFIX}\"))] | .[0].number // empty")"
+        # GitHub disables Issues on a fork by default, and this repository is a
+        # fork -- so the issue route cannot be assumed to exist.  Asked rather
+        # than discovered by failure: `gh issue list` against a repository with
+        # Issues off exits non-zero, which under `set -e` took the whole step
+        # down even on a run that had nothing to report.
+        issues_on="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .has_issues 2>/dev/null || echo false)"
+
+        existing=""
+        if [ "$issues_on" = "true" ]; then
+          # One issue, reused.  Found by title rather than by label, so nothing
+          # has to exist in the repository beforehand for this to work.
+          existing="$(gh issue list --state open --limit 50 --json number,title \
+                      --jq "[.[] | select(.title | startswith(\"${TITLE_PREFIX}\"))] | .[0].number // empty")"
+        fi
 
         if [ "$behind" -eq 0 ]; then
           echo "### In sync with ${UPSTREAM} ${UPSTREAM_BRANCH}" >>"$GITHUB_STEP_SUMMARY"
@@ -122,6 +132,7 @@ jobs:
             gh issue close "$existing"
             echo "closed #$existing"
           fi
+          echo "in sync; nothing to report"
           exit 0
         fi
 
@@ -156,6 +167,34 @@ jobs:
         EOF
         )"
 
+        # The summary goes out first, and unconditionally: whatever happens to
+        # the issue below, the run page itself should say what was found.
+        {
+          echo "### Behind ${UPSTREAM} ${UPSTREAM_BRANCH}"
+          echo ""
+          echo "\`${GITHUB_REF_NAME}\`: ${ahead} ahead, **${behind} behind**, base \`${base}\`."
+          echo ""
+          cat /tmp/commits.md
+          echo ""
+          echo "[Compare](${compare})"
+        } >>"$GITHUB_STEP_SUMMARY"
+
+        if [ "$issues_on" != "true" ]; then
+          # No issue to file, so fail the run instead -- GitHub mails the
+          # owner about a failed scheduled run by default, so the alert still
+          # arrives.  Failing loudly beats succeeding quietly: the one thing
+          # this workflow must never do is notice drift and say nothing.
+          {
+            echo ""
+            echo "> Issues are disabled on this repository, so this run fails"
+            echo "> instead of filing one.  Turn Issues on in Settings ->"
+            echo "> General -> Features for an assigned issue instead."
+          } >>"$GITHUB_STEP_SUMMARY"
+          cat /tmp/commits.md
+          echo "::error title=Upstream moved ahead::${behind} new commit(s) on ${UPSTREAM} ${UPSTREAM_BRANCH}; ${GITHUB_REF_NAME} is ${ahead} ahead, ${behind} behind. Issues are disabled on this repository, so there is nowhere to file this -- see the job summary, or enable Issues."
+          exit 1
+        fi
+
         if [ -n "$existing" ]; then
           gh issue edit "$existing" --title "$title" --body "$body"
           echo "updated #$existing"
@@ -167,11 +206,3 @@ jobs:
             || gh issue create --title "$title" --body "$body"
           echo "opened a new drift issue"
         fi
-
-        {
-          echo "### Behind ${UPSTREAM} ${UPSTREAM_BRANCH}"
-          echo ""
-          echo "\`${GITHUB_REF_NAME}\`: ${ahead} ahead, **${behind} behind**, base \`${base}\`."
-          echo ""
-          cat /tmp/commits.md
-        } >>"$GITHUB_STEP_SUMMARY"
