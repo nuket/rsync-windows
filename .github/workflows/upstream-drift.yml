@@ -99,24 +99,45 @@ jobs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        # `gh issue ...` works out which repository it means from the git
+        # remote of the working directory, and there is no checkout here -- the
+        # clone this job makes lives in work/, and that step's `cd` did not
+        # outlive it.  So gh ran in a directory that is not a git repository at
+        # all and exited 1 before doing anything.  GH_REPO says it outright,
+        # and every call below also passes -R, so neither the environment nor
+        # the working directory can decide this by accident.
+        GH_REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
 
         compare="https://github.com/${UPSTREAM}/compare/${base}...${UPSTREAM_BRANCH}"
 
+        echo "$(gh --version | head -1), GH_REPO=${GH_REPO:-unset}, cwd $(pwd)"
+
         # GitHub disables Issues on a fork by default, and this repository is a
-        # fork -- so the issue route cannot be assumed to exist.  Asked rather
-        # than discovered by failure: `gh issue list` against a repository with
-        # Issues off exits non-zero, which under `set -e` took the whole step
-        # down even on a run that had nothing to report.
+        # fork, so the issue route cannot be assumed to exist.
         issues_on="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .has_issues 2>/dev/null || echo false)"
 
+        # Whether an issue can actually be filed is answered by trying the
+        # read, not by inferring it from a setting: a token without the scope,
+        # a rate limit or an outage all end the same way, and any of them
+        # should fall back to the summary rather than kill the step with a bare
+        # exit 1.  This is what went wrong twice.
         existing=""
+        can_file=false
         if [ "$issues_on" = "true" ]; then
           # One issue, reused.  Found by title rather than by label, so nothing
           # has to exist in the repository beforehand for this to work.
-          existing="$(gh issue list --state open --limit 50 --json number,title \
-                      --jq "[.[] | select(.title | startswith(\"${TITLE_PREFIX}\"))] | .[0].number // empty")"
+          if existing="$(gh issue list -R "${GITHUB_REPOSITORY}" --state open --limit 50 \
+                         --json number,title \
+                         --jq "[.[] | select(.title | startswith(\"${TITLE_PREFIX}\"))] | .[0].number // empty" 2>&1)"; then
+            can_file=true
+          else
+            echo "note: cannot use issues (${existing}); falling back to the job summary"
+            existing=""
+          fi
+        else
+          echo "note: issues are disabled on ${GITHUB_REPOSITORY}; falling back to the job summary"
         fi
 
         if [ "$behind" -eq 0 ]; then
@@ -126,10 +147,10 @@ jobs:
 
           # Closing it is the other half of the job: an issue that stays open
           # after the rebase trains you to ignore it.
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body \
+          if [ "$can_file" = "true" ] && [ -n "$existing" ]; then
+            gh issue comment -R "${GITHUB_REPOSITORY}" "$existing" --body \
               "Back in sync: \`${GITHUB_REF_NAME}\` is now $ahead commits ahead of \`${UPSTREAM}@${UPSTREAM_BRANCH}\` and 0 behind, on base \`${base}\`. Closing."
-            gh issue close "$existing"
+            gh issue close -R "${GITHUB_REPOSITORY}" "$existing"
             echo "closed #$existing"
           fi
           echo "in sync; nothing to report"
@@ -179,30 +200,32 @@ jobs:
           echo "[Compare](${compare})"
         } >>"$GITHUB_STEP_SUMMARY"
 
-        if [ "$issues_on" != "true" ]; then
+        if [ "$can_file" != "true" ]; then
           # No issue to file, so fail the run instead -- GitHub mails the
           # owner about a failed scheduled run by default, so the alert still
           # arrives.  Failing loudly beats succeeding quietly: the one thing
           # this workflow must never do is notice drift and say nothing.
           {
             echo ""
-            echo "> Issues are disabled on this repository, so this run fails"
-            echo "> instead of filing one.  Turn Issues on in Settings ->"
-            echo "> General -> Features for an assigned issue instead."
+            echo "> Issues could not be used for this run, so it fails instead"
+            echo "> of filing one.  The step log says why."
           } >>"$GITHUB_STEP_SUMMARY"
           cat /tmp/commits.md
-          echo "::error title=Upstream moved ahead::${behind} new commit(s) on ${UPSTREAM} ${UPSTREAM_BRANCH}; ${GITHUB_REF_NAME} is ${ahead} ahead, ${behind} behind. Issues are disabled on this repository, so there is nowhere to file this -- see the job summary, or enable Issues."
+          echo "::error title=Upstream moved ahead::${behind} new commit(s) on ${UPSTREAM} ${UPSTREAM_BRANCH}; ${GITHUB_REF_NAME} is ${ahead} ahead, ${behind} behind. Could not file an issue -- see the job summary."
           exit 1
         fi
 
+        # A failure here is worth failing the run for: the drift is real, an
+        # issue is the agreed way to say so, and silence is the one outcome
+        # that must not happen.
         if [ -n "$existing" ]; then
-          gh issue edit "$existing" --title "$title" --body "$body"
+          gh issue edit -R "${GITHUB_REPOSITORY}" "$existing" --title "$title" --body "$body"
           echo "updated #$existing"
         else
           # Assigned, because assignment notifies regardless of how the
           # repository is watched -- the point of this is to reach someone.
-          gh issue create --title "$title" --body "$body" \
+          gh issue create -R "${GITHUB_REPOSITORY}" --title "$title" --body "$body" \
                           --assignee "${GITHUB_REPOSITORY_OWNER}" \
-            || gh issue create --title "$title" --body "$body"
+            || gh issue create -R "${GITHUB_REPOSITORY}" --title "$title" --body "$body"
           echo "opened a new drift issue"
         fi
