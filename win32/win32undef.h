@@ -19,6 +19,8 @@
 #undef pipe
 #undef socketpair
 #undef select
+#undef poll
+#undef symlink
 #undef fcntl
 #undef dup
 #undef dup2

@@ -1,5 +1,5 @@
 /*
- * Windows fd routing: pipes, sockets and a select() that can wait on both.
+ * Windows fd routing: pipes, sockets, and select()/poll() over both.
  *
  * rsync assumes a Unix fd space where read/write/select work uniformly over
  * files, pipes and sockets.  Windows splits those into CRT fds and Winsock
@@ -11,6 +11,7 @@
 
 #include "rsync.h"
 #include "win32/win32undef.h"
+#include <poll.h>	/* struct pollfd and nfds_t for win32_poll() below */
 
 /* Set RSYNC_WIN32_DEBUG=1 to trace the shim's fd operations to stderr. */
 static int win32_trace(void)
@@ -440,6 +441,63 @@ static int crtfd_writable(int fd)
 	HANDLE h = fd_handle(fd);
 
 	return h != INVALID_HANDLE_VALUE;
+}
+
+/* ------------------------------------------------------------------ poll */
+
+/* io.c polls a handful of fds at a time (three at most), mixing the socket
+ * with pipes, so this translates into the select() above rather than calling
+ * WSAPoll -- which would see only the socket.  The exception set is left out
+ * deliberately: win32_select() drops CRT fds from it, and a broken pipe
+ * already surfaces as readable-then-EOF, which is how the select()-based code
+ * detected it before poll() arrived. */
+int win32_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+	fd_set rf, wf;
+	struct timeval tv, *tvp;
+	nfds_t i;
+	int rc, count = 0;
+
+	FD_ZERO(&rf);
+	FD_ZERO(&wf);
+
+	for (i = 0; i < nfds; i++) {
+		fds[i].revents = 0;
+		if (fds[i].fd < 0)	/* POSIX: a negative fd is ignored */
+			continue;
+		if (fds[i].events & (POLLIN | POLLPRI))
+			FD_SET((SOCKET)fds[i].fd, &rf);
+		if (fds[i].events & POLLOUT)
+			FD_SET((SOCKET)fds[i].fd, &wf);
+	}
+
+	if (timeout < 0)
+		tvp = NULL;
+	else {
+		tv.tv_sec  = timeout / 1000;
+		tv.tv_usec = (timeout % 1000) * 1000;
+		tvp = &tv;
+	}
+
+	/* With no fds this is poll()-as-sleep, which win32_select() also
+	 * implements for the empty-set case. */
+	rc = win32_select(0, &rf, &wf, NULL, tvp);
+	if (rc <= 0)
+		return rc;
+
+	for (i = 0; i < nfds; i++) {
+		if (fds[i].fd < 0)
+			continue;
+		if (FD_ISSET((SOCKET)fds[i].fd, &rf))
+			fds[i].revents |= POLLIN;
+		if (FD_ISSET((SOCKET)fds[i].fd, &wf))
+			fds[i].revents |= POLLOUT;
+		if (fds[i].revents)
+			count++;
+	}
+
+	TRACE("poll nfds=%lu timeout=%d -> %d\n", (unsigned long)nfds, timeout, count);
+	return count;
 }
 
 int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
