@@ -242,22 +242,26 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 # ---------------------------------------------------------------------------
 # Version
 #
-# The port is a branch that gets rebased onto upstream master as that moves,
-# so "which commit" is two questions: which upstream commit the source is
-# based on, and which port commit built it.  The version names both:
+# This port is the Windows adaptation layer for a *released* rsync: the branch
+# sits on an upstream release tag, and releases here are cut only from those
+# points.  So the upstream half of the version is simply what version.h says,
+# and the only thing git has to supply is which commit here built it:
 #
-#     3.5.0dev-g3b84610c-g9273e229
-#     |        |         `-- this branch's HEAD
-#     |        `------------ upstream commit the branch sits on
-#     `--------------------- rsync release, from version.h
+#     3.5.0-g9273e229
+#     |     `-- this repository's HEAD
+#     `-------- the upstream rsync release, from version.h
 #
-# Tags deliberately play no part.  A fork has none until someone pushes them,
-# which is why CI once reported a bare "e176e5f0" as the whole version, and
-# pushing ~170 upstream tags to get them back would fire this repo's release
-# workflow once per tag.  Two revs answer the question tags were being asked
-# to answer, and answer it the same way locally and in CI.
+# Nothing here consults a remote ref.  An earlier scheme named the upstream
+# commit too, found via `merge-base HEAD master`, which quietly reported a
+# stale answer whenever the local master had not been fetched -- and after a
+# rebase onto a release that is exactly when it is stale.  version.h cannot
+# drift from the source it ships with, so it needs no fetching to be right.
+#
+# It also self-flags misuse: upstream sets version.h to "3.5.1dev" for the
+# whole development cycle, so a branch rebased onto master mid-cycle builds as
+# 3.5.1dev-g<rev>, which is visibly not a release, and the release workflow
+# refuses to publish it.
 # ---------------------------------------------------------------------------
-set(RSYNC_UPSTREAM_REV "")
 set(RSYNC_PORT_REV "")
 set(RSYNC_PORT_COUNT 0)
 
@@ -268,29 +272,18 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
                     OUTPUT_VARIABLE RSYNC_PORT_REV
                     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 
-    # Whichever of these exists.  A developer clone usually has an "upstream"
-    # remote pointing at RsyncProject/rsync; a CI checkout of the fork has
-    # only origin, whose master tracks upstream.
-    foreach(_ref upstream/master origin/master master)
-        if(NOT _base)
-            execute_process(COMMAND ${GIT_EXECUTABLE} merge-base HEAD ${_ref}
-                            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-                            OUTPUT_VARIABLE _base
-                            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-            if(_base)
-                set(RSYNC_UPSTREAM_BASE_REF "${_ref}")
-            endif()
-        endif()
-    endforeach()
-
-    if(_base)
-        execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=8 ${_base}
-                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-                        OUTPUT_VARIABLE RSYNC_UPSTREAM_REV
-                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-        # Commits this branch adds on top: monotonic while the base holds
-        # still, which is what the binary FILEVERSION needs.
-        execute_process(COMMAND ${GIT_EXECUTABLE} rev-list --count ${_base}..HEAD
+    # The binary FILEVERSION needs a number that advances with every commit
+    # here (see the version resource below).  Commits since version.h last
+    # changed is that number, and asking git which commit last touched one
+    # file needs no tags and no remote refs.  It resets when upstream bumps
+    # the version, but the release fields ahead of it rise at the same moment,
+    # so two builds still order correctly.
+    execute_process(COMMAND ${GIT_EXECUTABLE} log -1 --format=%H -- version.h
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    OUTPUT_VARIABLE _vbump
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_vbump)
+        execute_process(COMMAND ${GIT_EXECUTABLE} rev-list --count ${_vbump}..HEAD
                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                         OUTPUT_VARIABLE RSYNC_PORT_COUNT
                         OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
@@ -298,11 +291,7 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
 endif()
 
 set(RSYNC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}")
-if(RSYNC_UPSTREAM_REV AND RSYNC_PORT_REV)
-    set(RSYNC_VERSION_DISPLAY
-        "${RSYNC_VERSION_STRING}-g${RSYNC_UPSTREAM_REV}-g${RSYNC_PORT_REV}")
-elseif(RSYNC_PORT_REV)
-    # No upstream ref to compare against; still say which commit built this.
+if(RSYNC_PORT_REV)
     set(RSYNC_VERSION_DISPLAY "${RSYNC_VERSION_STRING}-g${RSYNC_PORT_REV}")
 endif()
 if(NOT RSYNC_PORT_COUNT)
@@ -325,13 +314,12 @@ endif()
 if(WIN32)
     # The strings are the version composed above, so the resource, the release
     # name and `rsync --version` all say the same thing.  The binary
-    # FILEVERSION is four 16-bit numbers and can hold neither rev, so it takes
-    # the release from version.h and the build number from how many commits
-    # this branch adds on top of its upstream base -- which advances with
-    # every commit here, so Windows can order two builds:
+    # FILEVERSION is four 16-bit numbers and cannot hold a rev, so it takes the
+    # release from version.h and the build number from the commit count --
+    # which advances with every commit here, so Windows can order two builds:
     #
-    #   strings   3.5.0dev-g3b84610c-g9273e229
-    #   binary    3,5,0,<commits on top of 3b84610c>
+    #   strings   3.5.0-g9273e229
+    #   binary    3,5,0,<commits since version.h said 3.5.0>
     set(RSYNC_RC_VERSION_DISPLAY "${RSYNC_VERSION_DISPLAY}")
     # OriginalFilename is defined as the name the file was built under, so it
     # has to follow the rename; the description says which build this is,
@@ -1008,9 +996,9 @@ install(TARGETS rsync RUNTIME DESTINATION bin)
 
 message(STATUS "")
 message(STATUS "rsync ${RSYNC_VERSION_DISPLAY} configuration:")
-if(RSYNC_UPSTREAM_REV)
-    message(STATUS "  upstream base ....... ${RSYNC_UPSTREAM_REV} "
-                   "(via ${RSYNC_UPSTREAM_BASE_REF}), +${RSYNC_PORT_COUNT} commits")
+if(RSYNC_PORT_REV)
+    message(STATUS "  built from .......... ${RSYNC_PORT_REV}, "
+                   "+${RSYNC_PORT_COUNT} commits since version.h said ${RSYNC_VERSION_STRING}")
 else()
     message(STATUS "  upstream base ....... unknown (no master ref to compare against)")
 endif()

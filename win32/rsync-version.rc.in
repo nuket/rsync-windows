@@ -6,12 +6,12 @@
  * version.h, which is where rsync keeps its version and where configure.ac
  * greps it from.
  *
- * Both version strings name the commit -- "3.4.3-g8cfbe798" -- because
+ * Both version strings name the commit -- "3.5.0-g8cfbe798" -- because
  * builds come off git HEAD routinely and a bare release number cannot tell
  * two of them apart.  Explorer's "File version" is the one field that cannot
  * show it: Explorer reads that from the binary FILEVERSION, which is four
  * 16-bit numbers and has no room for a rev.  That field carries the commit
- * count instead ("3.4.3.181"), so it still advances with every commit and
+ * count instead ("3.5.0.40"), so it still advances with every commit and
  * still orders two builds correctly.
  *
  * The 32-bit build is rsync-x86.exe, so OriginalFilename and the description
