@@ -1,4 +1,16 @@
-# Build rsync for Windows -- x64 and x86 -- and publish both.
+# Build rsync for Windows -- x64 and x86 -- and publish both when tagged.
+#
+# Every push builds, tests and uploads an artifact, so the branch is always
+# known to compile and a build is always downloadable from the run page.  Only
+# a v* tag publishes a Release, and the tag is only accepted when the source
+# is an upstream *release* -- version.h carrying a plain "3.5.0" rather than
+# "3.5.0dev".  That is the policy in one sentence: this port ships the Windows
+# adaptation layer for a released rsync, not for a snapshot of upstream master.
+#
+# It also keeps the Releases page readable.  Publishing on every push meant a
+# release per commit, pruned to the last three, and a tag per commit alongside
+# them; what someone actually wants there is the list of rsyncs this port has
+# shipped.
 #
 # This is the only workflow that runs on this branch.  Every other workflow in
 # .github/workflows/ is triggered by `push: branches: [ master ]`, and the
@@ -23,9 +35,9 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        # Not shallow: the version resource comes from `git describe`, which
-        # needs the tags and the commits since one.  A depth-1 checkout would
-        # silently produce a bare-rev version instead.
+        # Not shallow: the version resource names the commit that was built,
+        # which comes from git.  A depth-1 checkout still has HEAD, but the
+        # tag-agreement check below wants the tag object too.
         fetch-depth: 0
 
     - name: Install Ninja if the image lacks it
@@ -131,27 +143,25 @@ jobs:
         }
         "VER=$ver" >>$Env:GITHUB_ENV
 
-        # Split <release>-g<upstream rev>-g<port rev> so the release notes can
-        # explain each part.  The one-rev form is what a checkout with no
-        # master ref to compare against produces.
-        if ($ver -match '^(.*)-g([0-9a-fA-F]+)-g([0-9a-fA-F]+)$') {
-          "RSYNC_VER_BASE=$($Matches[1])"     >>$Env:GITHUB_ENV
-          "RSYNC_VER_UPSTREAM=$($Matches[2])" >>$Env:GITHUB_ENV
-          "RSYNC_VER_PORT=$($Matches[3])"     >>$Env:GITHUB_ENV
-        } elseif ($ver -match '^(.*)-g([0-9a-fA-F]+)$') {
+        # <upstream release>-g<port rev>.  The release half comes from
+        # version.h and the rev names the commit here that built it, so the
+        # two questions -- which rsync, and which build of the Windows work --
+        # each have an answer and they move independently.
+        if ($ver -match '^(.*)-g([0-9a-fA-F]+)$') {
           "RSYNC_VER_BASE=$($Matches[1])" >>$Env:GITHUB_ENV
-          "RSYNC_VER_UPSTREAM="           >>$Env:GITHUB_ENV
           "RSYNC_VER_PORT=$($Matches[2])" >>$Env:GITHUB_ENV
         } else {
-          "RSYNC_VER_BASE=$ver"  >>$Env:GITHUB_ENV
-          "RSYNC_VER_UPSTREAM="  >>$Env:GITHUB_ENV
-          "RSYNC_VER_PORT="      >>$Env:GITHUB_ENV
+          "RSYNC_VER_BASE=$ver" >>$Env:GITHUB_ENV
+          "RSYNC_VER_PORT="     >>$Env:GITHUB_ENV
         }
         Write-Host "staged rsync $ver, x64 and x86"
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v7
       with:
+        # Every run gets one, tagged or not: this is how a build is downloaded
+        # between releases now that pushes no longer publish one.
+        #
         # Loose files, not an archive: upload-artifact always zips what it is
         # given, so handing it a zip produced a zip inside a zip.  The
         # artifact name is what GitHub calls the zip it builds.
@@ -159,11 +169,41 @@ jobs:
         path: dist/*
         if-no-files-found: error
 
+    - name: Check the tag is one this source may be released under
+      # Only tag pushes get this far, and only tag pushes publish.  Both checks
+      # exist because the tag is written by hand: it is the one input to this
+      # workflow that nothing else validates.
+      if: startsWith(github.ref, 'refs/tags/v')
+      shell: pwsh
+      run: |
+        $tag = $Env:GITHUB_REF_NAME
+
+        # Policy: releases are cut from upstream releases.  version.h reads
+        # "3.5.0" at a release tag and "3.5.1dev" everywhere in between, so a
+        # "dev" here means the branch was rebased onto master mid-cycle and
+        # this tag should not have been pushed.
+        if ($Env:RSYNC_VER_BASE -match 'dev') {
+          Write-Error ("this source is rsync $Env:RSYNC_VER_BASE, which is not an upstream release. " +
+                       "Rebase onto an upstream release tag before tagging a release here.")
+          exit 1
+        }
+
+        # The tag names a version; the build computed one from version.h and
+        # the commit.  If they disagree, the tag was pushed at the wrong commit
+        # or spelled wrong, and the release would be labelled with a version
+        # the binaries inside it do not carry.
+        if ($tag -ne "v$Env:VER") {
+          Write-Error "tag $tag does not match the version built, which is $Env:VER (expected tag v$Env:VER)"
+          exit 1
+        }
+        Write-Host "tag $tag agrees with the build: rsync $Env:RSYNC_VER_BASE, port rev $Env:RSYNC_VER_PORT"
+
     - name: Publish release
-      # Every push to the branch gets one, so a build is always downloadable
-      # without digging through Actions.  Not for pull requests: a PR from a
-      # fork must not be able to publish.
-      if: github.event_name != 'pull_request'
+      # Tag pushes only.  A push to the branch builds and uploads an artifact
+      # but publishes nothing, so the Releases page lists the rsyncs this port
+      # has shipped rather than every commit.  Never for pull requests: a PR
+      # from a fork must not be able to publish.
+      if: startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
@@ -176,38 +216,16 @@ jobs:
         $ErrorActionPreference = 'Continue'
         $PSNativeCommandUseErrorActionPreference = $false
 
-        # A tag push releases under the tag; anything else releases under the
-        # version, which is already <version>-<shortrev> and unique per commit.
-        if ($Env:GITHUB_REF -like 'refs/tags/*') {
-          $tag = $Env:GITHUB_REF_NAME
-          $extra = @()
-        } else {
-          $tag = $Env:VER
-          # The newest build is the one to download, so it is the one GitHub
-          # should point "Latest" at -- that is what the repo sidebar and
-          # /releases/latest resolve to.  Not marked --prerelease, because
-          # GitHub will not make a prerelease the latest release: the flag and
-          # the badge are mutually exclusive, and being findable matters more
-          # here than the badge.  These are still per-push builds; what makes
-          # one of them stable is a v* tag, which takes the branch above.
-          $extra = @('--latest')
-        }
+        $tag = $Env:GITHUB_REF_NAME
 
-        # Re-running a job for the same commit would otherwise fail on the
-        # release that already exists.  --cleanup-tag takes the tag with it,
-        # so the retry starts from nothing.
+        # Re-running a job for the same tag would otherwise fail on the release
+        # that already exists.  Not --cleanup-tag: the tag is the deliberate
+        # act that produced this run and deleting it would delete the thing
+        # being released.
         gh release view $tag *> $null
         if ($LASTEXITCODE -eq 0) {
           Write-Host "release $tag exists; replacing it"
-          gh release delete $tag --yes --cleanup-tag
-        }
-
-        # The upstream row only makes sense when there was a master ref to
-        # compare against; without one the version carries a single rev.
-        if ($Env:RSYNC_VER_UPSTREAM) {
-          $upstreamRow = "| ``g$Env:RSYNC_VER_UPSTREAM`` | the upstream commit this branch is based on ([browse](https://github.com/RsyncProject/rsync/commit/$Env:RSYNC_VER_UPSTREAM)) |"
-        } else {
-          $upstreamRow = "| _(absent)_ | no upstream master ref was available at build time |"
+          gh release delete $tag --yes
         }
 
         # Lines here are not wrapped, deliberately: GitHub renders a single
@@ -216,7 +234,7 @@ jobs:
         # paragraph is one line, and the browser wraps it to whatever width it
         # actually has.
         $notes = @"
-        Native Windows build of rsync, for 64-bit and 32-bit Windows.
+        Native Windows build of rsync $Env:RSYNC_VER_BASE, for 64-bit and 32-bit Windows.
 
         ## Downloads
 
@@ -229,19 +247,18 @@ jobs:
 
         ## Reading the version
 
-        This port is a branch that gets rebased onto rsync's upstream master as that moves, so "which commit is this?" has two answers, and the version gives both:
-
         ``````
-        $tag
+        $Env:VER
         ``````
 
         | part | meaning |
         | --- | --- |
-        | ``$Env:RSYNC_VER_BASE`` | the rsync release this source is, from ``version.h`` |
-        $upstreamRow
-        | ``g$Env:RSYNC_VER_PORT`` | the commit in this repository that was built ([browse](https://github.com/$Env:GITHUB_REPOSITORY/commit/$Env:GITHUB_SHA)) |
+        | ``$Env:RSYNC_VER_BASE`` | the upstream rsync release this is a build of |
+        | ``g$Env:RSYNC_VER_PORT`` | the commit in this repository that built it ([browse](https://github.com/$Env:GITHUB_REPOSITORY/commit/$Env:GITHUB_SHA)) |
 
-        So the upstream rev tells you which rsync you are getting, and the port rev tells you which build of the Windows work you are getting. The two move independently: a rebase changes the first, a fix here changes the second. ``rsync --version`` prints the same string, and both binaries carry it in their file properties.
+        Releases here are cut only from upstream **releases**. This repository is the Windows adaptation layer for rsync: the first half of the version says which rsync you are getting, the second says which revision of the Windows work built it. A new upstream release moves the first; a fix to the port moves the second. ``rsync --version`` prints the same string, and both binaries carry it in their file properties.
+
+        Builds between releases are not published here. Every push to ``windows-cmake-port`` is still built and tested, and its binaries are attached to that run under **Actions** if you want one.
 
         ## Verifying a download
 
@@ -262,45 +279,12 @@ jobs:
         gh release create $tag `
           dist\rsync.exe dist\rsync.exe.sha256 `
           dist\rsync-x86.exe dist\rsync-x86.exe.sha256 `
-          --title "rsync $tag for Windows" `
+          --title "rsync $Env:RSYNC_VER_BASE for Windows" `
           --notes $notes `
           --target $Env:GITHUB_SHA `
-          @extra
+          --latest
         if ($LASTEXITCODE -ne 0) {
           Write-Error "gh release create failed with exit code $LASTEXITCODE"
           exit 1
         }
         Write-Host "published release $tag"
-
-    - name: Keep only the three most recent per-push releases
-      if: github.event_name != 'pull_request'
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        $ErrorActionPreference = 'Continue'
-        $PSNativeCommandUseErrorActionPreference = $false
-
-        # Per-push builds only, recognised by their tag.  Those are named
-        # <version>-g<rev>[-g<rev>] and there is one per commit, so they are
-        # what accumulates; a release tagged v* is a deliberate act and not
-        # something to delete behind someone's back.  The tag is what says
-        # which is which -- the prerelease flag used to, but the per-push
-        # builds now have to be non-prereleases for GitHub to let one of them
-        # be the latest release.
-        $all = gh release list --limit 100 --json tagName,createdAt |
-               ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0) { Write-Error "gh release list failed"; exit 1 }
-
-        $stale = @($all | Where-Object { $_.tagName -match '-g[0-9a-fA-F]{7,}$' } |
-                   Sort-Object { [datetime]$_.createdAt } -Descending |
-                   Select-Object -Skip 3)
-        if (-not $stale) {
-          Write-Host "nothing to prune"
-        } else {
-          foreach ($r in $stale) {
-            Write-Host "pruning $($r.tagName)"
-            # --cleanup-tag, or the tags pile up instead of the releases.
-            gh release delete $r.tagName --yes --cleanup-tag
-          }
-        }
