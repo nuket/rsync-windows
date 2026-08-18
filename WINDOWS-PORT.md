@@ -6,7 +6,7 @@ In the Year of our Lord, 2026, we're gonna go for it. Leeeeeeeerrrrrrooooooyyyyy
 # Here's the porting log from Claude.
 ---------------------------------------------------------------------------------------------------
 
-```sh
+```
 C:\Users\user\src>git clone https://github.com/RsyncProject/rsync.git rsync
 Cloning into 'rsync'...
 remote: Enumerating objects: 32574, done.
@@ -13442,4 +13442,269 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   syscall.c, util1.c and rsync.h are all upstream's, present in master — this branch adds none.
 
 ✻ Cogitated for 3m 14s
+```
+
+---------------------------------------------------------------------------------------------------
+# Set up a GitHub workflow that builds and releases rsync.exe for Windows only, no
+# other builds. Check that GitHub performs that build or tell me how to set up GitHub to do so.
+---------------------------------------------------------------------------------------------------
+
+```
+● All three done, and the build is verified running on GitHub.
+
+  1) Copyright — reverted. The LegalCopyright resource is back to rsync's line alone; git diff on that
+  file is empty.
+
+  2) Workflow — .github/workflows/windows-release.yml, committed as ad1c8979. Windows only: every one
+  of the other 17 workflows triggers on push: branches: [ master ], and this port lives on
+  windows-cmake-port, so they stay quiet without being touched. This is also the only workflow with a
+  tag trigger.
+
+  3) GitHub does perform the build — I pushed and watched it:
+
+  run 31060554907 · completed/success · 122s
+
+    ✓ actions/checkout@v4          ✓ Show what was built (self-contained check)
+    ✓ Install Ninja if missing     ✓ Package
+    ✓ Build and test               ✓ Upload build artifact
+                                   – Publish release        (skipped: no tag)
+
+  artifact: rsync-windows-x64  423 KB
+
+  Exactly one run started — the other 17 workflows didn't fire, as intended.
+
+  I was wrong about one thing along the way, and it's worth correcting rather than leaving: I told you
+  the fork status was the blocker. It's true that GitHub disables Actions on forks by default and
+  this repo is a fork of RsyncProject/rsync with zero prior runs — but Actions is already enabled on
+  it, so there was nothing to set up. The push triggered the run directly.
+
+  Two things I caught by testing rather than assuming, either of which would have produced a broken
+  build rather than a failure:
+
+  - fetch-depth: 0 on checkout. The version resource comes from git describe; the default depth-1
+  checkout has no tags, so the build would have succeeded and quietly stamped every binary with a bare
+  rev instead of 3.4.3-180-gaa6afb1c.
+  - dumpbin located via vswhere. Each step gets a fresh shell, so the vcvars environment the build
+  step sets up is gone by the next one — assuming dumpbin on PATH would have failed the job.
+
+  I also ran the dependency-check and packaging steps verbatim against the local build before
+  committing.
+
+  The self-contained check is a release gate, not decoration: the job fails if rsync.exe imports
+  anything beyond WS2_32, ADVAPI32, KERNEL32. If a VCRUNTIME140 import ever creeps back, it stops the
+  release rather than shipping something that won't start on a clean machine.
+
+  To cut a release: push a v* tag. The Publish release step (skipped above) then runs and creates a
+  GitHub release with rsync-<version>-windows-x64.zip — containing rsync.exe, its SHA-256, COPYING and
+  BUILD-CMAKE.md. It uses the gh CLI already on the runner rather than a third-party action.
+
+  One note: pushing published the porting log to a public repo whose default branch is now this one.
+  That followed from your asking me to verify the build, and you'd scrubbed the log for exactly that —
+  but flagging it since it's now live at github.com/nuket/rsync-windows.
+
+✻ Baked for 8m 20s
+```
+
+# ---------------------------------------------------------------------------------------------------
+# Porting onto upstream v3.5.0
+# ---------------------------------------------------------------------------------------------------
+
+```
+● I'll wait for that to finish before moving the branch. Meanwhile, here's where things stand.
+
+  The rebase is done and validated. 37 port commits onto v3.5.0, plus 8 new commits covering what 3.5.0
+  required. Nothing is pushed and your branch still points at ad1abfce.
+
+  Test results on the committed tree:
+
+  ┌────────────────────────┬────────────────────────────────────┐
+  │                        │               result               │
+  ├────────────────────────┼────────────────────────────────────┤
+  │ x64, ssh to 3.4.1 host │ 24 passed, 0 failed                │
+  ├────────────────────────┼────────────────────────────────────┤
+  │ x86, no ssh            │ 23 passed, 1 skipped               │
+  ├────────────────────────┼────────────────────────────────────┤
+  │ x86, ssh               │ 2 failed — pre-existing, see below │
+  └────────────────────────┴────────────────────────────────────┘
+
+  The x86 ssh failures are not from the rebase. rsync-x86.exe can't find ssh.exe because the only copy
+  is C:\Windows\System32\OpenSSH\ssh.exe, and WOW64 redirects a 32-bit process's view of System32 to
+  SysWOW64, which has no OpenSSH. I verified this by running your pre-rebase x86 binary against the
+  same host — it fails identically. It only surfaced now because this is the first run with a test host
+  configured.
+
+  That does mean the 32-bit binary you ship cannot do remote transfers on 64-bit Windows at all. The
+  fix is to resolve the program through %WINDIR%\Sysnative\ when a 32-bit process can't find it on
+  PATH. I've left it alone — it's a pre-existing defect in process launching, outside what you asked
+  for, and worth being a deliberate change rather than something I slipped into a rebase. Say the word
+  and I'll do it as its own commit.
+
+  Two things worth flagging about the released binaries:
+
+  The --compare-dest/--link-dest/--confine-root and destination-chdir breakage would have shipped
+  silently as "rsync 3.5.0 for Windows" — 20 of 24 tests failed, and none of it was a conflict git
+  would have shown you. That's the strongest argument for the policy you picked: releases gated on a
+  tag, cut only from a tested upstream release.
+
+  The commits are split so each is reviewable on its own:
+
+  53b5dc66 docs: describe the port as it stands on rsync 3.5.0
+  cd1d1086 CI: watch for an upstream release rather than every master commit
+  49ce7580 tests: compute the coverage map against upstream's testsuite
+  d7ac708c CI: publish a release only from an upstream release tag
+  f7eed971 tests: run the pure-logic helpers rsync 3.5.0 added
+  b8e63ccc Name a build by the upstream release and the port commit
+  d978e1a2 win32: keep a drive-letter path absolute through 3.5.0's new path handling
+  edc62a52 win32: supply what rsync 3.5.0's new code expects to find
+  fabcb4b2 win32: implement poll(), which io.c now uses instead of select()
+
+  Once the 3.2.7-host run finishes I'll move windows-cmake-port onto the rebased tip and restore your
+  uncommitted WINDOWS-PORT.md addition (backed up). Pushing, tagging v3.5.0-g<rev>, and letting that
+  replace the four per-push releases stays with you.
+
+✻ Cooked for 6m 19s
+
+● Done. windows-cmake-port now sits on v3.5.0, verified green, and nothing is pushed.
+
+  What you asked for
+
+  Rebasing without losing commits. The mechanism is that a rebase copies commits rather than moving
+  them — the originals survive as long as something references them. Three things now do:
+
+  - pre-rebase/onto-v3.5.0 — annotated tag on the old tip ad1abfce
+  - backup/windows-cmake-port-pre-v3.5.0 — branch on the same commit
+  - reflog / ORIG_HEAD (automatic, ~90 days)
+
+  I also turned on git rerere; it recorded 6 conflict resolutions that will replay automatically on
+  your next rebase. The whole rebase ran in a disposable worktree, so your branch only moved once the
+  build and tests were green.
+
+  All 37 commits came through, same order, same subjects, and the port's own sources (win32/, CMake,
+  batch file) are byte-identical across the rebase — every merge decision was confined to shared
+  sources.
+
+  Release policy, as you chose it. Pushes build, test and upload an artifact but publish nothing. Only
+  a v* tag publishes, gated on two checks: version.h must not say dev (i.e. you must be on an upstream
+  release), and the tag must equal v + the built version. The prune-to-three step and per-push tag
+  churn are gone. Version is now 3.5.0-g<portrev>, derived from version.h plus HEAD — no merge-base
+  HEAD master, which would have reported a stale base after exactly this kind of rebase.
+
+  To cut the release:
+
+  git push origin windows-cmake-port
+  git tag -a v3.5.0-g53b5dc66 -m "rsync 3.5.0 for Windows"
+  git push origin v3.5.0-g53b5dc66
+
+  That's yours to run — it's outward-facing and will replace the four per-push releases currently on
+  the page.
+
+  What the rebase turned out to involve
+
+  It was not a fast-forward. v3.5.0 broke the port in four ways, and only one produced a git conflict:
+
+  - io.c moved from select() to poll() — needed a new win32_poll(), since WSAPoll sees only sockets.
+  - The receiver's destination chdir was hardened to resolve a directory fd and fchdir to it. Windows
+  has neither, so 20 of 24 tests failed. Fixed with a CHDIR_VIA_DIRFD hook.
+  - Two new raw *p == '/' absolute-path tests broke --compare-dest/--link-dest and --confine-root on
+  C:\ paths.
+  - android.c was deleted upstream; O_NOCTTY, AT_REMOVEDIR and symlink() needed stand-ins.
+
+  The one worth singling out: v3.5.0 rewrote the receiver's post-transfer wait to use an
+  async-signal-safe got_sigusr2 flag. Your port had moved that code into pipe.c, so git applied pipe.c
+  with no conflict at all, silently keeping the old while (1) msleep(20). I transplanted it by hand.
+  That's the failure mode a rebase cannot warn you about, and it's why the tests mattered more than the
+  merge.
+
+  I also audited all 44 new upstream file-scope variables for RSYNC_TLS: none needs it. The real
+  candidate — the dirfd-stack cache in syscall.c, which holds open fds two threads would close on each
+  other — is behind #if defined AT_FDCWD, which Windows never satisfies.
+
+  Test coverage
+
+  Verified on both hosts you gave me: 24/24 on x64 against 3.4.1 (protocol 32) and against 3.2.7
+  (protocol 31); x86 is 23 passed / 1 skipped without ssh.
+
+  On your question about comparability — upstream's 345 tests versus your 24 is mostly packaging, and
+  now it's measured rather than asserted. 113 upstream tests apply to Windows; 111 map to a port test,
+  2 are accepted gaps. The rest are symlinks (69), daemon (67), TCP-only (43, which upstream skips
+  too), rrsync (19), ACLs/xattrs (14), Unix ids (13), ssl (5), ASan (2).
+
+  win32/tests/coverage_map.py computes that table rather than it being hand-written, and CI runs
+  --check, which fails the build when a new upstream test applies to Windows and is neither covered nor
+  written down as an accepted gap. That's the part that survives future rebases. I also added the
+  three new upstream helpers that port cleanly (t_clean_fname, t_iwildmatch, t_hashtable_overflow).
+
+  One thing I found and deliberately left alone
+
+  rsync-x86.exe cannot do remote transfers on 64-bit Windows at all — WOW64 redirects System32 to
+  SysWOW64, which has no OpenSSH, so ssh.exe is invisible to it. I confirmed this is pre-existing by
+  running your pre-rebase x86 binary against the same host; it fails identically. It only surfaced now
+  because this was the first run with a test host configured.
+
+  The fix is to fall back to %WINDIR%\Sysnative\ when a 32-bit process can't find the program on PATH.
+  I didn't do it: it changes process launching, it's unrelated to the rebase, and it deserves to be a
+  deliberate commit rather than something folded into this. Worth doing though — say the word.
+
+✻ Worked for 1m 3s
+
+● Fixed and committed as 332186fc.
+
+  What was wrong
+
+  rsync-x86.exe could not do a remote transfer on 64-bit Windows at all. The WOW64 File System
+  Redirector hands a 32-bit process %WINDIR%\SysWOW64 whenever it asks for %WINDIR%\System32, and
+  Windows ships OpenSSH only in the real System32\OpenSSH. So the PATH entry that finds ssh for
+  everything else resolved, for the 32-bit build, to a directory that doesn't contain it. Nothing in
+  rsync was misbehaving — the lookup was answered honestly, and the answer was nothing.
+
+  The fix
+
+  win32_piped_child() retries the lookup through %WINDIR%\Sysnative — the virtual directory that exists
+  only for a 32-bit process on 64-bit Windows and names the true System32 — then names the image
+  explicitly, leaving the command line untouched so the child still sees its original argv.
+
+  It handles both spellings: a bare name found via a System32 entry on PATH (how ssh is normally
+  located), and an explicit System32 path someone set in RSYNC_RSH, which is redirected identically.
+
+  The retry is gated twice — the ordinary CreateProcess must already have returned
+  ERROR_FILE_NOT_FOUND, and under_wow64() must be true, which it never is on a 64-bit build. So the x64
+  path provably cannot behave differently, and the 48/48 result below confirms it.
+
+  Verification
+
+  ┌──────────────────────────────────────┬─────────────────────────────────┐
+  │                                      │             result              │
+  ├──────────────────────────────────────┼─────────────────────────────────┤
+  │ x64 + ssh (3.4.1, protocol 32)       │ 24/24                           │
+  ├──────────────────────────────────────┼─────────────────────────────────┤
+  │ x86 + ssh (3.4.1, protocol 32)       │ 24/24                           │
+  ├──────────────────────────────────────┼─────────────────────────────────┤
+  │ x86 push/pull to 3.2.7 (protocol 31) │ round-tripped, content verified │
+  └──────────────────────────────────────┴─────────────────────────────────┘
+
+  48 PASS, 0 FAIL across the full clean both-architecture run. remote and batch — the two that failed
+  before — both pass on x86 now.
+
+  One thing worth recording
+
+  My first attempt added a --debug=CMD diagnostic using rprintf/who_am_i/DEBUG_GTE. That broke the link
+  for t_iwildmatch, wildtest, getgroups and others: win32proc.c is compiled into every C test helper,
+  and those supply no logging symbols. That's precisely why the file had no logging in it before. I
+  dropped the diagnostic and left a comment explaining the constraint, so it doesn't get reintroduced.
+  piped_child() in win32pipe.c already prints the argv under --debug=CMD, which covers the diagnostic
+  need from a file the helpers don't link.
+
+  State
+
+  Branch is at 332186fc, 47 commits on v3.5.0, nothing pushed. Safety refs intact
+  (pre-rebase/onto-v3.5.0, backup/windows-cmake-port-pre-v3.5.0). Coverage check still passes. Your
+  WINDOWS-PORT.md edits remain uncommitted and untouched.
+
+  To release, when you're ready:
+
+  git push origin windows-cmake-port
+  git tag -a v3.5.0-g332186fc -m "rsync 3.5.0 for Windows"
+  git push origin v3.5.0-g332186fc
+
+✻ Baked for 46s
 ```
