@@ -2405,7 +2405,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		 * peer-supplied root there could only loosen the module boundary. */
 		if (am_daemon)
 			confine_root = NULL;
-		else if (*confine_root != '/') {
+		else if (!IS_ABS_PATH(confine_root)) {
 			snprintf(err_buf, sizeof err_buf,
 				 "--confine-root must be an absolute path\n");
 			return 0;

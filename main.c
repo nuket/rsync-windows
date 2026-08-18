@@ -885,7 +885,7 @@ static void check_alt_basis_dirs(void)
 		 * rather than reject an operator '..' outside the dest tree (e.g.
 		 * --copy-dest=../to).  Skipped when sanitize_paths already confined
 		 * them; the dry_run>1 case keeps its leading-"../"-strip. */
-		if (*bdir != '/' && (dry_run > 1 || !sanitize_paths)) {
+		if (!IS_ABS_PATH(bdir) && (dry_run > 1 || !sanitize_paths)) {
 			int len = curr_dir_len + 1 + bd_len + 1;
 			char *new = new_array(char, len);
 			if (dry_run > 1 && slash && strncmp(bdir, "../", 3) == 0) {

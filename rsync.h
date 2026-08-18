@@ -386,6 +386,17 @@ enum delret {
 #define platform_fix_path_args(argc, argv) ((void)0)
 #endif
 
+/* Can the receiver harden its destination chdir by resolving the path to a
+ * directory fd and fchdir()ing to it?  That is what closes the dest-chdir
+ * TOCTOU on POSIX.  It needs three things -- open() accepting a directory,
+ * O_NOFOLLOW/openat to make the walk refuse a raced symlink, and fchdir() --
+ * and a port with none of them (Windows) has to fall back to a plain
+ * chdir().  Nothing is given up there that was ever held: without AT_FDCWD
+ * the resolver degrades to a bare open() that checks no symlinks anyway. */
+#ifndef CHDIR_VIA_DIRFD
+#define CHDIR_VIA_DIRFD 1
+#endif
+
 /* Close an fd that belongs to the other half of the generator/receiver
  * split.  With fork() the halves have separate fd tables and each closes
  * what it does not need; a thread-based split shares one table, so a port
