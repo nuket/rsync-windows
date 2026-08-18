@@ -59,6 +59,16 @@ jobs:
       # tests skip on their own without RSYNC_WIN_TEST_HOST.
       run: windows-build-and-test.bat --clean
 
+    - name: Check no upstream test was absorbed unreviewed
+      shell: pwsh
+      # A rebase onto a new upstream release brings its new tests along.  This
+      # fails when one of them applies to Windows and is neither covered by a
+      # win32/tests test nor written down as an accepted gap -- so the choice
+      # gets made deliberately instead of by omission.  See README "Testing".
+      run: |
+        python win32/tests/coverage_map.py --check
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+
     - name: Show what was built, and check both are self-contained
       shell: pwsh
       run: |
