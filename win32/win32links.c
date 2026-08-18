@@ -140,3 +140,18 @@ void win32_note_link(const char *path, int kind)
 
 	LeaveCriticalSection(&lock);
 }
+
+/* rsync 3.5.0's t_secure_relpath helper builds a symlink to check that an
+ * in-tree ".." climb through one still resolves.  Creating a symlink needs
+ * Developer Mode or SeCreateSymbolicLinkPrivilege, which is exactly the
+ * privilege this port declines to require (see the file header), so this
+ * reports the honest answer rather than half-creating something.  rsync
+ * itself never reaches here: SUPPORT_LINKS is off, so do_symlink() is
+ * compiled out. */
+int win32_symlink(const char *target, const char *linkpath)
+{
+	(void)target;
+	(void)linkpath;
+	errno = ENOSYS;
+	return -1;
+}

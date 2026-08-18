@@ -84,6 +84,11 @@
 #define IS_DRIVE_PATH(s) (isalpha((uchar)(s)[0]) && (s)[1] == ':' \
 			  && ((s)[2] == '\\' || (s)[2] == '/' || (s)[2] == '\0'))
 
+/* No directory fds and no fchdir() here (win32compat.h defines fchdir as
+ * ENOSYS), so the receiver's dirfd-based chdir hardening cannot run; a plain
+ * chdir() is used instead.  See the hook in rsync.h for why nothing is lost. */
+#define CHDIR_VIA_DIRFD 0
+
 /* rsync.h defines NORETURN only if nobody else has, and its own definition is
  * spelled the GCC way -- which the same header expands to nothing for a
  * non-GCC compiler.  MSVC is therefore told nothing about _exit_cleanup(),
@@ -233,6 +238,13 @@ void win32_note_link(const char *path, int kind);
 
 /* --------------------------------------------------------------- open(2) */
 
+/* delete.c passes this to do_unlink_atfd() on the held-dirfd path.  Windows
+ * has no dirfd to hold, so del_held_dfd() always returns -1 and that path is
+ * never taken -- but it still has to compile. */
+#ifndef AT_REMOVEDIR
+#define AT_REMOVEDIR 0x200
+#endif
+
 #ifndef O_NOFOLLOW
 #define O_NOFOLLOW  0
 #endif
@@ -244,6 +256,11 @@ void win32_note_link(const char *path, int kind);
 #endif
 #ifndef O_NOATIME
 #define O_NOATIME   0
+#endif
+/* Windows has no controlling terminal to be acquired, so this is the flag's
+ * effect already.  win32_open() masks it off with the rest of these. */
+#ifndef O_NOCTTY
+#define O_NOCTTY    0
 #endif
 #ifndef O_NONBLOCK
 #define O_NONBLOCK  0x40000000  /* handled by win32_fcntl, not the CRT */
@@ -277,6 +294,7 @@ int      win32_write(int fd, const void *buf, unsigned int count);
 int      win32_close(int fd);
 int      win32_pipe(int fd[2]);
 int      win32_socketpair(int domain, int type, int protocol, int sv[2]);
+int      win32_symlink(const char *target, const char *linkpath);
 int      win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
                       struct timeval *tv);
 int      win32_fcntl(int fd, int cmd, ...);
@@ -289,6 +307,7 @@ int      win32_dup2(int oldfd, int newfd);
 #define pipe(a)         win32_pipe(a)
 #define socketpair(d, t, p, sv) win32_socketpair((d), (t), (p), (sv))
 #define select(n, r, w, e, t)   win32_select((n), (r), (w), (e), (t))
+#define symlink(t, l)           win32_symlink((t), (l))
 #define fcntl           win32_fcntl
 #define dup(f)          win32_dup(f)
 #define dup2(o, n)      win32_dup2((o), (n))

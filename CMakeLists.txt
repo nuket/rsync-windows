@@ -784,7 +784,7 @@ endif()
 # ---------------------------------------------------------------------------
 set(RSYNC_SOURCES
     flist.c rsync.c generator.c receiver.c cleanup.c sender.c exclude.c
-    util1.c util2.c main.c checksum.c match.c syscall.c android.c log.c
+    util1.c util2.c main.c checksum.c match.c syscall.c log.c
     backup.c delete.c
     options.c io.c compat.c hlink.c token.c uidlist.c socket.c hashtable.c
     usage.c fileio.c batch.c clientname.c chmod.c acls.c xattrs.c
@@ -945,7 +945,7 @@ function(rsync_test_helper name)
     endif()
 endfunction()
 
-set(HELPER_COMMON syscall.c android.c util2.c t_stub.c
+set(HELPER_COMMON syscall.c util2.c t_stub.c
                   lib/compat.c lib/snprintf.c lib/permstring.c)
 
 # Makefile.in links tls and trimslash against syscall.c but not util1.c.

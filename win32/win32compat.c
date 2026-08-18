@@ -113,7 +113,7 @@ int win32_open(const char *path, int flags, ...)
 	}
 
 	/* These have no Windows equivalent and must not reach the CRT. */
-	flags &= ~(O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC | O_NOATIME | O_NONBLOCK);
+	flags &= ~(O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC | O_NOATIME | O_NOCTTY | O_NONBLOCK);
 	flags |= _O_BINARY;
 
 	/* Windows keeps one bit of a Unix mode: whether the file is writable.
