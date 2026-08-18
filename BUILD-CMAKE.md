@@ -82,6 +82,14 @@ client (`C:\Windows\System32\OpenSSH\ssh.exe`) as their remote shell. Take the
 x64 build unless you are on 32-bit Windows, or something in the way you are
 invoking rsync will only load a 32-bit image.
 
+`rsync-x86.exe` reaches that ssh through `%WINDIR%\Sysnative`. On 64-bit
+Windows the WOW64 redirector points a 32-bit process at `SysWOW64` whenever it
+names `System32`, and OpenSSH ships only in the real `System32` — so a plain
+PATH lookup finds nothing and every remote transfer fails with "Failed to exec
+ssh". `Sysnative` is the alias that reaches the true `System32` from a 32-bit
+process, and `win32_piped_child()` retries there when, and only when, the
+ordinary launch has already come back with "file not found".
+
 ### A standalone binary
 
 `RSYNC_STATIC_CRT` (on by default) links the C runtime with `/MT` rather than

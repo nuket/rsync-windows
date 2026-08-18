@@ -74,6 +74,164 @@ static HANDLE find_child(pid_t pid, int *slot)
  * have to quote to those rules: backslashes are literal except when they
  * immediately precede a quote, where they must be doubled.
  */
+/* --------------------------------------------------- WOW64 program lookup */
+
+/*
+ * On 64-bit Windows a 32-bit process sees %WINDIR%\System32 redirected to
+ * %WINDIR%\SysWOW64 -- the WOW64 File System Redirector.  Windows' own
+ * OpenSSH lives in System32\OpenSSH and has no SysWOW64 counterpart, so
+ * rsync-x86.exe searching PATH for "ssh" finds nothing and every remote
+ * transfer fails with "Failed to exec ssh: No such file or directory",
+ * while the x64 build of the same source works.
+ *
+ * %WINDIR%\Sysnative is the escape hatch: a virtual directory that exists
+ * only for a 32-bit process on 64-bit Windows and names the real System32.
+ * The lookup below is retried through it -- and only after the ordinary
+ * launch has already failed to find the program, so nothing that works
+ * today reaches this code at all.
+ */
+
+static int under_wow64(void)
+{
+	BOOL wow = FALSE;
+
+	/* Failing counts as "no": a 64-bit process, or 32-bit on 32-bit
+	 * Windows, has no redirector to defeat. */
+	return IsWow64Process(GetCurrentProcess(), &wow) && wow;
+}
+
+/* Strip trailing slashes in place, returning the new length. */
+static size_t rstrip_slashes(char *s, size_t len)
+{
+	while (len && (s[len-1] == '\\' || s[len-1] == '/'))
+		s[--len] = '\0';
+	return len;
+}
+
+/* Does `dir` name the redirected System32, so that Sysnative reaches the real
+ * one?  Case-insensitive: PATH spells it however it likes. */
+static int is_system32_dir(const char *dir, const char *windir, size_t wdlen)
+{
+	static const char sys32[] = "\\system32";
+	char after;
+
+	if (_strnicmp(dir, windir, wdlen) != 0)
+		return 0;
+	if (_strnicmp(dir + wdlen, sys32, sizeof sys32 - 1) != 0)
+		return 0;
+	after = dir[wdlen + sizeof sys32 - 1];
+	return after == '\0' || after == '\\' || after == '/';
+}
+
+static int is_file(const char *path)
+{
+	DWORD a = GetFileAttributesA(path);
+
+	return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* dir + "\" + name, and again with ".exe" when name carries no extension --
+ * the search CreateProcess would have done.  Returns a malloc'd path that
+ * exists, or NULL. */
+static char *try_join(const char *dir, const char *name)
+{
+	static const char *const exts[] = { "", ".exe" };
+	int has_ext = strchr(name, '.') != NULL;
+	unsigned e;
+
+	for (e = 0; e < sizeof exts / sizeof *exts; e++) {
+		char *p;
+		size_t need;
+
+		if (*exts[e] && has_ext)
+			continue;
+		need = strlen(dir) + 1 + strlen(name) + strlen(exts[e]) + 1;
+		if (!(p = (char *)malloc(need)))
+			return NULL;
+		snprintf(p, need, "%s\\%s%s", dir, name, exts[e]);
+		if (is_file(p))
+			return p;
+		free(p);
+	}
+	return NULL;
+}
+
+/*
+ * Find `prog` the way the ordinary launch would have, but through Sysnative.
+ * Returns a malloc'd absolute path for the caller to free, or NULL when this
+ * is not the problem -- which includes every case on a 64-bit build.
+ */
+static char *wow64_find_program(const char *prog)
+{
+	char windir[MAXPATHLEN], sysnative[MAXPATHLEN];
+	size_t wdlen, snlen;
+	const char *path, *p;
+	int n;
+
+	if (!prog || !*prog || !under_wow64())
+		return NULL;
+
+	wdlen = (size_t)GetWindowsDirectoryA(windir, sizeof windir);
+	if (!wdlen || wdlen >= sizeof windir)
+		return NULL;
+	wdlen = rstrip_slashes(windir, wdlen);
+
+	n = snprintf(sysnative, sizeof sysnative, "%s\\Sysnative", windir);
+	if (n < 0 || (size_t)n >= sizeof sysnative)
+		return NULL;
+	snlen = (size_t)n;
+
+	/* An explicit path into System32 -- "C:\Windows\System32\OpenSSH\ssh.exe"
+	 * out of RSYNC_RSH, say -- is redirected just the same, so rewrite its
+	 * prefix rather than searching for it. */
+	if (is_system32_dir(prog, windir, wdlen)) {
+		const char *rest = prog + wdlen + sizeof "\\system32" - 1;
+		size_t need = snlen + strlen(rest) + 1;
+		char *full = (char *)malloc(need);
+
+		if (!full)
+			return NULL;
+		snprintf(full, need, "%s%s", sysnative, rest);
+		if (is_file(full))
+			return full;
+		free(full);
+		return NULL;
+	}
+
+	/* Anything else carrying a directory is not a PATH lookup. */
+	if (strpbrk(prog, "\\/"))
+		return NULL;
+
+	if (!(path = getenv("PATH")))
+		return NULL;
+
+	for (p = path; *p; ) {
+		const char *end = strchr(p, ';');
+		size_t dlen = end ? (size_t)(end - p) : strlen(p);
+		char dir[MAXPATHLEN], alt[MAXPATHLEN];
+
+		if (dlen && dlen < sizeof dir) {
+			memcpy(dir, p, dlen);
+			dir[dlen] = '\0';
+			dlen = rstrip_slashes(dir, dlen);
+			if (is_system32_dir(dir, windir, wdlen)) {
+				/* The same directory, reached unredirected. */
+				n = snprintf(alt, sizeof alt, "%s%s", sysnative,
+					     dir + wdlen + sizeof "\\system32" - 1);
+				if (n >= 0 && (size_t)n < sizeof alt) {
+					char *hit = try_join(alt, prog);
+					if (hit)
+						return hit;
+				}
+			}
+		}
+		if (!end)
+			break;
+		p = end + 1;
+	}
+	return NULL;
+}
+
 static char *build_command_line(char **argv)
 {
 	size_t cap = 256, len = 0;
@@ -206,6 +364,29 @@ pid_t win32_piped_child(char **command, int *f_in, int *f_out)
 
 	if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
 		DWORD err = GetLastError();
+		char *native = NULL;
+
+		/* Not found, and we are a 32-bit process on 64-bit Windows: the
+		 * program may be one the WOW64 redirector hid from us (ssh is,
+		 * since Windows keeps it in System32\OpenSSH).  Name the image
+		 * explicitly via Sysnative and try once more.  cmdline is left
+		 * alone, so the child still sees the argv it was given.
+		 *
+		 * Silent by design: this file is linked into the C test helpers,
+		 * which supply no logging symbols, so reaching for rprintf() here
+		 * would break every one of them at link time.  piped_child() in
+		 * win32pipe.c already prints the argv under --debug=CMD. */
+		if (err == ERROR_FILE_NOT_FOUND
+		 && (native = wow64_find_program(command[0])) != NULL) {
+			if (CreateProcessA(native, cmdline, NULL, NULL, TRUE, 0,
+					   NULL, NULL, &si, &pi)) {
+				free(native);
+				goto started;
+			}
+			err = GetLastError();
+			free(native);
+		}
+
 		free(cmdline);
 		CloseHandle(to_child_parent);
 		CloseHandle(to_child_child);
@@ -214,6 +395,7 @@ pid_t win32_piped_child(char **command, int *f_in, int *f_out)
 		errno = (err == ERROR_FILE_NOT_FOUND) ? ENOENT : EIO;
 		return -1;
 	}
+    started:
 	free(cmdline);
 
 	/* The child owns its ends now. */
