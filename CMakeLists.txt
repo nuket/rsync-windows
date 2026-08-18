@@ -963,6 +963,21 @@ rsync_test_helper(t_chmod_secure  t_chmod_secure.c ${HELPER_COMMON}
                              util1.c lib/wildmatch.c)
 rsync_test_helper(t_secure_relpath t_secure_relpath.c ${HELPER_COMMON}
                              util1.c lib/wildmatch.c)
+
+# New in rsync 3.5.0, and all pure logic -- no symlinks, no dirfds, no daemon --
+# so they run here exactly as they do on Unix.  Link lines follow Makefile.in's
+# T_*_OBJ.  t_acl, t_symlink_secure and t_rename_secure are deliberately absent:
+# each is about ACLs or the symlink-TOCTOU primitive, neither of which this port
+# has.  t_safe_arg needs main.c with main() renamed out, which the CMake build
+# has no equivalent of yet.
+rsync_test_helper(t_clean_fname t_clean_fname.c ${HELPER_COMMON}
+                             util1.c lib/wildmatch.c)
+# Not HELPER_COMMON: that carries syscall.c, whose globals this helper does not
+# define (upstream's T_HASHTABLE_OVERFLOW_OBJ leaves it out for the same reason).
+rsync_test_helper(t_hashtable_overflow t_hashtable_overflow.c hashtable.c
+                             util2.c t_stub.c lib/compat.c lib/snprintf.c
+                             lib/wildmatch.c)
+rsync_test_helper(t_iwildmatch t_iwildmatch.c lib/wildmatch.c)
 # No lib/wildmatch.c here: wildtest.c #includes it directly.
 rsync_test_helper(wildtest   wildtest.c lib/compat.c lib/snprintf.c
                              ${POPT_SOURCES})

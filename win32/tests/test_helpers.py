@@ -26,12 +26,61 @@ from wintest import SCRATCH, check, helper, ok
 relpath_dir = SCRATCH / 'relpath'
 relpath_dir.mkdir(parents=True, exist_ok=True)
 
-proc = helper('t_secure_relpath', relpath_dir)
+# rsync 3.5.0 added a check_beneath_dotdot() section to this helper.  It opens
+# "." as a directory fd and walks through a symlink, and Windows has neither:
+# the CRT's open() refuses a directory (the anchor open fails with EACCES) and
+# this port creates no symlinks.  It is the same limitation that makes
+# CHDIR_VIA_DIRFD 0 -- and without AT_FDCWD the resolver it exercises degrades
+# to a bare open() that checks nothing anyway, so there is no behaviour here to
+# have an opinion about.  The front-door cases above it are the part that
+# matters on Windows, so those are asserted one by one and the exit code is
+# not, rather than losing the whole helper to a single skip.
+proc = helper('t_secure_relpath', relpath_dir, expect=None)
 report = proc.stdout + proc.stderr   # it writes its case log to stderr
-check('[relpath=..' in report,
-      f"t_secure_relpath did not report the bare '..' case:\n{report}")
-check('FAIL' not in report,
-      f"t_secure_relpath reported a failure:\n{report}")
+
+FRONT_DOOR = [
+    'relpath=..', 'relpath=../foo', 'relpath=subdir/..',
+    'relpath=subdir/../subdir', 'relpath=foo/../bar', 'relpath=/foo',
+    'relpath=/', 'basedir=..', 'basedir=../subdir', 'basedir=subdir/..',
+    'basedir=foo/../bar',
+]
+for case in FRONT_DOOR:
+    # The helper pads each label, so match within the line, not the whole box.
+    check(any(l.startswith('OK') and case in l for l in report.splitlines()),
+          f"t_secure_relpath did not reject [{case}]:\n{report}")
+
+# Whatever did fail must be the dirfd/symlink section and nothing else -- a new
+# FAIL outside it is a real regression and must not hide behind this.
+outside = [l for l in report.splitlines()
+           if l.startswith('FAIL') and '[beneath ' not in l]
+check(not outside,
+      't_secure_relpath failed outside the dirfd-dependent section:\n'
+      + '\n'.join(outside))
+
+# --- t_clean_fname (new in 3.5.0) ------------------------------------------
+# KI-50: clean_fname(CFN_COLLAPSE_DOT_DOT_DIRS) must collapse "..".  Pure string
+# arithmetic on util1.o, so the Windows build exercises the same code upstream's
+# clean-fname-collapse test does.
+proc = helper('t_clean_fname')
+check('FAIL' not in proc.stdout + proc.stderr,
+      "t_clean_fname reported a failure:\n" + proc.stdout + proc.stderr)
+
+# --- t_iwildmatch (new in 3.5.0) -------------------------------------------
+# iwildmatch() must fold case on the pattern as well as the text.  Matches
+# upstream's iwildmatch-fold test; matters here because Windows file names are
+# routinely compared case-insensitively.
+proc = helper('t_iwildmatch')
+check('FAIL' not in proc.stdout + proc.stderr,
+      "t_iwildmatch reported a failure:\n" + proc.stdout + proc.stderr)
+
+# --- t_hashtable_overflow (new in 3.5.0) -----------------------------------
+# hashtable_create(2^28) overflows int in the unfixed code and under-allocates;
+# the fix rejects it and exits RERR_MALLOC.  So a *non-zero* exit is the pass
+# here -- upstream's hashtable-overflow test asserts the same code.  Worth
+# running on the 32-bit build in particular, where size_t is 32 bits.
+RERR_MALLOC = 22   # errcode.h
+proc = helper('t_hashtable_overflow', expect=RERR_MALLOC)
+ok('t_hashtable_overflow refused the overflowing size (RERR_MALLOC)')
 
 # --- trimslash -------------------------------------------------------------
 # The same inputs and expected output as testsuite/trimslash_test.py.
