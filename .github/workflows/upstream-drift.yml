@@ -1,11 +1,15 @@
-# Watch RsyncProject/rsync master, and say so when it moves ahead of us.
+# Watch RsyncProject/rsync for a new release, and say so when one appears.
 #
-# This branch is a port that gets rebased onto upstream master as that moves.
-# GitHub's branch page states the position -- "34 commits ahead, 0 behind" --
-# but nothing tells you when the second number stops being zero.  This does:
-# once a day it works out the same two numbers and, when we are behind, files
-# an issue naming the new upstream commits, then closes it once a rebase has
-# brought us level again.
+# This branch is a port that sits on an upstream *release*, not on upstream
+# master: the source it carries is whatever `version.h` names, and releases
+# here are cut only from those points.  So the actionable signal is "a newer
+# rsync has been tagged", not "master moved" -- master moves most days and
+# almost none of those commits are a reason to do anything.
+#
+# Once a day this compares the release named in our version.h against the
+# newest release tag upstream carries, and when upstream is ahead it files an
+# issue naming the new release, then closes it once a rebase has brought us
+# level again.
 #
 # Deliberately uses no actions at all.  Everything here is git and gh, both
 # preinstalled on the runner, so the repository's "allowed actions" policy
@@ -32,87 +36,90 @@ permissions:
 
 env:
   UPSTREAM: RsyncProject/rsync
-  UPSTREAM_BRANCH: master
   # Long enough to be recognisable in a notification, short enough to read.
-  TITLE_PREFIX: 'Upstream moved:'
+  TITLE_PREFIX: 'Upstream released:'
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    name: Compare against upstream master
+    name: Compare against the newest upstream release
     steps:
-    - name: Work out how far apart the two branches are
+    - name: Work out which release we carry and which is newest upstream
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
 
-        # No checkout action, and no working tree either: this only needs
-        # commit history.  --filter=blob:none leaves the file contents on the
-        # server, which turns a ~100 MB clone into a few MB.
-        git init -q work && cd work
-        git remote add origin   "https://github.com/${GITHUB_REPOSITORY}.git"
-        git remote add upstream "https://github.com/${UPSTREAM}.git"
-        # Explicit refspecs rather than `git fetch origin BRANCH`, so the
-        # remote-tracking refs below are guaranteed to exist rather than
-        # relying on git's opportunistic update of them.  --no-tags because
-        # upstream carries ~170 release tags that this has no use for.
-        git fetch -q --filter=blob:none --no-tags origin \
-                  "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
-        git fetch -q --filter=blob:none --no-tags upstream \
-                  "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+        # No checkout and no clone: the two things this needs are one file
+        # from our branch and the upstream tag list, and both can be had
+        # without fetching ~100 MB of history.
+        ours="$(gh api "repos/${GITHUB_REPOSITORY}/contents/version.h?ref=${GITHUB_REF_NAME}" \
+                  --jq .content | base64 -d \
+                | sed -n 's/^#define RSYNC_VERSION "\(.*\)"/\1/p')"
+        if [ -z "$ours" ]; then
+          echo "::error title=Cannot read version.h::RSYNC_VERSION not found on ${GITHUB_REF_NAME}"
+          exit 1
+        fi
 
-        ours="$(git rev-parse "origin/${GITHUB_REF_NAME}")"
-        theirs="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
-        base="$(git merge-base "$ours" "$theirs")"
+        # Proper releases only.  Upstream also carries ~170 tags of the form
+        # v3.2.2pre1 and v3.4.1-sec-patches3; a prerelease is not something to
+        # rebase onto, and a sec-patches branch tag is not a release at all.
+        newest="$(git ls-remote --tags --refs "https://github.com/${UPSTREAM}.git" \
+                  | sed -n 's#.*refs/tags/v\([0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?\)$#\1#p' \
+                  | sort -V | tail -1)"
+        if [ -z "$newest" ]; then
+          echo "::error title=No upstream release tags found::git ls-remote returned nothing usable"
+          exit 1
+        fi
 
-        # The same two numbers GitHub's branch page prints, and the same
-        # merge-base the CMake version scheme uses for the upstream rev -- so
-        # a build called 3.5.0dev-gABC-gDEF and this check agree on what ABC is.
-        ahead="$(git rev-list --count "${base}..${ours}")"
-        behind="$(git rev-list --count "${base}..${theirs}")"
+        # A "dev" suffix means the branch is sitting on upstream master partway
+        # through a cycle rather than on a release, which the release policy
+        # says should not happen.  Strip it for the comparison and flag it.
+        base="${ours%dev}"
+        if [ "$base" != "$ours" ]; then
+          echo "note: version.h says '$ours' -- this branch is not on a release"
+          echo "off_release=1" >>"$GITHUB_ENV"
+        else
+          echo "off_release=0" >>"$GITHUB_ENV"
+        fi
+
+        # sort -V puts the older first; if that is the newest upstream tag then
+        # we are level or ahead.  Equal versions sort either way, so the
+        # equality case is tested on its own.
+        if [ "$base" = "$newest" ]; then
+          behind=0
+        elif [ "$(printf '%s\n%s\n' "$base" "$newest" | sort -V | tail -1)" = "$newest" ]; then
+          behind=1
+        else
+          behind=0
+        fi
 
         {
-          echo "ahead=$ahead"
+          echo "ours=$ours"
+          echo "base=$base"
+          echo "newest=$newest"
           echo "behind=$behind"
-          echo "base=$(git rev-parse --short=8 "$base")"
-          echo "upstream_head=$(git rev-parse --short=8 "$theirs")"
         } >>"$GITHUB_ENV"
 
-        echo "$ahead ahead, $behind behind (merge-base $(git rev-parse --short=8 "$base"))"
-
-        # The commit list goes in the issue body, so it says what actually
-        # landed rather than only how much.  Capped: a long-neglected branch
-        # should not produce an issue nobody will read.
-        if [ "$behind" -gt 0 ]; then
-          # Written to a file and then truncated, rather than piped into head:
-          # under `set -o pipefail`, head closing the pipe early kills git with
-          # SIGPIPE and takes the step down with it.
-          git log --reverse --format='- [`%h`](https://github.com/'"${UPSTREAM}"'/commit/%H) %s' \
-                  "${base}..${theirs}" >/tmp/all-commits.md
-          head -50 /tmp/all-commits.md >/tmp/commits.md
-          if [ "$behind" -gt 50 ]; then
-            echo "- ...and $((behind - 50)) more" >>/tmp/commits.md
-          fi
-        fi
+        echo "we carry $ours; newest upstream release is $newest; behind=$behind"
 
     - name: Report
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         # `gh issue ...` works out which repository it means from the git
-        # remote of the working directory, and there is no checkout here -- the
-        # clone this job makes lives in work/, and that step's `cd` did not
-        # outlive it.  So gh ran in a directory that is not a git repository at
-        # all and exited 1 before doing anything.  GH_REPO says it outright,
-        # and every call below also passes -R, so neither the environment nor
-        # the working directory can decide this by accident.
+        # remote of the working directory, and there is no checkout here, so
+        # gh would run in a directory that is not a git repository at all and
+        # exit 1 before doing anything.  GH_REPO says it outright, and every
+        # call below also passes -R, so neither the environment nor the
+        # working directory can decide this by accident.
         GH_REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
 
-        compare="https://github.com/${UPSTREAM}/compare/${base}...${UPSTREAM_BRANCH}"
-
-        echo "$(gh --version | head -1), GH_REPO=${GH_REPO:-unset}, cwd $(pwd)"
+        compare="https://github.com/${UPSTREAM}/compare/v${base}...v${newest}"
+        relnotes="https://github.com/${UPSTREAM}/releases/tag/v${newest}"
 
         # GitHub disables Issues on a fork by default, and this repository is a
         # fork, so the issue route cannot be assumed to exist.
@@ -121,8 +128,7 @@ jobs:
         # Whether an issue can actually be filed is answered by trying the
         # read, not by inferring it from a setting: a token without the scope,
         # a rate limit or an outage all end the same way, and any of them
-        # should fall back to the summary rather than kill the step with a bare
-        # exit 1.  This is what went wrong twice.
+        # should fall back to the summary rather than kill the step.
         existing=""
         can_file=false
         if [ "$issues_on" = "true" ]; then
@@ -141,47 +147,60 @@ jobs:
         fi
 
         if [ "$behind" -eq 0 ]; then
-          echo "### In sync with ${UPSTREAM} ${UPSTREAM_BRANCH}" >>"$GITHUB_STEP_SUMMARY"
-          echo "" >>"$GITHUB_STEP_SUMMARY"
-          echo "\`${GITHUB_REF_NAME}\` is $ahead commits ahead, 0 behind (base \`$base\`)." >>"$GITHUB_STEP_SUMMARY"
+          {
+            echo "### On the newest upstream release"
+            echo ""
+            echo "\`${GITHUB_REF_NAME}\` carries rsync \`${ours}\`, and \`v${newest}\` is the newest release upstream."
+            if [ "$off_release" = "1" ]; then
+              echo ""
+              echo "> Note: \`version.h\` says \`${ours}\`, so this branch is on upstream master partway"
+              echo "> through a cycle rather than on a release tag.  Releases are only cut from"
+              echo "> upstream release tags, so a tag push from here would be rejected by the build."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
 
           # Closing it is the other half of the job: an issue that stays open
           # after the rebase trains you to ignore it.
           if [ "$can_file" = "true" ] && [ -n "$existing" ]; then
             gh issue comment -R "${GITHUB_REPOSITORY}" "$existing" --body \
-              "Back in sync: \`${GITHUB_REF_NAME}\` is now $ahead commits ahead of \`${UPSTREAM}@${UPSTREAM_BRANCH}\` and 0 behind, on base \`${base}\`. Closing."
+              "Back in sync: \`${GITHUB_REF_NAME}\` now carries rsync \`${ours}\`, which is the newest upstream release. Closing."
             gh issue close -R "${GITHUB_REPOSITORY}" "$existing"
             echo "closed #$existing"
           fi
-          echo "in sync; nothing to report"
+          echo "level with upstream; nothing to report"
           exit 0
         fi
 
-        title="${TITLE_PREFIX} ${behind} new commit(s) on ${UPSTREAM} ${UPSTREAM_BRANCH}"
+        title="${TITLE_PREFIX} rsync ${newest}"
         body="$(cat <<EOF
-        \`${GITHUB_REF_NAME}\` is **${ahead} commits ahead, ${behind} behind** \`${UPSTREAM}@${UPSTREAM_BRANCH}\`.
+        \`${GITHUB_REF_NAME}\` carries rsync **${ours}**; upstream's newest release is **${newest}**.
 
         | | |
         | --- | --- |
-        | merge-base | \`${base}\` |
-        | upstream head | \`${upstream_head}\` |
-        | compare | [${base}...${UPSTREAM_BRANCH}](${compare}) |
+        | ours (\`version.h\`) | \`${ours}\` |
+        | newest upstream | [\`v${newest}\`](${relnotes}) |
+        | what changed | [v${base}...v${newest}](${compare}) |
 
-        ## What landed upstream
-
-        $(cat /tmp/commits.md)
-
-        ## Rebasing
+        ## Rebasing onto it
 
         \`\`\`
-        git fetch upstream
-        git rebase upstream/${UPSTREAM_BRANCH}
+        git fetch upstream --tags
+        git tag pre-rebase/onto-v${newest} windows-cmake-port   # so a bad rebase loses nothing
+        git rebase v${newest}
         windows-build-and-test.bat --clean
         \`\`\`
 
-        The next build after that renames itself: the version is
-        \`<release>-g<upstream rev>-g<port rev>\`, so the first rev becomes
-        \`${upstream_head}\`.
+        Watch for upstream state that the port has to make thread-local: the
+        receiver runs as a thread here, so any new file-scope mutable variable
+        shared by the generator and receiver halves needs \`RSYNC_TLS\`.  Git
+        merges those in without a conflict, so they have to be looked for.
+
+        Once the rebase builds and tests clean, tag it to cut a release:
+
+        \`\`\`
+        git tag -a v${newest}-g\$(git rev-parse --short=8 HEAD) -m "rsync ${newest} for Windows"
+        git push origin windows-cmake-port --tags
+        \`\`\`
 
         This issue is updated daily while the branch is behind, and closed
         automatically once it is level again.
@@ -191,27 +210,24 @@ jobs:
         # The summary goes out first, and unconditionally: whatever happens to
         # the issue below, the run page itself should say what was found.
         {
-          echo "### Behind ${UPSTREAM} ${UPSTREAM_BRANCH}"
+          echo "### Behind upstream"
           echo ""
-          echo "\`${GITHUB_REF_NAME}\`: ${ahead} ahead, **${behind} behind**, base \`${base}\`."
+          echo "\`${GITHUB_REF_NAME}\` carries \`${ours}\`; newest upstream release is [\`v${newest}\`](${relnotes})."
           echo ""
-          cat /tmp/commits.md
-          echo ""
-          echo "[Compare](${compare})"
+          echo "[What changed](${compare})"
         } >>"$GITHUB_STEP_SUMMARY"
 
         if [ "$can_file" != "true" ]; then
           # No issue to file, so fail the run instead -- GitHub mails the
           # owner about a failed scheduled run by default, so the alert still
           # arrives.  Failing loudly beats succeeding quietly: the one thing
-          # this workflow must never do is notice drift and say nothing.
+          # this workflow must never do is notice a release and say nothing.
           {
             echo ""
             echo "> Issues could not be used for this run, so it fails instead"
             echo "> of filing one.  The step log says why."
           } >>"$GITHUB_STEP_SUMMARY"
-          cat /tmp/commits.md
-          echo "::error title=Upstream moved ahead::${behind} new commit(s) on ${UPSTREAM} ${UPSTREAM_BRANCH}; ${GITHUB_REF_NAME} is ${ahead} ahead, ${behind} behind. Could not file an issue -- see the job summary."
+          echo "::error title=Upstream released rsync ${newest}::we carry ${ours}. Could not file an issue -- see the job summary."
           exit 1
         fi
 
@@ -227,5 +243,5 @@ jobs:
           gh issue create -R "${GITHUB_REPOSITORY}" --title "$title" --body "$body" \
                           --assignee "${GITHUB_REPOSITORY_OWNER}" \
             || gh issue create -R "${GITHUB_REPOSITORY}" --title "$title" --body "$body"
-          echo "opened a new drift issue"
+          echo "opened a new release-drift issue"
         fi
