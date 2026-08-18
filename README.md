@@ -33,21 +33,21 @@ merges stay clean:
 
 ### Changes to non-Windows files
 
-22 shared files change, by 380 lines — and 123 of those are a single
+22 shared files change, by 397 lines — and 123 of those are a single
 `RSYNC_TLS` token added to a declaration, which expands to nothing off
 Windows. No file gains a Windows conditional.
 
 | File(s) | Change | Why |
 | --- | --- | --- |
-| `rsync.h` | +62: hook macros (`RSYNC_TLS`, `IS_ABS_PATH`, `IS_DRIVE_PATH`, `platform_init`, `platform_fix_path_args`, `close_sibling_fd`, `LOCAL_SERVER_SHARES_STATE`), each `#ifndef`-guarded with the POSIX default | the one place the port hooks into; every other shared change follows from these |
-| `pipe.c` | +51: `spawn_receiver_half()`, `receiver_half_finish()`, `inc_recurse_when_receiving`, `local_server_shares_memory` | factors the `do_recv()` fork out of `main.c` so a port can replace it wholesale |
-| `main.c` | +70/−72: `receiver_half()` extracted and de-static'd, `platform_init()` and `platform_fix_path_args()` call sites, `close_sibling_fd()`, a `SIGACTMASK` fallback where `sigaction()` is absent | the fork site and process startup |
+| `rsync.h` | +73: hook macros (`RSYNC_TLS`, `IS_ABS_PATH`, `IS_DRIVE_PATH`, `platform_init`, `platform_fix_path_args`, `close_sibling_fd`, `CHDIR_VIA_DIRFD`, `LOCAL_SERVER_SHARES_STATE`), each `#ifndef`-guarded with the POSIX default | the one place the port hooks into; every other shared change follows from these |
+| `pipe.c` | +54: `spawn_receiver_half()`, `receiver_half_finish()`, `inc_recurse_when_receiving`, `local_server_shares_memory` | factors the `do_recv()` fork out of `main.c` so a port can replace it wholesale |
+| `main.c` | +70/−75: `receiver_half()` extracted and de-static'd, `platform_init()` and `platform_fix_path_args()` call sites, `close_sibling_fd()`, a `SIGACTMASK` fallback where `sigaction()` is absent | the fork site and process startup |
 | `io.c` | +75/−41: `io_fork_child_fixup()` (deep-copies the protocol buffers a real fork would have duplicated), plus 38 `RSYNC_TLS` marks | the largest concentration of state the two halves diverge on |
-| `options.c` | +39/−8: `--backup`, `--no-backup`, `--append-verify`, `--no-append` moved from popt targets to `OPT_` switch codes | popt takes its target's address in a static initializer, which a thread-local cannot supply |
+| `options.c` | +40/−9: `--backup`, `--no-backup`, `--append-verify`, `--no-append` moved from popt targets to `OPT_` switch codes | popt takes its target's address in a static initializer, which a thread-local cannot supply |
 | `exclude.c` | +7/−6: `local_server` → `LOCAL_SERVER_SHARES_STATE` at five sites | a local server that is a separate process must actually be *sent* the filter list; without this `--delete --exclude` deleted the excluded files |
 | `compat.c` | +9/−1: honour `inc_recurse_when_receiving` | incremental recursion needs the private address spaces `fork()` gives; threads share one heap |
 | `batch.c` | +7/−2: `batch_fd` marked `RSYNC_TLS`, with the reason | it is set to −1 at input EOF in the receiving half only; sharing it deadlocked `--read-batch` |
-| `util1.c` | +1/−1: `*dir == '/'` → `IS_ABS_PATH(dir)` | `C:\dir` is absolute too |
+| `util1.c` `main.c` `options.c` | `*p == '/'` → `IS_ABS_PATH(p)` at the three sites that test an operator-supplied *local* path (`change_dir`, the `--link-dest`/`--copy-dest`/`--compare-dest` roots, `--confine-root`); `CHDIR_VIA_DIRFD` guards the receiver's dirfd chdir | `C:\dir` is absolute too, and Windows has no directory fds to `fchdir()` to |
 | `checksum.c` `cleanup.c` `clientserver.c` `delete.c` `flist.c` `generator.c` `log.c` `match.c` `progress.c` `receiver.c` `rsync.c` `sender.c` `xattrs.c` | `RSYNC_TLS` on declarations only | state `fork()` would have made private, marked so a thread-based split gets its own copy |
 
 ### Windows support files
@@ -56,7 +56,7 @@ All new, all Windows-only (`win32/`, ~3,100 lines):
 
 | File | Lines | Role |
 | --- | --- | --- |
-| `win32io.c` | 711 | fd routing: CRT fds for files and pipes, pseudo-fds with a side table for Winsock sockets, and a `select()` that waits on both |
+| `win32io.c` | 769 | fd routing: CRT fds for files and pipes, pseudo-fds with a side table for Winsock sockets, and `select()`/`poll()` over both |
 | `win32compat.c` | 621 | `stat`/`chmod`/`rename`/`unlink`, users and groups, times, signals, `getpass` |
 | `win32compat.h` | 593 | POSIX types, `S_IS*`, open flags, the platform hooks, `struct win32_stat` (64-bit `st_ino`), and the macros routing POSIX names to `win32_*` |
 | `win32proc.c` | 301 | `CreateProcess` for `fork()`+`execvp()`, `CommandLineToArgvW` quoting, `waitpid()`/`kill()` |
@@ -88,12 +88,72 @@ Python 3.6+ is the only new hard requirement, and only because it replaces
 
 ### Testing
 
-The upstream suite is unchanged and still passes on Linux under both build
-systems — 103 passed / 6 skipped with autoconf, 98 passed / 2 xfailed /
-9 skipped with CMake, on Ubuntu 22.04.5 and 26.04. `win32/tests/` adds 24
-tests that pass on Windows, including push, pull and delta over ssh to a
-Linux peer.
+`win32/tests/` holds 24 tests that run on Windows, including push, pull and
+delta over ssh to a Linux peer. The upstream suite in `testsuite/` is left
+untouched and still runs on Linux under both build systems.
 
+Upstream has ~350 tests to this port's two dozen, which invites the question of
+whether the difference is coverage or just packaging. Mostly it is packaging:
+upstream writes one file per narrow regression, this port writes one file per
+topic with many assertions inside. The rest is upstream testing things Windows
+does not do at all.
+
+Rather than assert that in prose, `win32/tests/coverage_map.py` computes it.
+Every upstream test is either given a documented reason it cannot apply here,
+or mapped to the port test covering the same ground, or listed as a gap:
+
+| upstream tests | count | status |
+| --- | ---: | --- |
+| **total in `testsuite/`** | 345 | |
+| symlink creation | 69 | not applicable -- the port reports links rather than creating them: making one needs a privilege most accounts lack |
+| daemon / chroot mode | 67 | not applicable -- daemon mode is not supported on Windows |
+| real-TCP transport | 43 | not applicable -- needs the real-TCP transport; upstream skips these under the default `make check` too (testsuite/skiplist/common.txt) |
+| rrsync wrapper | 19 | not applicable -- rrsync is a Perl/POSIX wrapper script, not part of the port |
+| ACLs and xattrs | 14 | not applicable -- ACLs and xattrs are not supported on Windows |
+| Unix ids, devices, fake-super | 13 | not applicable -- Unix ownership and special files have no Windows equivalent |
+| rsync-ssl / proxy | 5 | not applicable -- rsync-ssl needs stunnel/openssl and a daemon to talk to |
+| AddressSanitizer build | 2 | not applicable -- needs an AddressSanitizer build |
+| **applicable here** | 113 | 111 covered, 2 not |
+
+| port test | upstream tests it covers |
+| --- | --- |
+| `altdest` | 7: `alt-dest`, `alt-dest-deep`, `link-dest-module-escape`, `link-dest-pathroot`, `operator-path-compare-dest`, `operator-path-copy-dest` and 1 more |
+| `backup` | 5: `backup`, `backup-deep`, `backup-dir-relative`, `backup-dir-repeated-separator-delete`, `operator-path-backup-dir` |
+| `basics` | 12: `00-hello`, `atimes`, `crtimes`, `dirs`, `executability`, `hands` and 6 more |
+| `batch` | 5: `batch-mode`, `batch-only-remove-source-regression`, `operator-path-write-batch`, `write-batch-filter-injection`, `write-batch-quoting` |
+| `compress` | 3: `compare`, `compress-options`, `compress-zlib-insert` |
+| `delete_exclude` | 4: `delete`, `delete-deep`, `delete-missing-args-files-from`, `scanner-delete-delay-overread` |
+| `delta` | 7: `append`, `append-shortsum`, `change-shrink`, `change-vanish`, `growing-file`, `hashsearch-chain` and 1 more |
+| `filenames` | 2: `ki58-log-format-percent`, `log-control-chars` |
+| `files_from` | 4: `files-from`, `files-from-depth`, `files-from-path-clamp`, `operator-path-files-from` |
+| `filters` | 9: `cvs-exclude`, `exclude-lsh`, `filter-depth`, `filter-merge-content-echo`, `filter-merge-recursion`, `ki73-cvs-clear-list` and 3 more |
+| `fuzzy` | 2: `fuzzy`, `fuzzy-basis` |
+| `helpers` | 12: `clean-fname-collapse`, `clean-fname-underflow`, `hashtable-overflow`, `iwildmatch-fold`, `max-alloc-zero-rejected`, `recv-discard-nullderef` and 6 more |
+| `inplace_append` | 5: `inplace`, `partial`, `partial-dir-abs-delta`, `partial_nowrite`, `readonly-partial-abort-mode-regression` |
+| `itemize` | 3: `ki62-io-error-mask`, `metadata-depth`, `output-options` |
+| `links_reported` | 2: `hardlinks`, `hardlinks-deep` |
+| `local_copy` | 1: `reverse-daemon-delta` |
+| `options` | 14: `authenticate-no-ocloexec-build-regression`, `chmod`, `chmod-option`, `chmod-temp-dir`, `connect-prog-host-quoting`, `connect-prog-nested-singlequote-host-injection` and 8 more |
+| `paths` | 2: `operator-path-insecure-links-refused`, `operator-path-log-file` |
+| `relative` | 3: `relative`, `relative-content`, `relative-implied` |
+| `remote` | 3: `sender-remove-source-relative-anchor`, `sender-remove-source-root-anchor`, `ssh-basic` |
+| `shims` | Windows-specific; no upstream equivalent |
+| `transfer_control` | 6: `delay-updates`, `delay-updates-deep`, `operator-path-inplace-backup-dir`, `operator-path-partial-dir`, `operator-path-temp-dir`, `temp-dir` |
+| `unsafe_symlink` | Windows-specific; no upstream equivalent |
+| `wildmatch` | Windows-specific; no upstream equivalent |
+
+Regenerate the table with `python win32/tests/coverage_map.py --markdown`, and
+see the whole picture with no arguments.
+
+The part that matters is `--check`, which the CI build runs: it exits non-zero
+when an upstream test is applicable to Windows and is neither covered nor
+listed in `KNOWN_GAPS`. A rebase onto a new upstream release brings new tests
+with it, and this is what stops them from being absorbed silently — the mapping
+has to be extended, or the gap accepted in writing, before the build is green.
+
+The "covered" claims are topic-level, not line-for-line: `filters` covers
+upstream's dozen filter tests by exercising the same rules, not by
+reimplementing each file.
 
 WHAT IS RSYNC?
 --------------

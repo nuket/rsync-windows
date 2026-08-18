@@ -421,11 +421,14 @@ pulls as well-tested rather than proven.
 
 Two details worth knowing:
 
-* **`select()` over pipes.** Windows `select()` only accepts sockets, but a
-  client talking to ssh has nothing *but* pipes. `win32_select()` splits the
-  fd sets, hands socket fds to Winsock and polls pipe fds with
-  `PeekNamedPipe`, backing off from a spin to 5 ms so an active transfer stays
-  responsive without burning a core when idle.
+* **Waiting on pipes.** Windows `select()` only accepts sockets, but a client
+  talking to ssh has nothing *but* pipes. `win32_select()` splits the fd sets,
+  hands socket fds to Winsock and polls pipe fds with `PeekNamedPipe`, backing
+  off from a spin to 5 ms so an active transfer stays responsive without
+  burning a core when idle. rsync 3.5.0 moved `io.c` from `select()` to
+  `poll()`, to escape the `FD_SETSIZE` ceiling; `WSAPoll()` is no use here
+  because it too sees only sockets, so `win32_poll()` (in `win32/include/poll.h`
+  and `win32io.c`) translates the `pollfd` array into that same split wait.
 * **Large files.** MSVC's `off_t` is 32-bit, so the build takes the
   `stat64`/`off64_t` path that rsync already supports for 32-bit Unix
   (`USE_STAT64_FUNCS`). Offsets are 64-bit.
