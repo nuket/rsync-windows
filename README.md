@@ -16,6 +16,111 @@ C runtime linked in and the usual exploit mitigations enabled (Control Flow
 Guard, CET shadow stack, strict `/GS`, Spectre v1 hardening, ASLR, DEP, and a
 System32-only DLL search path).
 
+### Installing on Windows
+
+Building is optional. Every release on [the releases page][w1] carries
+`rsync.exe` (x64) and `rsync-x86.exe` (x86) with a `.sha256` beside each, and
+both are self-contained — drop one somewhere on your `PATH` and it runs.
+
+[w1]: https://github.com/nuket/rsync-windows/releases
+
+To take a fresh box all the way to sending *and* receiving over rsync-over-ssh,
+run
+
+    powershell -ExecutionPolicy Bypass -File setup-windows-rsync.ps1
+
+from the repo root. It elevates itself through UAC, then:
+
+1. installs the **OpenSSH Client** capability — rsync does not speak ssh
+   itself, it execs an `ssh` binary, and on Windows that is the one this
+   capability provides;
+2. sets **ssh-agent** to Automatic and starts it, so keys loaded with `ssh-add`
+   outlive the shell that loaded them. The service ships *Disabled*, so the
+   start type has to be changed before it can be started at all;
+3. installs **OpenSSH Server**, sets it Automatic, starts it, and widens the
+   capability's own `OpenSSH-Server-In-TCP` firewall rule to *all* profiles.
+   A VM's host-only or bridged adapter is routinely classified Public, and
+   that is the usual reason a plainly running `sshd` is plainly unreachable;
+4. resolves the **latest release**, picks the build matching the OS bitness,
+   verifies it against the published SHA-256, installs it as
+   `C:\Tools\rsync\rsync.exe`, and puts that directory on the **machine**
+   `PATH`;
+5. optionally authorises a public key for inbound ssh, with the ACLs
+   Win32-OpenSSH requires before it will honour one.
+
+What it does is adjustable:
+
+    .\setup-windows-rsync.ps1                                    # sshd + agent + rsync
+    .\setup-windows-rsync.ps1 -AuthorizedKey $HOME\.ssh\id_ed25519.pub
+    .\setup-windows-rsync.ps1 -SkipServer                        # client side only
+    .\setup-windows-rsync.ps1 -InstallDir D:\bin -Tag v3.5.0-g521ad8ad
+
+Re-running is safe: each step checks before it acts, and rsync is re-downloaded
+only when the installed binary is not the release being asked for. The run
+below is a repeat run, which is why every step reports what was already in
+place:
+
+    ==> OpenSSH Client
+        already installed: OpenSSH.Client~~~~0.0.1.0
+
+    ==> ssh-agent service
+        ssh-agent: Automatic + running
+
+    ==> OpenSSH Server (sshd)
+        already installed: OpenSSH.Server~~~~0.0.1.0
+        sshd: Automatic + running
+        firewall: widened OpenSSH-Server-In-TCP to all profiles
+
+    ==> rsync for Windows (nuket/rsync-windows)
+        release: v3.5.0-g521ad8ad
+        already current: rsync 3.5.0-g521ad8ad at C:\Tools\rsync\rsync.exe
+        C:\Tools\rsync already on the machine PATH
+        rsync  version 3.5.0-g521ad8ad  protocol version 32
+
+    ==> Done
+
+      host   : DESKTOP (192.168.178.107)
+      user   : Max
+      rsync  : C:\Tools\rsync\rsync.exe
+      sshd   : Running on TCP 22
+
+      Receive - run this on the sending (Linux) box:
+          rsync -av ./data/ Max@192.168.178.107:data/
+
+      Send - run this here:
+          ssh-add $HOME\.ssh\id_ed25519      # once; ssh-agent keeps it across boots
+          rsync -av ./data/ user@linuxbox:/srv/data/
+
+      No key is authorised for inbound ssh yet - password auth only.
+      Re-run with the public key to fix that:
+          .\setup-windows-rsync.ps1 -AuthorizedKey $HOME\.ssh\id_ed25519.pub
+
+      Open a NEW shell before using rsync elsewhere: the machine PATH change
+      does not reach shells that were already running.
+
+Three details in there are worth knowing even if you set the box up by hand,
+because each fails in a way that does not point at its own cause:
+
+- **The `PATH` entry has to be the machine one, not the user one.** The remote
+  end of a transfer runs as `rsync --server` in a non-interactive session with
+  no login shell, and Win32-OpenSSH builds that session's environment from the
+  registry rather than from a profile. A user-`PATH` entry is invisible to it,
+  and the symptom is the confusing one: rsync works when you ssh in and type
+  it, and is "not found" when rsync itself is the caller.
+- **`sshd` caches the environment it started with**, so a `PATH` change does
+  not reach a service that is already running. The script restarts it; by hand,
+  remember to.
+- **An administrator's `~/.ssh/authorized_keys` is ignored.** The default
+  `sshd_config` routes every member of the Administrators group to
+  `C:\ProgramData\ssh\administrators_authorized_keys` instead, and rejects
+  either file if it is writable by anyone but SYSTEM and its owner. It fails
+  closed and near-silently — the client simply falls back to asking for a
+  password.
+
+Install path is `C:\Tools\rsync` rather than anywhere under `Program Files` on
+purpose: the remote end is invoked as a bare command line, and a path with a
+space in it makes the client-side `--rsync-path` escape hatch painful to quote.
+
 ### The guiding constraint
 
 The shared sources contain **no `#ifdef _WIN32`**. Platform variation is
@@ -82,6 +187,7 @@ All new, all Windows-only (`win32/`, ~3,100 lines):
 | `cmake/config.h.in` | 257 | the `config.h` template |
 | `windows-build-and-test.bat` | 392 | one-command build and test of both architectures; finds MSVC via `vswhere`, so no Developer Command Prompt is needed |
 | `setup-linux.sh` | 272 | installs the build dependencies on Ubuntu 22.04 and 26.04 |
+| `setup-windows-rsync.ps1` | 460 | provisions a Windows box to send and receive: OpenSSH client and server, ssh-agent, and the latest release on the machine `PATH` |
 
 Python 3.6+ is the only new hard requirement, and only because it replaces
 `awk` for header generation.

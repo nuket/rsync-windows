@@ -13708,3 +13708,107 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 
 ✻ Baked for 46s
 ```
+
+# ---------------------------------------------------------------------------------------------------
+# Windows automated setup script for OpenSSH Server + Agent
+# ---------------------------------------------------------------------------------------------------
+
+```
+● setup-windows-rsync.ps1 (repo root) — one self-elevating script that does all five pieces.
+
+  What it does
+
+  1. OpenSSH Client capability — the ssh.exe rsync execs when this box sends.
+  2. ssh-agent — Automatic + started (it ships Disabled, so the start type has to be set before
+     Start-Service will do anything).
+  3. OpenSSH Server — capability installed, Automatic + started, and inbound TCP 22 widened to all firewall
+     profiles by adopting the capability's own OpenSSH-Server-In-TCP rule rather than adding a second one
+     beside it.
+  4. rsync — resolves the latest release via the GitHub API, picks rsync.exe or rsync-x86.exe by OS bitness,
+     SHA-256 verifies it, installs to C:\Tools\rsync, adds that to the machine PATH, and restarts sshd so
+     the non-interactive session inherits it.
+  5. -AuthorizedKey (optional) — installs a public key at the right location (administrators_authorized_keys
+     for admin accounts, ~/.ssh/authorized_keys otherwise) with inheritance broken and the ACL rebuilt to
+     SYSTEM + owner, which is what sshd requires before it will honour the key.
+
+  .\setup-windows-rsync.ps1
+  .\setup-windows-rsync.ps1 -AuthorizedKey $HOME\.ssh\id_ed25519.pub
+  .\setup-windows-rsync.ps1 -SkipServer          # client side only
+
+  Verified against the live release — API returns v3.5.0-g521ad8ad with all four assets; download + SHA-256
+  match confirmed (17f4a3a9…); and the idempotency check works, since the exe's ProductVersion is
+  3.5.0-g521ad8ad against tag v3.5.0-g521ad8ad. Parses clean under both PowerShell 7.6 and Windows
+  PowerShell 5.1.
+
+  Four bugs found and fixed while testing:
+
+  - Invoke-WebRequest .Content returns byte[] for GitHub's octet-stream .sha256 files — the hash parsed as
+    49 (the first byte) and every correct download would have failed verification. Now downloads to a file
+    and reads it.
+  - Relaunch used (Get-Process -Id $PID).Path, which on this box is the Store-packaged pwsh under
+    WindowsApps, where RunAs is unreliable. Now picks a stable host, falling back to in-box powershell.exe.
+  - Start-Process -ArgumentList as an array doesn't quote elements, so a path with a space would split. Now
+    builds one pre-quoted command line.
+  - The ACL rebuild enumerated $acl.Access lazily while removing from it, which skips entries. Wrapped in
+    @().
+
+  Also, the summary's advertised IP now comes from the interface holding the default route — on your box the
+  naive pick returned the Hyper-V vSwitch address 172.26.64.1 instead of the reachable 192.168.178.107.
+
+  I have not run it. It opens TCP 22 on all firewall profiles, installs Windows capabilities, and edits the
+  machine PATH on this machine — say the word and I'll run it, or you can just double-click through the UAC
+  prompt yourself.
+
+✻ Brewed for 7m 35s
+
+※ recap: Goal was a one-shot Windows setup for rsync over SSH; I wrote and verified setup-windows-rsync.ps1
+  in the repo root, covering sshd, ssh-agent, and the latest rsync on the machine PATH. Next: run it, since
+  I haven't. (disable recaps in /config)
+```
+
+Running it looks roughly like:
+
+```
+Windows PowerShell
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Try the new cross-platform PowerShell https://aka.ms/pscore6
+
+==> OpenSSH Client
+    already installed: OpenSSH.Client~~~~0.0.1.0
+
+==> ssh-agent service
+    ssh-agent: Automatic + running
+
+==> OpenSSH Server (sshd)
+    already installed: OpenSSH.Server~~~~0.0.1.0
+    sshd: Automatic + running
+    firewall: widened OpenSSH-Server-In-TCP to all profiles
+
+==> rsync for Windows (nuket/rsync-windows)
+    release: v3.5.0-g521ad8ad
+    already current: rsync 3.5.0-g521ad8ad at C:\Tools\rsync\rsync.exe
+    C:\Tools\rsync already on the machine PATH
+    rsync  version 3.5.0-g521ad8ad  protocol version 32
+
+==> Done
+
+  host   : DESKTOP (192.168.178.107)
+  user   : Max
+  rsync  : C:\Tools\rsync\rsync.exe
+  sshd   : Running on TCP 22
+
+  Receive - run this on the sending (Linux) box:
+      rsync -av ./data/ Max@192.168.178.107:data/
+
+  Send - run this here:
+      ssh-add $HOME\.ssh\id_ed25519      # once; ssh-agent keeps it across boots
+      rsync -av ./data/ user@linuxbox:/srv/data/
+
+  No key is authorised for inbound ssh yet - password auth only.
+  Re-run with the public key to fix that:
+      .\setup-windows-rsync.ps1 -AuthorizedKey $HOME\.ssh\id_ed25519.pub
+
+  Open a NEW shell before using rsync elsewhere: the machine PATH change
+  does not reach shells that were already running.
+```
