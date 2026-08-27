@@ -178,6 +178,7 @@ static unsigned __stdcall pump_thread(void *arg)
 	while (!p->stop) {
 		DWORD got = 0, want;
 		size_t space, first;
+		BOOL ok;
 
 		EnterCriticalSection(&p->lock);
 		space = PUMP_RING_SIZE - p->len;
@@ -191,9 +192,14 @@ static unsigned __stdcall pump_thread(void *arg)
 		}
 
 		want = (DWORD)(space < PUMP_CHUNK ? space : PUMP_CHUNK);
-		if (!ReadFile(p->h, chunk, want, &got, NULL) || got == 0) {
+		ok = ReadFile(p->h, chunk, want, &got, NULL);
+		if (!ok || got == 0) {
+			/* A read that succeeded with nothing is EOF, not an error;
+			 * GetLastError() would be stale there. */
+			DWORD err = ok ? 0 : GetLastError();
+
 			EnterCriticalSection(&p->lock);
-			p->err = got ? 0 : GetLastError();
+			p->err = err;
 			p->eof = 1;
 			SetEvent(p->data_evt);   /* EOF is a readable event too */
 			LeaveCriticalSection(&p->lock);
@@ -274,6 +280,7 @@ static struct pipe_pump *pump_for(int fd, int create)
 static void pump_stop(int fd)
 {
 	struct pipe_pump *p;
+	int tries = 0;
 
 	if (fd < 0 || fd >= MAX_CRTFDS || !(p = pumps[fd]))
 		return;
@@ -281,8 +288,24 @@ static void pump_stop(int fd)
 
 	InterlockedExchange(&p->stop, 1);
 	SetEvent(p->room_evt);
-	CancelIoEx(p->h, NULL);        /* unblock a ReadFile already in flight */
-	WaitForSingleObject(p->thread, 2000);
+
+	/* CancelIoEx() only reaches a ReadFile already in flight.  The thread
+	 * may be between its stop check and that call, in which case the read
+	 * starts after the cancel and blocks until the peer next writes -- so
+	 * keep cancelling until the thread has actually gone.  If it still has
+	 * not after two seconds, leak the pump rather than free it: the thread
+	 * can still touch it, and a lost megabyte beats a write into freed
+	 * memory. */
+	for (;;) {
+		CancelIoEx(p->h, NULL);
+		if (WaitForSingleObject(p->thread, 50) != WAIT_TIMEOUT)
+			break;
+		if (++tries >= 40) {
+			TRACE("pump for fd %d would not stop; leaking it\n", fd);
+			CloseHandle(p->thread);
+			return;
+		}
+	}
 
 	CloseHandle(p->thread);
 	CloseHandle(p->data_evt);
@@ -295,6 +318,9 @@ static void pump_stop(int fd)
 /* Serve a read out of the ring, blocking or not as the fd asks. */
 static int pump_read(struct pipe_pump *p, int fd, void *buf, unsigned int count)
 {
+	if (!count)
+		return 0;   /* POSIX: a zero-length read is not a wait */
+
 	for (;;) {
 		size_t n = 0, first;
 		int eof;
