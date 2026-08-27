@@ -86,11 +86,15 @@ if (-not (Test-Path (Join-Path $src 'ssh.c'))) {
 
 # Apply each patch once.  A patch that already applies in reverse is in place;
 # anything else is a real conflict with the pinned source and must be looked at.
+# --ignore-whitespace: the patched files are CRLF upstream, and whether a
+# checkout -- of the submodule or of the patches -- has CRLF or LF depends on
+# core.autocrlf on the machine; line endings must not decide whether a
+# context line matches.
 Step "patches"
 foreach ($p in (Get-ChildItem $patches -Filter '*.patch' | Sort-Object Name)) {
-    & git -C $src apply --reverse --check $p.FullName 2>$null
+    & git -C $src apply --reverse --check --ignore-whitespace $p.FullName 2>$null
     if ($LASTEXITCODE -eq 0) { Write-Host "    $($p.Name): already applied"; continue }
-    & git -C $src apply --whitespace=nowarn $p.FullName
+    & git -C $src apply --whitespace=nowarn --ignore-whitespace $p.FullName
     if ($LASTEXITCODE -ne 0) { throw "$($p.Name) does not apply to the pinned openssh source" }
     Write-Host "    $($p.Name): applied"
 }
