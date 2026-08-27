@@ -13813,7 +13813,7 @@ Try the new cross-platform PowerShell https://aka.ms/pscore6
   does not reach shells that were already running.
 ```
 
-# Moar Speed!
+# Moar Speed! Linux -> Windows Slowness
 
 During normal use, some transfer rate limitations were evident. Transfers from Linux to Windows
 systems were capped at around 7MB/s, for no clear reasons. 
@@ -14078,4 +14078,376 @@ x86, including the ssh transfer tests.
   else the daemon needs.
 
 ✻ Baked for 37s
+```
+
+# Moar Speed! Windows -> Linux Slowness
+
+```
+❯ Ok, now using rsync from the Linux side to pull the VirtualBox VM updates back to the Linux
+  machine sees slowness. Max transfer rate was around 180MB/s. On the Linux machine, when
+  running: rsync -rtv --progress -e 'ssh -c aes128-gcm@openssh.com'
+  Claude@192.168.178.170:VIRTUA~1/ "VirtualBox VMs/" , the rsync maxes out around 180MB/s. See
+  what is causing this slowdown, the CPU isn't hitting 100% usage on the Windows side, but it
+  could still be maxing out the ssh and rsync tasks. There may no be way to improve this, if
+  each task is single threaded and using the entire core.
+
+● Investigation complete; scratch data removed from both machines (/tmp/rsync-w2l on Linux,
+  ~\vmtest here). Here's what's going on.
+
+  The ceiling is the 2.5GbE adapter's transmit direction, not rsync or ssh
+
+  Everything measured from the Linux side pulling from this machine, 2 GB random file,
+  aes128-gcm unless noted:
+
+  ┌───────────────────────────────────────┬─────────────────────────────────────────────────┐
+  │                 Path                  │                      Rate                       │
+  ├───────────────────────────────────────┼─────────────────────────────────────────────────┤
+  │ Your rsync pull                       │ ~180 MB/s                                       │
+  ├───────────────────────────────────────┼─────────────────────────────────────────────────┤
+  │ rsync pull, whole-file (-rt)          │ 187 MB/s (11.46 s wall)                         │
+  ├───────────────────────────────────────┼─────────────────────────────────────────────────┤
+  │ rsync pull, delta (-I, everything     │ 2.44 s — block matching runs at ~880 MB/s,      │
+  │ matches)                              │ never the limit                                 │
+  ├───────────────────────────────────────┼─────────────────────────────────────────────────┤
+  │ ssh alone, no rsync (cat over ssh to  │ 185 MB/s                                        │
+  │ dd)                                   │                                                 │
+  ├───────────────────────────────────────┼─────────────────────────────────────────────────┤
+  │ ssh alone, chacha20 / aes128-ctr /    │ 177 / 186 / 186 MB/s                            │
+  │ aes256-gcm                            │                                                 │
+  ├───────────────────────────────────────┼─────────────────────────────────────────────────┤
+  │ plain TCP from .170, no ssh, no rsync │ 190 MB/s (181 MiB/s)                            │
+  ├───────────────────────────────────────┼─────────────────────────────────────────────────┤
+  │ plain TCP, two parallel streams       │ ~180 MiB/s aggregate                            │
+  ├───────────────────────────────────────┼─────────────────────────────────────────────────┤
+  │ same adapter, receive direction       │ 274 MB/s                                        │
+  │ (yesterday)                           │                                                 │
+  └───────────────────────────────────────┴─────────────────────────────────────────────────┘
+
+  The whole stack collapses onto one number: a bare TCP socket bound to the Realtek adapter
+  cannot push more than ~190 MB/s, and rsync-over-ssh gets 97% of that. The cipher makes no
+  difference, and the per-connection sshd.exe runs at only 25–50% of a core. Two streams don't
+  add up either, so it isn't a per-flow limit — it's the adapter/driver's transmit path. That
+  asymmetry (2.2 Gbit in, 1.5 Gbit out) is typical of USB 2.5GbE dongles: receive is aggregated
+  into large USB transfers by the chip, transmit is one USB request per Ethernet frame unless
+  the driver offloads segmentation.
+
+  What the adapter looks like: Realtek USB 2.5GbE Family Controller (RTL8156) on the Intel USB
+  3.1 xHCI, Realtek driver 10.65.602.2025 (oem92.inf). Its advanced properties expose no Large
+  Send Offload and only Transmit URBs = 3, Transmit Buffers = 18. Those are the knobs that
+  matter for TX, and they're the user's to turn — I didn't change any of them:
+
+  - Newer Realtek driver. The 11.x series adds LSO for this chip in my experience; that's the
+    single change most likely to move TX toward the RX figure. Realtek's download page is
+    JavaScript-rendered so I couldn't read version numbers from here.
+  - Transmit URBs / Transmit Buffers — raising them (e.g. URBs 3→8) is a cheap experiment in the
+    adapter's Advanced tab.
+  - Jumbo frames would cut per-packet overhead ~6× but need the Linux side and switch to match,
+    and the Linux box is off limits.
+
+  There is nothing in the port that can raise this ceiling: rsync isn't in the limiting path in
+  either the whole-file or the delta case.
+
+  What the port does do wrong here: rsync.exe at 100% is a spin, not work
+
+  During every send, rsync.exe sat at ~100% of a core — and it did so identically at 187 MB/s
+  over 2.5GbE and at 114 MB/s over 1GbE. Real work would have scaled with the rate; a busy-wait
+  doesn't. The mechanism, in win32/win32io.c: the pipe to sshd is PIPE_NOWAIT, sshd creates it
+  with a 4 KB buffer (fileio_pipe() in Win32-OpenSSH), so WriteFile accepts only what fits and
+  rsync's write() gets EAGAIN constantly; rsync then polls for writability, but Windows has no
+  "pipe has room" signal, so crtfd_writable() (win32io.c:668) answers "yes" unconditionally, and
+  rsync goes straight back to another partial write. Write → EAGAIN → select → write, with no
+  wait anywhere.
+
+  It costs you a core of heat and battery and steals cycles from sshd's hyperthread sibling, but
+  it doesn't cost throughput — the NIC is the limit regardless. The clean fix is the mirror
+  image of the read-side pump: a writer thread doing blocking WriteFile out of a ring, so
+  write() returns immediately into the ring and "writable" becomes a real event ("ring has
+  room"). Same file, same pattern, keeps rsync's non-blocking semantics intact. Say the word and
+  I'll build and measure it.
+
+  A separate finding worth knowing about
+
+  While isolating the sender path I measured the Windows ssh client reading from a pipe (cat.cmd
+  | ssh ... 'dd of=/dev/null'): 18 MB/s, versus 185 MB/s through sshd over the same wire and
+  1.6 GB/s for the pipe itself. That is Win32-OpenSSH's stdin handling in ssh.exe, not the port
+  — but it's the path a Windows-initiated push (rsync ... user@linux:dst run here, which spawns
+  ssh.exe on pipes) goes through. I haven't confirmed it with rsync itself yet; if you push from
+  this machine and see ~18 MB/s, that's why, and it deserves its own look.
+
+✻ Cooked for 11m 51s
+
+❯ Ok build the writer pump and measure it, then let's look at the Windows-initiated push, then
+  let's come back to the Realtek driver options
+
+● All three items are done. Here's where each landed.
+
+  1. Write pump — built, measured, committed (007a22b5)
+
+  ┌────────────────────────────┬──────────────────────────────┬─────────────────────────────┐
+  │                            │            before            │            after            │
+  ├────────────────────────────┼──────────────────────────────┼─────────────────────────────┤
+  │ rsync.exe CPU during a     │ ~100% of a core (50% user /  │ 10–25% (3–14% user / 3–23%  │
+  │ 2.5GbE send                │ 50% kernel)                  │ kernel)                     │
+  ├────────────────────────────┼──────────────────────────────┼─────────────────────────────┤
+  │ throughput, 1 GB           │ 176 MB/s wall                │ 176 MB/s wall (unchanged —  │
+  │ whole-file pull            │                              │ NIC-bound)                  │
+  ├────────────────────────────┼──────────────────────────────┼─────────────────────────────┤
+  │ write calls per 128 MB     │ 62,608, of which 58,504      │ —                           │
+  │ (traced)                   │ wrote nothing                │                             │
+  └────────────────────────────┴──────────────────────────────┴─────────────────────────────┘
+
+  Mirror image of the read pump: write() copies into a 1 MB ring and returns, a thread drains it
+  with blocking WriteFile, and select() waits on "ring has room" alongside the read pumps'
+  "ring has bytes". The ring is flushed on close() and via an atexit hook, since rsync exits
+  without closing its peer fds. 24/24 on x64 and x86 with the ssh tests.
+  C:\tools\rsync\rsync.exe is this build.
+
+  2. Windows-initiated push — it's the Win32-OpenSSH client, not the port
+
+  rsync.exe here → ssh.exe → Linux: 17 MB/s, with rsync.exe idle at 3% and ssh.exe at 110–120%
+  of a core, two-thirds kernel time. I then took rsync out of the picture entirely:
+
+  ┌───────────────────────────────────────────────────────────────────────────┬───────────┐
+  │                   ssh.exe client sending 1 GB to Linux                    │   rate    │
+  ├───────────────────────────────────────────────────────────────────────────┼───────────┤
+  │ stdin = anonymous pipe (cat | ssh)                                        │ 18 MB/s   │
+  ├───────────────────────────────────────────────────────────────────────────┼───────────┤
+  │ stdin = plain file (ssh < big.bin), aes128-gcm                            │ 17.4 MB/s │
+  ├───────────────────────────────────────────────────────────────────────────┼───────────┤
+  │ same, chacha20                                                            │ 14.8 MB/s │
+  ├───────────────────────────────────────────────────────────────────────────┼───────────┤
+  │ same, over the 1GbE port                                                  │ 15.8 MB/s │
+  ├───────────────────────────────────────────────────────────────────────────┼───────────┤
+  │ IPQoS=none, Compression=no, TCPKeepAlive=no, RekeyLimit, ControlMaster=no │ 17.8 MB/s │
+  ├───────────────────────────────────────────────────────────────────────────┼───────────┤
+  │ Win32-OpenSSH 10.0.0p2 preview client, run from a folder                  │ 15.5 MB/s │
+  ├───────────────────────────────────────────────────────────────────────────┼───────────┤
+  │ for comparison: this machine's sshd sending, same wire                    │ 185 MB/s  │
+  └───────────────────────────────────────────────────────────────────────────┴───────────┘
+
+  Stdin type, cipher, NIC, options and version make no difference; the cap is in the client's
+  socket-send loop. The adapter counters show it: the client's segments average 1,095 B and draw
+  an ACK for every two segments (stop-and-go), versus sshd's 1,512 B and one ACK per fourteen.
+
+  I tried the one thing the port could do — hand ssh.exe overlapped named-pipe ends plus
+  OPENSSH_STDIO_MODE=nonsock so it skips its thread-per-read stdin path. It took effect
+  (verified in the child's environment) and changed nothing, so I reverted it rather than commit
+  dead weight.
+
+  Practical consequence: initiate transfers from the Linux side. A pull (rsync ...
+  Claude@windows:src/ dst/) uses Windows sshd and runs at the NIC limit; a push started from
+  Windows through ssh.exe is stuck at ~17 MB/s until Microsoft fixes the client. Upstream has an
+  open, undiagnosed report (#1944) and a "no repro" one (#1888); the numbers above would make a
+  solid new report if you want to file one.
+
+  3. Realtek RTL8156 — what's actually adjustable
+
+  Facts gathered (all read-only): RTL8156 rev 3101 on the Intel USB 3.1 xHCI; Realtek driver
+  10.65.602.2025, which is newer than the latest Windows 10 package on station-drivers
+  (10.64.20.0528.2025) — the 11.18 series is listed for Windows 11. So a driver update isn't the
+  lever. The driver exposes no Large Send Offload (Get-NetAdapterLso returns nothing) and no
+  RSC, and it runs 3 pending transmit URBs vs 6 receive with 18 vs 16 buffers — a structural
+  TX/RX asymmetry that lines up with 190 MB/s out vs 274 MB/s in.
+
+  Options, in the order I'd try them — all are adapter-configuration changes needing admin and a
+  brief link reset, so they're yours to green-light:
+
+  1. Transmit URBs 3 → 6 or 8 (registry keyword PendingTransmits), optionally Transmit Buffers
+     18 → 32. Cheapest, most directly aimed at the asymmetry, trivially reversible. One raw-TCP
+     test before/after tells us in 30 seconds whether it moved.
+  2. Jumbo frames would cut per-packet USB overhead ~6×, but need the Linux side and switch to
+     match — off the table while that box is read-only.
+  3. If neither helps, the ceiling is the chip/driver, and the only fix is a different adapter
+     (PCIe/Thunderbolt 2.5GbE).
+
+  Say the word on option 1 and I'll apply it, re-measure, and revert if it doesn't help.
+  Housekeeping: scratch data is gone from both machines; build\ still holds the reverted
+  experiment's binary (the next build replaces it), C:\tools holds the committed code.
+
+  Sources: Win32-OpenSSH #1944, Win32-OpenSSH #1888, Win32-OpenSSH releases, station-drivers
+  RTL8156 Win10 10.64, station-drivers RTL8156 Win11 11.18
+
+✻ Crunched for 11m 24s
+
+❯ I've updated the 2.5gbe driver, see if that improved anything. Then tell me what my
+  options are again. Also, the 2.5gbe interface IP address changed to 192.168.178.86, so
+  any testing from the Linux side needs to talk to that.
+
+● The driver update did it. Everything below is against 192.168.178.86; scratch data is cleaned up on both machines.
+
+  Before / after the driver update
+
+  ┌──────────────────────────────────┬──────────────────────┬──────────────────────────────────────────────────────┐
+  │   Windows → Linux over 2.5GbE    │   old driver 10.65   │                   new driver 10.67                   │
+  ├──────────────────────────────────┼──────────────────────┼──────────────────────────────────────────────────────┤
+  │ plain TCP transmit, no ssh       │ 190 MB/s             │ 291 MB/s (2.33 Gbit — wire rate)                     │
+  ├──────────────────────────────────┼──────────────────────┼──────────────────────────────────────────────────────┤
+  │ ssh alone via sshd, aes128-gcm   │ 185 MB/s             │ 259 MB/s                                             │
+  ├──────────────────────────────────┼──────────────────────┼──────────────────────────────────────────────────────┤
+  │ ssh alone, chacha20              │ 177 MB/s             │ 172 MB/s                                             │
+  ├──────────────────────────────────┼──────────────────────┼──────────────────────────────────────────────────────┤
+  │ rsync pull, whole-file 1 GB      │ 187 MB/s (wall)      │ 266 MB/s (4.0 s wall; rsync's own figure 238 MB/s    │
+  │                                  │                      │ includes startup)                                    │
+  ├──────────────────────────────────┼──────────────────────┼──────────────────────────────────────────────────────┤
+  │ rsync.exe CPU during that        │ 10–25% (post         │ 20–28%                                               │
+  │                                  │ write-pump)          │                                                      │
+  ├──────────────────────────────────┼──────────────────────┼──────────────────────────────────────────────────────┤
+  │ sshd.exe CPU                     │ 25–50%               │ 30–46%                                               │
+  ├──────────────────────────────────┼──────────────────────┼──────────────────────────────────────────────────────┤
+  │ Windows ssh.exe client push,     │ 17.4 MB/s            │ 16.7 MB/s — unchanged                                │
+  │ from a file                      │                      │                                                      │
+  └──────────────────────────────────┴──────────────────────┴──────────────────────────────────────────────────────┘
+
+  What changed in the driver: it now exposes Large Send Offload v2, enabled — the old one had none, which is why
+  transmit trailed receive — plus more receive URBs (10) and buffers, and a Jumbo Frame option. Transmit URBs are still
+  3, but with LSO doing the segmentation that no longer matters: the adapter is at line rate both ways now (274 in / 291
+  out).
+
+  Both directions of a Linux-initiated transfer are now within a few percent of the wire, and neither rsync nor sshd is
+  anywhere near a core. Your original pull command will show ~250+ MB/s on files that actually transfer.
+
+  Your options now
+
+  1. Nothing further needed for Linux-initiated transfers. Pull and push from the Linux side both run at the NIC limit
+     with -e 'ssh -c aes128-gcm@openssh.com'. With ssh's default chacha20 the cipher is the cap again (172 MB/s), so
+     keep the flag on the Linux side.
+  2. Windows-initiated pushes stay at ~17 MB/s — that's the Win32-OpenSSH client's send loop (9.5 and 10.0 alike;
+     independent of stdin type, cipher, NIC, options, and the port). Your choices: start those transfers from Linux
+     instead (a pull), use a different ssh client for pushes, or file the numbers upstream. Nothing in the port can
+     change it.
+  3. Jumbo frames are now offered by the driver. They'd trim per-packet overhead, but at 291 MB/s raw there's ~2% of
+     wire left to gain, and the Linux side and switch would have to match — not worth touching the read-only box for.
+  4. Transmit URBs 3 → 6/8 is still available as a knob, but with raw TCP at wire rate I'd leave it alone; there's
+     nothing left for it to buy.
+
+  One housekeeping note: the Linux box's known_hosts doesn't know this machine at .86 yet. I bypassed the check on my
+  test connections only (UserKnownHostsFile=/dev/null, nothing written there), so your first pull against the new
+  address will ask you to accept the host key once.
+
+✻ Churned for 3m 2s
+
+❯ Would it be possible to pull Win32-OpenSSH client in as a dependency, and fix that
+  Windows-initiated push issue? We may not be able to upstream it, but see if you can fix
+  it.
+
+● Pushed; CI is building the branch with the bundled client now (I have a watch on it).
+  Here's where things stand, and the answer to your release-layout question.
+
+  What shipped (commits 52d7cfd1, bd9d6b51, fd8d0b14, pushed)
+
+  The bug, found for real this time. Win32-OpenSSH reads a pipe or file on the client's
+  stdin the way it reads a console: TERM_IO_BUF_SIZE = 3 KB per read, a thread created per
+  read, an APC and a thread join to collect it. A bulk upload runs lockstepped on the
+  server's ~98 KB window adjusts, and each adjust cost 33 of those round trips — 5.8 ms,
+  traced — so 100352 B / 5.8 ms = 17 MB/s regardless of link. My first send-queue theory was
+  wrong and is not in the tree.
+
+  The fix (win32/openssh/patches/, applied to the pinned openssh/ submodule at build time):
+  a pipe/file on a sync fd gets a reader thread with a 1 MB ring, and read() is served from
+  it; the main thread is woken through the existing APC path only when it's actually
+  waiting; and a whole channel window goes out in one WSASend. The console keeps its
+  original path.
+
+  Results, rsync push from this machine, 1 GB over 2.5GbE:
+
+  ┌────────────────────────┬─────────┬────────────────────────────────────┐
+  │                        │ before  │                now                 │
+  ├────────────────────────┼─────────┼────────────────────────────────────┤
+  │ aes128-gcm             │ 17 MB/s │ 249 MB/s (pull direction does 258) │
+  ├────────────────────────┼─────────┼────────────────────────────────────┤
+  │ chacha20 (ssh default) │ 17 MB/s │ 161 MB/s                           │
+  └────────────────────────┴─────────┴────────────────────────────────────┘
+
+  libcrypto, as you decided: ssh.exe is built against Microsoft's published LibreSSL 3.8.2
+  SDK and loads System32\libcrypto.dll — Windows' own build, 5.1 GB/s AES with AES-NI,
+  versus 141 MB/s for the LibreSSL 4.2 the vcpkg port builds (its CPU probe is a GCC
+  constructor MSVC compiles away; that also explains why my "static" build was slow).
+  rsync's own PreferSystem32Images hardening is inherited by the ssh it spawns, so a DLL
+  beside it would be ignored anyway. No DLL ships; the requirement is the OpenSSH Client
+  component ≥ 9.5, which the setup script installs and now checks. x86 is for 32-bit Windows
+  only, as you said. No vcpkg anywhere — the SDK zips are pinned by SHA-256, and the
+  dependency step takes seconds.
+
+  Licences, checked from the texts: what's distributed is OpenSSH (BSD/ISC, its LICENCE),
+  Microsoft's compat layer (BSD, from the file headers) and zlib (linked in); LibreSSL is
+  only built against, not shipped; libfido2/libcbor never link into ssh.exe. All go into
+  NOTICE-ssh.txt, attached to the release. Nothing GPL, nothing linked with rsync.
+
+  Also in: rsync.exe prefers an ssh.exe in its own directory for a bare ssh (explicit -e
+  paths untouched), 1 MB child pipes, workflow builds/checks/attaches ssh.exe + ssh-x86.exe,
+  setup script installs it, README/BUILD-CMAKE updated. 24/24 tests on both architectures
+  with the bundled client in the loop.
+
+  Release layout: folders aren't possible, zips are
+
+  GitHub release assets are a flat list — no directories, no slashes in names, and names
+  must be unique within a release. So build-x64/rsync.exe can't exist as an asset. The way
+  to get identical filenames per architecture is one zip per architecture:
+  rsync-windows-x64.zip and rsync-windows-x86.zip, each containing rsync.exe, ssh.exe,
+  COPYING.txt, NOTICE-ssh.txt, with a .sha256 per zip. I think that's the better layout now
+  that two binaries belong together — and the setup script would download one zip and unpack
+  it, which is simpler than today. It costs the "one exe to drop on PATH" convenience and
+  changes the latest/download/rsync.exe URLs people may have. Say the word and I'll switch
+  the workflow and setup script to that.
+
+  One item left over from before: WINDOWS-PORT.md and the PNG still carry your own
+  uncommitted edits, untouched. I'll report the CI result when it lands.
+
+✻ Cooked for 3m 34s · 1 monitor still running
+
+❯ Yes, switch to per-architecture zips
+
+● Switched and pushed as e67c6735; CI is building it now (watch armed).
+
+  What changed:
+
+  - Release assets: rsync-windows-x64.zip and rsync-windows-x86.zip, each a .sha256 beside
+    it, plus NOTICE-ssh.txt attached loose. Each zip holds rsync.exe, ssh.exe, COPYING.txt,
+    NOTICE-ssh.txt under those names — verified with a local dry run of the staging step
+    (x64: 1.1 MB, x86: 0.95 MB). The build directories keep their -x86 suffixes; the rename
+    happens only when packing.
+  - Release notes: downloads table, unpack instructions, certutil example against the zip,
+    and the ssh -V version line.
+  - setup-windows-rsync.ps1: downloads the zip for the OS bitness, verifies it, unpacks the
+    pair into C:\Tools\rsync; installs ssh.exe only if System32\libcrypto.dll exists
+    (otherwise rsync alone, with a warning), and warns if that DLL is older than 3.8.2.
+    "Already current" now also requires ssh.exe to be present. Both scripts parse cleanly.
+  - README / BUILD-CMAKE.md describe the zip layout.
+
+  Anyone who scripted the old latest/download/rsync.exe URL will need to switch to the zip —
+  that's the one thing this changes for existing users. I'll report the CI result when it
+  lands.
+
+✻ Baked for 2m 58s · 1 monitor still running
+
+● The runner produced the artifact rsync-3.5.0-ge67c6735-windows at 2.09 MB — the two zips
+  (1.1 MB + 0.95 MB in my local dry run) plus checksums, NOTICE-ssh.txt and BUILD-CMAKE.md,
+  which matches. The whole pipeline — submodule, patches, SDK fetch, both ssh.exe builds,
+  self-contained checks, zip staging — works in a clean environment.
+
+  Where things stand
+
+  Branch windows-cmake-port is at e67c6735, pushed, CI green. Since your last look it
+  gained:
+
+  - 52d7cfd1 — the bundled ssh.exe: Win32-OpenSSH submodule, the three patches, the build
+    script, workflow, setup script, docs
+  - bd9d6b51 — rsync prefers an ssh.exe beside itself; 1 MB child pipes
+  - fd8d0b14 — patches apply regardless of line endings
+  - e67c6735 — one zip per architecture
+
+  A v3.5.0-ge67c6735 tag would now publish rsync-windows-x64.zip and rsync-windows-x86.zip
+  (each: rsync.exe, ssh.exe, COPYING.txt, NOTICE-ssh.txt), their .sha256 files and
+  NOTICE-ssh.txt. That's yours to push when you want the release; the old flat-file release
+  stays as it is until then.
+
+  Numbers to remember: push from Windows 17 → 249 MB/s (AES-GCM; 161 with ssh's default
+  chacha20), pull 258 MB/s, both at the 2.5GbE wire; 24/24 tests on both architectures with
+  the bundled client in the loop.
+
+  Left untouched: WINDOWS-PORT.md and the PNG with your own uncommitted edits, and PERF.txt.
+  Scratch data is gone from both machines; build-openssh/ under the repo holds the cached
+  SDK zips and is gitignored.
+
+✻ Brewed for 20s
 ```
