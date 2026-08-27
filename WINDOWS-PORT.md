@@ -13812,3 +13812,130 @@ Try the new cross-platform PowerShell https://aka.ms/pscore6
   Open a NEW shell before using rsync elsewhere: the machine PATH change
   does not reach shells that were already running.
 ```
+
+# Moar Speed!
+
+During normal use, some transfer rate limitations were evident. Transfers from Linux to Windows
+systems were capped at around 7MB/s, for no clear reasons. 
+
+This was in obvious need of repair.
+
+```
+❯ Ok, read PERF.txt -- these commands were run on a Linux machine, located at 192.168.178.150
+  which you have ssh access to for starting transfers to the current Windows machine. The last
+  two rsync command examples work from there to test the Windows rsync that we build in the
+  current folder, which is installed an running on the Windows laptop under c:\tools\. The
+  192.168.178.116 address is the 1Gbps link and the 192.168.178.170 is the 2.5Gbps link on
+  this laptop. The first rsync command example was a transfer between two Linux systems and it
+  transferred data at link rate (1Gbps), but the second and third rsync commands transfer
+  much slower (60 to 70Mbps). It is not clear why this is the case, but it happens with two
+  different Ethernet adapters on the receiving machine, so where is the problem? Is it in
+  Windows (this machine), I doubt it is in the Linux machine, I think it might be an
+  efficiency issue with the Windows port. Please investigate where the bandwidth limitations
+  are being caused. We want to transfer some virtual machine images, so this is a lot of data
+  for testing the transfer rate with. I want to see around 125MB/s on the 1gbps link and
+  250MB/s on the 2.5gbps link. Treat the Linux system as read only, do not modify anything
+  there, the only thing you should try to do is transfer the VMs from that machine to this
+  machine as a bandwidth test. Feel free to modify and recompile and restart the rsync on this
+  machine, to improve its performance. Make sure you always use the Windows OpenSSH client,
+  I've already added the key to the Windows ssh-agent, so you should have no problems
+  accessing 192.168.178.150.
+```
+
+Claude delivers again, going through the above process iteratively to find the bottlenecks,
+first in the way rsync on Windows would sleep-wait and process incoming data; then, noticing
+that the cipher choice was a bottleneck.
+
+## Where the 7MB/s went
+
+Everything underneath rsync was already fast, which is what made this worth chasing rather
+than blaming the network. Measured from the Windows side, over the same link and the same
+ssh:
+
+| Path | Rate |
+| --- | --- |
+| `ssh linux 'dd if=/dev/zero'` > `NUL` | 130 MB/s |
+| `ssh linux 'dd if=/dev/zero'` > a file on the NVMe | 165 MB/s |
+| the same bytes through `rsync` | **7 MB/s** |
+
+And during that 7MB/s transfer both processes were nearly idle -- rsync 5% of a core, ssh 8%.
+Nothing was working hard, so nothing was the bottleneck. Everything was *waiting*.
+
+The wait was in `win32_select()`. Windows cannot wait for a pipe to become readable:
+`PeekNamedPipe()` answers "is there data right now" and nothing answers "tell me when there
+is". So the shim polled, and a poll needs an interval to wait between attempts, and the
+interval was `Sleep(1)`.
+
+`Sleep()` rounds its argument up to the system timer tick. On a machine where nothing has
+asked for better that tick is 15.6ms, so `Sleep(1)` sleeps sixteen milliseconds:
+
+```
+Sleep(1) avg = 16.841 ms
+Sleep(1) avg with timeBeginPeriod(1) = 1.887 ms
+```
+
+rsync reads its input pipe `IO_BUFFER_SIZE` (32KB) at a time. One 16ms sleep every time the
+pipe ran dry is what capped the transfer, and it capped it at a rate that has nothing to do
+with the link -- which is exactly why both Ethernet adapters behaved identically, and why the
+Linux-to-Linux transfer in `PERF.txt` was unaffected.
+
+## The fix: pump the pipe from a thread
+
+Shortening the sleep is not the answer; there is no good interval. Too long stalls the
+transfer, too short burns a core spinning -- and that core is the one ssh needs for its own
+crypto. Measured both ways on the 2.5GbE link, spinning bought throughput at 93% of a CPU,
+and not spinning gave the CPU back and lost 20% of the rate.
+
+So `win32/win32io.c` now gives each polled pipe a **pump**: a thread doing ordinary blocking
+`ReadFile()` into a 1MB ring buffer, which signals an event whenever the ring stops being
+empty. That turns "readable" into a real waitable object, so `win32_select()` blocks on
+`WaitForMultipleObjects()` and wakes the instant bytes land -- no interval and no spin. The
+ring is worth as much as the event: the peer goes on filling it while rsync is busy
+checksumming and writing, instead of stalling on a full pipe until rsync comes back.
+
+A pump owns its fd once it exists -- the bytes have left the pipe, so `win32_read()` serves
+every later read out of the ring, and `O_NONBLOCK` is honoured there rather than by putting
+the handle into `PIPE_NOWAIT`. Sets a pump cannot cover (a console, a regular file, a mix of
+pipes and sockets) still fall through to the polling loop, which now backs off through a spin
+and a yield to a *high-resolution* waitable timer rather than to the 15.6ms tick.
+
+## Then the checksum, then the cipher
+
+With the wait fixed, rsync became CPU-bound at 97% of a core, and the culprit was the
+whole-file checksum: `--cc=none` jumped from 229 to 257 MB/s. The Windows build had been
+configured without xxhash, and the two ends negotiate the best checksum they *both* know --
+so one missing library was dragging every transfer down to MD5, the slowest entry on the
+list. The Linux peer had offered `xxh128 xxh3 xxh64` all along.
+
+Upstream xxHash v0.8.3 is now bundled in `xxhash/` and enabled by default, alongside the
+zlib and popt copies already in the tree, so the negotiation lands on xxh128 -- faster than
+MD5 and a stronger checksum. `-DRSYNC_EXTERNAL_XXHASH=ON` links the system library instead.
+
+What was left was ssh's own cipher. OpenSSH prefers `chacha20-poly1305`, which has no
+hardware acceleration; on this i5-8350U that alone caps a transfer at ~156 MB/s, while
+AES-GCM rides AES-NI. The cipher is chosen by the *client's* preference order, so this one
+is a flag on the sending side rather than anything the port can fix:
+
+```sh
+rsync -rt -e 'ssh -c aes128-gcm@openssh.com' images/ user@host:images/
+```
+
+## Result
+
+![Saturated 1Gbps Link](windows-speed-tests-1.0G.png)
+![Saturated 2.5Gbps Link](windows-speed-tests-2.5G.png)
+
+Push from the Linux box to this laptop, same command, same source tree, before and after:
+
+| Link | Before | After | After, with AES-GCM |
+| --- | --- | --- | --- |
+| 1GbE (192.168.178.116) | 7 MB/s | 112.5 MB/s | 112.7 MB/s |
+| 2.5GbE (192.168.178.170) | 7 MB/s | 155.7 MB/s | **273.9 MB/s** |
+
+1GbE is saturated -- 112.5 MB/s is about 95% of the ~118 MB/s that survives Ethernet, TCP/IP
+and ssh framing on a gigabit link, and the cipher no longer matters because the wire is the
+limit. 2.5GbE runs at 39x the original rate.
+
+A full 2.3GB tree now copies in 8.3 seconds at 271 MB/s, and every file in it compares
+byte-for-byte by SHA-256 against the source. The test suite passes 24/24 on both x64 and
+x86, including the ssh transfer tests.
