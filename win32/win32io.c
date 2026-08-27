@@ -170,6 +170,10 @@ struct pipe_pump {
 
 static struct pipe_pump *pumps[MAX_CRTFDS];
 
+/* The write-side pumps, defined below; a pipe fd gets one or the other. */
+struct pipe_wpump;
+static struct pipe_wpump *wpumps[MAX_CRTFDS];
+
 static unsigned __stdcall pump_thread(void *arg)
 {
 	struct pipe_pump *p = (struct pipe_pump *)arg;
@@ -234,6 +238,8 @@ static struct pipe_pump *pump_for(int fd, int create)
 		return NULL;
 	if (pumps[fd] || !create)
 		return pumps[fd];
+	if (wpumps[fd])
+		return NULL;
 
 	h = fd_handle(fd);
 	if (!handle_is_pipe(h))
@@ -364,6 +370,271 @@ static int pump_read(struct pipe_pump *p, int fd, void *buf, unsigned int count)
 	}
 }
 
+/* ------------------------------------------------------- write-side pumps */
+
+/*
+ * The write side has the same problem in the other direction.  Windows
+ * reports nothing about a pipe having room: with the handle in PIPE_NOWAIT a
+ * WriteFile that does not fit writes nothing and returns at once, and
+ * crtfd_writable() can do no better than "try it".  Traced on a 2.5GbE send
+ * that came to fourteen failed write-then-select rounds for every 32KB that
+ * went through -- a whole core spent asking.
+ *
+ * So the write side gets a pump too, mirrored: write() copies into a ring
+ * and returns, a thread drains the ring into the pipe with blocking
+ * WriteFile, and "writable" becomes the event "the ring has room".
+ *
+ * The one asymmetry is what the ring holds.  Bytes in it have been accepted
+ * by write() but not yet by the kernel, where a POSIX pipe would already
+ * have them; so the ring is flushed before its fd is closed, and at exit
+ * for any fd rsync never closes.
+ */
+
+static void hires_sleep(DWORD usec);
+
+struct pipe_wpump {
+	HANDLE h;                /* the pipe being filled */
+	HANDLE thread;
+	HANDLE data_evt;         /* set while the ring holds bytes to write */
+	HANDLE room_evt;         /* set while the ring has room */
+	CRITICAL_SECTION lock;
+	char  *ring;
+	size_t head, tail, len;  /* head: next byte out; tail: next byte in */
+	DWORD  err;              /* first WriteFile failure; the ring is dropped */
+	volatile LONG stop;      /* exit once the ring is empty */
+};
+
+static unsigned __stdcall wpump_thread(void *arg)
+{
+	struct pipe_wpump *p = (struct pipe_wpump *)arg;
+	char chunk[PUMP_CHUNK];
+
+	for (;;) {
+		size_t n, first, done;
+		DWORD err = 0;
+
+		EnterCriticalSection(&p->lock);
+		n = p->len < PUMP_CHUNK ? p->len : PUMP_CHUNK;
+		if (!n)
+			ResetEvent(p->data_evt);
+		else {
+			first = PUMP_RING_SIZE - p->head;
+			if (first > n)
+				first = n;
+			memcpy(chunk, p->ring + p->head, first);
+			if (n > first)
+				memcpy(chunk + first, p->ring, n - first);
+		}
+		LeaveCriticalSection(&p->lock);
+
+		if (!n) {
+			if (p->stop)
+				break;
+			WaitForSingleObject(p->data_evt, INFINITE);
+			continue;
+		}
+
+		/* The bytes stay in the ring until they are in the pipe, so a
+		 * flush can tell when the pipe has everything. */
+		for (done = 0; done < n; ) {
+			DWORD put = 0;
+
+			if (!WriteFile(p->h, chunk + done, (DWORD)(n - done), &put, NULL)) {
+				err = GetLastError();
+				if (!err)
+					err = ERROR_BROKEN_PIPE;
+				break;
+			}
+			if (put == 0) {
+				/* Only a PIPE_NOWAIT handle does this, and the
+				 * pump asked for PIPE_WAIT; if that was refused,
+				 * wait a little rather than spin. */
+				hires_sleep(200);
+				continue;
+			}
+			done += put;
+		}
+
+		EnterCriticalSection(&p->lock);
+		if (err) {
+			p->err = err;
+			p->len = 0;          /* nothing more will get through */
+			p->head = p->tail = 0;
+			ResetEvent(p->data_evt);
+		} else {
+			p->head = (p->head + n) % PUMP_RING_SIZE;
+			p->len -= n;
+		}
+		SetEvent(p->room_evt);   /* room, or an error to report */
+		LeaveCriticalSection(&p->lock);
+		if (err)
+			break;
+	}
+	return 0;
+}
+
+static void wpump_stop(int fd);
+
+/* rsync does not close the fds it talks to its peer over; it exits.  Flush
+ * every ring first, so the last bytes written reach the pipe the way they
+ * would already have on POSIX. */
+static void wpump_exit(void)
+{
+	int fd;
+
+	for (fd = 0; fd < MAX_CRTFDS; fd++)
+		if (wpumps[fd])
+			wpump_stop(fd);
+}
+
+/* Return fd's write pump, starting one if `create` and fd is a pipe that no
+ * read pump owns.  NULL from a create call means the caller should keep
+ * writing (and polling) the fd directly. */
+static struct pipe_wpump *wpump_for(int fd, int create)
+{
+	static int exit_hooked;
+	struct pipe_wpump *p;
+	HANDLE h;
+	DWORD mode;
+
+	if (fd < 0 || fd >= MAX_CRTFDS)
+		return NULL;
+	if (wpumps[fd] || !create)
+		return wpumps[fd];
+	if (pumps[fd])
+		return NULL;
+
+	h = fd_handle(fd);
+	if (!handle_is_pipe(h))
+		return NULL;
+
+	if (!(p = calloc(1, sizeof *p)))
+		return NULL;
+	if (!(p->ring = malloc(PUMP_RING_SIZE))) {
+		free(p);
+		return NULL;
+	}
+	p->h = h;
+	p->data_evt = CreateEventA(NULL, TRUE, FALSE, NULL);  /* manual reset */
+	p->room_evt = CreateEventA(NULL, TRUE, TRUE, NULL);
+	if (!p->data_evt || !p->room_evt) {
+		if (p->data_evt) CloseHandle(p->data_evt);
+		if (p->room_evt) CloseHandle(p->room_evt);
+		free(p->ring);
+		free(p);
+		return NULL;
+	}
+	InitializeCriticalSection(&p->lock);
+
+	/* The pump wants WriteFile to block; O_NONBLOCK is honoured against
+	 * the ring instead (wpump_write). */
+	mode = PIPE_READMODE_BYTE | PIPE_WAIT;
+	SetNamedPipeHandleState(h, &mode, NULL, NULL);
+
+	p->thread = (HANDLE)_beginthreadex(NULL, 0, wpump_thread, p, 0, NULL);
+	if (!p->thread) {
+		CloseHandle(p->data_evt);
+		CloseHandle(p->room_evt);
+		DeleteCriticalSection(&p->lock);
+		free(p->ring);
+		free(p);
+		return NULL;
+	}
+
+	if (!exit_hooked) {
+		exit_hooked = 1;
+		atexit(wpump_exit);
+	}
+
+	TRACE("write pump started for fd %d\n", fd);
+	wpumps[fd] = p;
+	return p;
+}
+
+/* Flush the ring into the pipe, then take the pump down.  A peer that has
+ * stopped reading gets ten seconds -- rsync would have waited on it forever
+ * in write() -- after which the rest is abandoned as a broken pipe would
+ * have lost it. */
+static void wpump_stop(int fd)
+{
+	struct pipe_wpump *p;
+	int tries = 0;
+
+	if (fd < 0 || fd >= MAX_CRTFDS || !(p = wpumps[fd]))
+		return;
+	wpumps[fd] = NULL;
+
+	InterlockedExchange(&p->stop, 1);
+	SetEvent(p->data_evt);   /* wake it to notice stop */
+
+	if (WaitForSingleObject(p->thread, 10000) == WAIT_TIMEOUT) {
+		TRACE("write pump for fd %d: peer not draining, abandoning %lu bytes\n",
+		      fd, (unsigned long)p->len);
+		/* Same shape as pump_stop(): cancel until it is really gone,
+		 * and leak rather than free under a live thread. */
+		for (;;) {
+			CancelIoEx(p->h, NULL);
+			if (WaitForSingleObject(p->thread, 50) != WAIT_TIMEOUT)
+				break;
+			if (++tries >= 40) {
+				TRACE("write pump for fd %d would not stop; leaking it\n", fd);
+				CloseHandle(p->thread);
+				return;
+			}
+		}
+	}
+
+	CloseHandle(p->thread);
+	CloseHandle(p->data_evt);
+	CloseHandle(p->room_evt);
+	DeleteCriticalSection(&p->lock);
+	free(p->ring);
+	free(p);
+}
+
+/* Put a write into the ring, blocking for room or not as the fd asks. */
+static int wpump_write(struct pipe_wpump *p, int fd, const void *buf, unsigned int count)
+{
+	if (!count)
+		return 0;
+
+	for (;;) {
+		size_t space, n = 0, first;
+		DWORD err;
+
+		EnterCriticalSection(&p->lock);
+		err = p->err;
+		space = PUMP_RING_SIZE - p->len;
+		if (!err && space) {
+			n = space < count ? space : count;
+			first = PUMP_RING_SIZE - p->tail;
+			if (first > n)
+				first = n;
+			memcpy(p->ring + p->tail, buf, first);
+			if (n > first)
+				memcpy(p->ring, (const char *)buf + first, n - first);
+			p->tail = (p->tail + n) % PUMP_RING_SIZE;
+			p->len += n;
+			if (p->len == PUMP_RING_SIZE)
+				ResetEvent(p->room_evt);
+			SetEvent(p->data_evt);
+		}
+		LeaveCriticalSection(&p->lock);
+
+		if (err) {
+			errno = EPIPE;
+			return -1;
+		}
+		if (n)
+			return (int)n;
+		if (fd >= 0 && fd < MAX_CRTFDS && fd_nonblock[fd]) {
+			errno = EAGAIN;
+			return -1;
+		}
+		WaitForSingleObject(p->room_evt, INFINITE);
+	}
+}
+
 /* ------------------------------------------------------------ read/write */
 
 int win32_read(int fd, void *buf, unsigned int count)
@@ -437,6 +708,13 @@ int win32_write(int fd, const void *buf, unsigned int count)
 	if (!handle_is_pipe(h))
 		return _write(fd, buf, count);
 
+	/* A write pump owns the order of bytes on its pipe; go through it. */
+	{
+		struct pipe_wpump *wp = wpump_for(fd, 0);
+		if (wp)
+			return wpump_write(wp, fd, buf, count);
+	}
+
 	if (!WriteFile(h, buf, count, &put, NULL)) {
 		DWORD err = GetLastError();
 		if (err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA) {
@@ -463,6 +741,7 @@ int win32_close(int fd)
 			return sock_fail();
 		return 0;
 	}
+	wpump_stop(fd);
 	pump_stop(fd);
 	if (fd >= 0 && fd < MAX_CRTFDS)
 		fd_nonblock[fd] = 0;
@@ -629,8 +908,8 @@ int win32_fcntl(int fd, int cmd, ...)
 		{
 			HANDLE h = fd_handle(fd);
 			/* A pumped fd stays PIPE_WAIT for its pump thread; the
-			 * recorded flag is enough, pump_read() honours it. */
-			if (handle_is_pipe(h) && !pump_for(fd, 0)) {
+			 * recorded flag is enough, the pump honours it. */
+			if (handle_is_pipe(h) && !pump_for(fd, 0) && !wpump_for(fd, 0)) {
 				DWORD mode = PIPE_READMODE_BYTE
 					   | (want ? PIPE_NOWAIT : PIPE_WAIT);
 				if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
@@ -694,6 +973,15 @@ static int crtfd_readable(int fd)
 static int crtfd_writable(int fd)
 {
 	HANDLE h = fd_handle(fd);
+	struct pipe_wpump *p = wpump_for(fd, 0);
+
+	if (p) {
+		int ready;
+		EnterCriticalSection(&p->lock);
+		ready = p->len < PUMP_RING_SIZE || p->err;
+		LeaveCriticalSection(&p->lock);
+		return ready;
+	}
 
 	return h != INVALID_HANDLE_VALUE;
 }
@@ -937,21 +1225,19 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 	}
 
 	/*
-	 * Pipes only, waiting to read: this is the shape rsync-over-ssh has
-	 * whenever it is waiting for the peer, and the one that has to be
-	 * fast.  Every fd here can be pumped, so wait on the pumps' events --
-	 * a real block, woken the moment bytes arrive.
-	 *
-	 * A write fd in the set skips this: pipe writability is not something
-	 * Windows reports, so crtfd_writable() calls them all ready and the
-	 * loop below returns without waiting at all.
+	 * Pipes only: this is the shape rsync-over-ssh has whenever it waits
+	 * for its peer, and the one that has to be fast.  Every fd here can be
+	 * pumped -- a read pump's "bytes in the ring" event, a write pump's
+	 * "room in the ring" event -- so wait on those: a real block, woken
+	 * the moment the state changes.
 	 */
-	if (!have_socks && n_crt_w == 0 && n_crt_r > 0) {
+	if (!have_socks && n_crt_r + n_crt_w > 0) {
 		HANDLE evts[MAXIMUM_WAIT_OBJECTS];
 		int    evt_fd[MAXIMUM_WAIT_OBJECTS];
+		int    evt_w[MAXIMUM_WAIT_OBJECTS];
 		int    n_evt = 0, unpumped = 0, j;
 
-		for (j = 0; j < n_crt_r; j++) {
+		for (j = 0; j < n_crt_r && !unpumped; j++) {
 			struct pipe_pump *p = pump_for(crt_r[j], 1);
 
 			if (!p || n_evt == MAXIMUM_WAIT_OBJECTS) {
@@ -959,20 +1245,38 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 				break;
 			}
 			evts[n_evt] = p->data_evt;
+			evt_w[n_evt] = 0;
 			evt_fd[n_evt++] = crt_r[j];
+		}
+		for (j = 0; j < n_crt_w && !unpumped; j++) {
+			struct pipe_wpump *p = wpump_for(crt_w[j], 1);
+
+			if (!p || n_evt == MAXIMUM_WAIT_OBJECTS) {
+				unpumped = 1;
+				break;
+			}
+			evts[n_evt] = p->room_evt;
+			evt_w[n_evt] = 1;
+			evt_fd[n_evt++] = crt_w[j];
 		}
 
 		/* Anything a pump could not take (a console, a file) leaves the
 		 * set unwaitable, so fall through to the polling loop. */
 		if (!unpumped) {
 			for (;;) {
-				fd_set out_r;
+				fd_set out_r, out_w;
 				DWORD rc, ms;
 				int count = 0;
 
 				FD_ZERO(&out_r);
+				FD_ZERO(&out_w);
 				for (j = 0; j < n_evt; j++) {
-					if (crtfd_readable(evt_fd[j])) {
+					if (evt_w[j]) {
+						if (crtfd_writable(evt_fd[j])) {
+							FD_SET((SOCKET)evt_fd[j], &out_w);
+							count++;
+						}
+					} else if (crtfd_readable(evt_fd[j])) {
 						FD_SET((SOCKET)evt_fd[j], &out_r);
 						count++;
 					}
@@ -980,7 +1284,7 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 				if (count) {
 					TRACE("select -> %d (pump)\n", count);
 					if (rfds) *rfds = out_r;
-					if (wfds) FD_ZERO(wfds);
+					if (wfds) *wfds = out_w;
 					if (efds) FD_ZERO(efds);
 					return count;
 				}
