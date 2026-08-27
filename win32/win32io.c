@@ -129,6 +129,215 @@ static int handle_is_pipe(HANDLE h)
 	return h != INVALID_HANDLE_VALUE && GetFileType(h) == FILE_TYPE_PIPE;
 }
 
+/* ------------------------------------------------------------- pipe pumps */
+
+/*
+ * Windows cannot wait for a pipe to become readable.  PeekNamedPipe answers
+ * only "is there data right now", which leaves win32_select() polling, and a
+ * poll needs an interval to wait between attempts.  Every choice of interval
+ * is wrong on a fast link: Sleep() rounds up to the system timer tick, 15.6ms
+ * on a machine where nothing has asked for better, which throttles a bulk
+ * transfer to one pipe buffer per tick; spinning instead keeps up, but burns
+ * the core ssh needs for its own crypto.
+ *
+ * So give each polled pipe a pump: a thread doing ordinary blocking ReadFile
+ * into a ring buffer, signalling an event whenever the ring stops being
+ * empty.  "Readable" becomes a real waitable object, so win32_select() can
+ * block on it and wake the instant bytes land -- no interval, no spin.  The
+ * ring also decouples the two sides, letting the peer go on filling it while
+ * rsync is busy checksumming and writing, rather than stalling on a full
+ * pipe until rsync comes back for more.
+ *
+ * A pump owns its fd once it exists: the bytes have left the pipe, so every
+ * later read of that fd has to come out of the ring instead.
+ */
+
+#define PUMP_RING_SIZE (1024 * 1024)
+#define PUMP_CHUNK     (64 * 1024)
+
+struct pipe_pump {
+	HANDLE h;                /* the pipe being drained */
+	HANDLE thread;
+	HANDLE data_evt;         /* set while the ring holds bytes, or at EOF */
+	HANDLE room_evt;         /* set while the ring has space to fill */
+	CRITICAL_SECTION lock;
+	char  *ring;
+	size_t head, tail, len;  /* head: next byte out; tail: next byte in */
+	int    eof;
+	DWORD  err;
+	volatile LONG stop;
+};
+
+static struct pipe_pump *pumps[MAX_CRTFDS];
+
+static unsigned __stdcall pump_thread(void *arg)
+{
+	struct pipe_pump *p = (struct pipe_pump *)arg;
+	char chunk[PUMP_CHUNK];
+
+	while (!p->stop) {
+		DWORD got = 0, want;
+		size_t space, first;
+
+		EnterCriticalSection(&p->lock);
+		space = PUMP_RING_SIZE - p->len;
+		if (!space)
+			ResetEvent(p->room_evt);
+		LeaveCriticalSection(&p->lock);
+
+		if (!space) {
+			WaitForSingleObject(p->room_evt, INFINITE);
+			continue;
+		}
+
+		want = (DWORD)(space < PUMP_CHUNK ? space : PUMP_CHUNK);
+		if (!ReadFile(p->h, chunk, want, &got, NULL) || got == 0) {
+			EnterCriticalSection(&p->lock);
+			p->err = got ? 0 : GetLastError();
+			p->eof = 1;
+			SetEvent(p->data_evt);   /* EOF is a readable event too */
+			LeaveCriticalSection(&p->lock);
+			break;
+		}
+
+		EnterCriticalSection(&p->lock);
+		first = PUMP_RING_SIZE - p->tail;
+		if (first > got)
+			first = got;
+		memcpy(p->ring + p->tail, chunk, first);
+		if (got > first)
+			memcpy(p->ring, chunk + first, got - first);
+		p->tail = (p->tail + got) % PUMP_RING_SIZE;
+		p->len += got;
+		SetEvent(p->data_evt);
+		LeaveCriticalSection(&p->lock);
+	}
+	return 0;
+}
+
+/* Return fd's pump, starting one if `create` and fd is a pipe.  A NULL back
+ * from a create call means fd is not something a pump can drain, and the
+ * caller should read or poll it directly as before. */
+static struct pipe_pump *pump_for(int fd, int create)
+{
+	struct pipe_pump *p;
+	HANDLE h;
+	DWORD mode;
+
+	if (fd < 0 || fd >= MAX_CRTFDS)
+		return NULL;
+	if (pumps[fd] || !create)
+		return pumps[fd];
+
+	h = fd_handle(fd);
+	if (!handle_is_pipe(h))
+		return NULL;
+
+	if (!(p = calloc(1, sizeof *p)))
+		return NULL;
+	if (!(p->ring = malloc(PUMP_RING_SIZE))) {
+		free(p);
+		return NULL;
+	}
+	p->h = h;
+	p->data_evt = CreateEventA(NULL, TRUE, FALSE, NULL);  /* manual reset */
+	p->room_evt = CreateEventA(NULL, TRUE, TRUE, NULL);
+	if (!p->data_evt || !p->room_evt) {
+		if (p->data_evt) CloseHandle(p->data_evt);
+		if (p->room_evt) CloseHandle(p->room_evt);
+		free(p->ring);
+		free(p);
+		return NULL;
+	}
+	InitializeCriticalSection(&p->lock);
+
+	/* The pump wants ReadFile to block, whatever O_NONBLOCK the fd carries;
+	 * non-blocking reads are served from the ring instead (pump_read). */
+	mode = PIPE_READMODE_BYTE | PIPE_WAIT;
+	SetNamedPipeHandleState(h, &mode, NULL, NULL);
+
+	p->thread = (HANDLE)_beginthreadex(NULL, 0, pump_thread, p, 0, NULL);
+	if (!p->thread) {
+		CloseHandle(p->data_evt);
+		CloseHandle(p->room_evt);
+		DeleteCriticalSection(&p->lock);
+		free(p->ring);
+		free(p);
+		return NULL;
+	}
+
+	TRACE("pump started for fd %d\n", fd);
+	pumps[fd] = p;
+	return p;
+}
+
+static void pump_stop(int fd)
+{
+	struct pipe_pump *p;
+
+	if (fd < 0 || fd >= MAX_CRTFDS || !(p = pumps[fd]))
+		return;
+	pumps[fd] = NULL;
+
+	InterlockedExchange(&p->stop, 1);
+	SetEvent(p->room_evt);
+	CancelIoEx(p->h, NULL);        /* unblock a ReadFile already in flight */
+	WaitForSingleObject(p->thread, 2000);
+
+	CloseHandle(p->thread);
+	CloseHandle(p->data_evt);
+	CloseHandle(p->room_evt);
+	DeleteCriticalSection(&p->lock);
+	free(p->ring);
+	free(p);
+}
+
+/* Serve a read out of the ring, blocking or not as the fd asks. */
+static int pump_read(struct pipe_pump *p, int fd, void *buf, unsigned int count)
+{
+	for (;;) {
+		size_t n = 0, first;
+		int eof;
+		DWORD err;
+
+		EnterCriticalSection(&p->lock);
+		if (p->len) {
+			n = p->len < count ? p->len : count;
+			first = PUMP_RING_SIZE - p->head;
+			if (first > n)
+				first = n;
+			memcpy(buf, p->ring + p->head, first);
+			if (n > first)
+				memcpy((char *)buf + first, p->ring, n - first);
+			p->head = (p->head + n) % PUMP_RING_SIZE;
+			p->len -= n;
+			if (!p->len && !p->eof)
+				ResetEvent(p->data_evt);
+			SetEvent(p->room_evt);
+		}
+		eof = p->eof;
+		err = p->err;
+		LeaveCriticalSection(&p->lock);
+
+		if (n)
+			return (int)n;
+		if (eof) {
+			if (err && err != ERROR_BROKEN_PIPE
+			 && err != ERROR_PIPE_NOT_CONNECTED
+			 && err != ERROR_OPERATION_ABORTED) {
+				errno = EIO;
+				return -1;
+			}
+			return 0;
+		}
+		if (fd >= 0 && fd < MAX_CRTFDS && fd_nonblock[fd]) {
+			errno = EAGAIN;
+			return -1;
+		}
+		WaitForSingleObject(p->data_evt, INFINITE);
+	}
+}
+
 /* ------------------------------------------------------------ read/write */
 
 int win32_read(int fd, void *buf, unsigned int count)
@@ -151,6 +360,14 @@ int win32_read(int fd, void *buf, unsigned int count)
 
 	if (!handle_is_pipe(h))
 		return _read(fd, buf, count);
+
+	/* Once a pump has taken the fd over the bytes are in its ring, not in
+	 * the pipe -- reading the pipe here would block or lose data. */
+	{
+		struct pipe_pump *pp = pump_for(fd, 0);
+		if (pp)
+			return pump_read(pp, fd, buf, count);
+	}
 
 	if (!ReadFile(h, buf, count, &got, NULL)) {
 		TRACE("read(%d,%u) ReadFile err=%lu\n", fd, count, GetLastError());
@@ -220,6 +437,7 @@ int win32_close(int fd)
 			return sock_fail();
 		return 0;
 	}
+	pump_stop(fd);
 	if (fd >= 0 && fd < MAX_CRTFDS)
 		fd_nonblock[fd] = 0;
 	return _close(fd);
@@ -384,7 +602,9 @@ int win32_fcntl(int fd, int cmd, ...)
 		}
 		{
 			HANDLE h = fd_handle(fd);
-			if (handle_is_pipe(h)) {
+			/* A pumped fd stays PIPE_WAIT for its pump thread; the
+			 * recorded flag is enough, pump_read() honours it. */
+			if (handle_is_pipe(h) && !pump_for(fd, 0)) {
 				DWORD mode = PIPE_READMODE_BYTE
 					   | (want ? PIPE_NOWAIT : PIPE_WAIT);
 				if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
@@ -417,6 +637,15 @@ static int crtfd_readable(int fd)
 {
 	HANDLE h = fd_handle(fd);
 	DWORD avail = 0;
+	struct pipe_pump *p = pump_for(fd, 0);
+
+	if (p) {
+		int ready;
+		EnterCriticalSection(&p->lock);
+		ready = p->len > 0 || p->eof;
+		LeaveCriticalSection(&p->lock);
+		return ready;
+	}
 
 	if (h == INVALID_HANDLE_VALUE)
 		return 1;   /* report ready so the caller gets a real error */
@@ -441,6 +670,79 @@ static int crtfd_writable(int fd)
 	HANDLE h = fd_handle(fd);
 
 	return h != INVALID_HANDLE_VALUE;
+}
+
+/* ------------------------------------------------------------- poll waits */
+
+/*
+ * Windows offers no way to wait on a pipe becoming readable -- PeekNamedPipe
+ * only answers "is there data now" -- so the mixed path below has to poll,
+ * and how long it waits between attempts sets a ceiling on throughput.
+ *
+ * Sleep() is the obvious wait and the wrong one: its argument is rounded up
+ * to the system timer tick, which is 15.6ms on a machine where nothing has
+ * asked for better, so Sleep(1) really sleeps ~16ms.  rsync reads the pipe
+ * IO_BUFFER_SIZE (32KB) at a time, so one sleep per empty pipe caps a bulk
+ * transfer at a couple of MB/s no matter how fast the link is.
+ *
+ * What the loop actually waits for, during a transfer, is the peer refilling
+ * a pipe it is writing to continuously -- microseconds away.  So spin first,
+ * yielding rather than burning the core, and only sleep once the wait has
+ * gone on long enough to mean the peer is genuinely idle.  Those sleeps use
+ * a high-resolution waitable timer, which is not quantised to the tick, so
+ * even the fallback costs tens of microseconds rather than sixteen ms.
+ */
+
+/* Sleep for `usec`, without rounding up to the system timer tick.  Falls
+ * back to Sleep() if the high-resolution timer is unavailable (pre-1803). */
+static void hires_sleep(DWORD usec)
+{
+	static RSYNC_TLS HANDLE timer;
+	static RSYNC_TLS int timer_failed;
+	LARGE_INTEGER due;
+
+	if (!timer && !timer_failed) {
+		timer = CreateWaitableTimerExW(NULL, NULL,
+					       CREATE_WAITABLE_TIMER_MANUAL_RESET
+					       | CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+					       TIMER_ALL_ACCESS);
+		if (!timer)
+			timer_failed = 1;
+	}
+	if (!timer) {
+		Sleep(usec < 1000 ? 1 : usec / 1000);
+		return;
+	}
+
+	due.QuadPart = -(LONGLONG)usec * 10;   /* negative: relative, 100ns units */
+	if (!SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) {
+		Sleep(usec < 1000 ? 1 : usec / 1000);
+		return;
+	}
+	WaitForSingleObject(timer, INFINITE);
+}
+
+/*
+ * Back off by one step.  `waited` counts the attempts made so far in this
+ * win32_select() call, so a burst of traffic never pays for the idling the
+ * previous lull did.
+ *
+ * The first two bands are yields, not sleeps: SwitchToThread() gives the
+ * rest of this timeslice to another runnable thread and returns as soon as
+ * there is nothing to give it to, which keeps the wait in the microseconds
+ * an active transfer needs.  Roughly: yield for the first ~256 attempts,
+ * then 250us apiece, then settle to 5ms once it is clear nobody is talking.
+ */
+static void poll_backoff(unsigned waited)
+{
+	if (waited < 64)
+		YieldProcessor();
+	else if (waited < 256)
+		SwitchToThread();
+	else if (waited < 1024)
+		hires_sleep(250);
+	else
+		hires_sleep(5000);
 }
 
 /* ------------------------------------------------------------------ poll */
@@ -510,7 +812,7 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 	unsigned int i;
 	DWORD  deadline = 0;
 	int    infinite = (tv == NULL);
-	DWORD  waited = 0;
+	unsigned waited = 0;
 
 	(void)nfds;
 
@@ -608,8 +910,82 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 		return rc;
 	}
 
-	/* Mixed (or pipe-only): poll.  Back off from a spin to 5ms so that an
-	 * active transfer stays responsive without burning a core when idle. */
+	/*
+	 * Pipes only, waiting to read: this is the shape rsync-over-ssh has
+	 * whenever it is waiting for the peer, and the one that has to be
+	 * fast.  Every fd here can be pumped, so wait on the pumps' events --
+	 * a real block, woken the moment bytes arrive.
+	 *
+	 * A write fd in the set skips this: pipe writability is not something
+	 * Windows reports, so crtfd_writable() calls them all ready and the
+	 * loop below returns without waiting at all.
+	 */
+	if (!have_socks && n_crt_w == 0 && n_crt_r > 0) {
+		HANDLE evts[MAXIMUM_WAIT_OBJECTS];
+		int    evt_fd[MAXIMUM_WAIT_OBJECTS];
+		int    n_evt = 0, unpumped = 0, j;
+
+		for (j = 0; j < n_crt_r; j++) {
+			struct pipe_pump *p = pump_for(crt_r[j], 1);
+
+			if (!p || n_evt == MAXIMUM_WAIT_OBJECTS) {
+				unpumped = 1;
+				break;
+			}
+			evts[n_evt] = p->data_evt;
+			evt_fd[n_evt++] = crt_r[j];
+		}
+
+		/* Anything a pump could not take (a console, a file) leaves the
+		 * set unwaitable, so fall through to the polling loop. */
+		if (!unpumped) {
+			for (;;) {
+				fd_set out_r;
+				DWORD rc, ms;
+				int count = 0;
+
+				FD_ZERO(&out_r);
+				for (j = 0; j < n_evt; j++) {
+					if (crtfd_readable(evt_fd[j])) {
+						FD_SET((SOCKET)evt_fd[j], &out_r);
+						count++;
+					}
+				}
+				if (count) {
+					TRACE("select -> %d (pump)\n", count);
+					if (rfds) *rfds = out_r;
+					if (wfds) FD_ZERO(wfds);
+					if (efds) FD_ZERO(efds);
+					return count;
+				}
+
+				if (infinite)
+					ms = INFINITE;
+				else {
+					DWORD now = GetTickCount();
+					if ((long)(now - deadline) >= 0)
+						ms = 0;
+					else
+						ms = deadline - now;
+				}
+
+				rc = WaitForMultipleObjects((DWORD)n_evt, evts, FALSE, ms);
+				if (rc == WAIT_TIMEOUT) {
+					if (rfds) FD_ZERO(rfds);
+					if (wfds) FD_ZERO(wfds);
+					if (efds) FD_ZERO(efds);
+					return 0;
+				}
+				if (rc == WAIT_FAILED) {
+					errno = EIO;
+					return -1;
+				}
+			}
+		}
+	}
+
+	/* Mixed, or a set a pump could not cover: poll, backing off as
+	 * described above poll_backoff(). */
 	for (;;) {
 		fd_set out_r, out_w, out_e;
 		int count = 0;
@@ -695,8 +1071,8 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 			}
 		}
 
-		Sleep(waited < 20 ? 1 : 5);
-		if (waited < 1000)
+		poll_backoff(waited);
+		if (waited < 0x7fffffffu)
 			waited++;
 	}
 }
