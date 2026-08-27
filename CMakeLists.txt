@@ -53,10 +53,11 @@ option(RSYNC_ENABLE_XATTRS    "Support extended attributes"     ON)
 option(RSYNC_ENABLE_OPENSSL   "Use OpenSSL for MD4/MD5"         OFF)
 option(RSYNC_ENABLE_ZSTD      "Support zstd compression"        OFF)
 option(RSYNC_ENABLE_LZ4       "Support LZ4 compression"         OFF)
-option(RSYNC_ENABLE_XXHASH    "Support xxhash checksums"        OFF)
+option(RSYNC_ENABLE_XXHASH    "Support xxhash checksums"        ON)
 option(RSYNC_ENABLE_ICONV     "Support --iconv character conversion" OFF)
 option(RSYNC_ENABLE_SIMD      "Use SIMD/asm checksum acceleration" OFF)
 option(RSYNC_EXTERNAL_ZLIB    "Link the system zlib instead of the bundled copy" OFF)
+option(RSYNC_EXTERNAL_XXHASH  "Link the system xxhash instead of the bundled copy" OFF)
 option(RSYNC_STATIC_CRT       "Link the C runtime statically (MSVC only)" ON)
 option(RSYNC_HARDEN           "Enable exploit mitigations (MSVC only)" ON)
 option(RSYNC_STRICT_MITIGATIONS
@@ -710,11 +711,19 @@ if(RSYNC_ENABLE_LZ4)
     list(APPEND RSYNC_EXTRA_LIBS ${LZ4_LIBRARY})
 endif()
 
+# xxhash gives rsync its xxh64/xxh3/xxh128 checksums.  They matter more than
+# an optional extra sounds: the two ends negotiate the best checksum they both
+# know, so a build without xxhash drags the whole transfer down to MD5, which
+# is the slowest choice on the list and costs about half a core per 2.5Gbit of
+# traffic.  The copy in xxhash/ is upstream v0.8.3, bundled like zlib and popt
+# so that a platform with no package manager still gets it.
 if(RSYNC_ENABLE_XXHASH)
-    find_library(XXHASH_LIBRARY xxhash REQUIRED)
     set(SUPPORT_XXHASH 1)
     set(SUPPORT_XXH3 1)
-    list(APPEND RSYNC_EXTRA_LIBS ${XXHASH_LIBRARY})
+    if(RSYNC_EXTERNAL_XXHASH)
+        find_library(XXHASH_LIBRARY xxhash REQUIRED)
+        list(APPEND RSYNC_EXTRA_LIBS ${XXHASH_LIBRARY})
+    endif()
 endif()
 
 if(RSYNC_ENABLE_ICONV AND HAVE_ICONV_H)
@@ -804,6 +813,8 @@ set(ZLIB_SOURCES
     zlib/deflate.c zlib/inffast.c zlib/inflate.c zlib/inftrees.c
     zlib/trees.c zlib/zutil.c zlib/adler32.c zlib/compress.c zlib/crc32.c)
 
+set(XXHASH_SOURCES xxhash/xxhash.c)
+
 # pipe.c and win32/win32pipe.c are alternative implementations of the same
 # interface (process plumbing + the generator/receiver split), so exactly
 # one of them is linked.
@@ -816,6 +827,9 @@ endif()
 set(RSYNC_ALL_SOURCES ${RSYNC_SOURCES} ${RSYNC_LIB_SOURCES} ${POPT_SOURCES})
 if(NOT RSYNC_EXTERNAL_ZLIB)
     list(APPEND RSYNC_ALL_SOURCES ${ZLIB_SOURCES})
+endif()
+if(RSYNC_ENABLE_XXHASH AND NOT RSYNC_EXTERNAL_XXHASH)
+    list(APPEND RSYNC_ALL_SOURCES ${XXHASH_SOURCES})
 endif()
 
 if(WIN32)
@@ -850,6 +864,9 @@ target_include_directories(rsync PRIVATE
 
 if(NOT RSYNC_EXTERNAL_ZLIB)
     target_include_directories(rsync PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/zlib")
+endif()
+if(RSYNC_ENABLE_XXHASH AND NOT RSYNC_EXTERNAL_XXHASH)
+    target_include_directories(rsync PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/xxhash")
 endif()
 
 # popt/system.h (and others) only pull in config.h when this is set; the

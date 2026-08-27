@@ -27,10 +27,11 @@ against real `awk` on a Linux host.
 | `RSYNC_ENABLE_OPENSSL` | `OFF` | Use OpenSSL for MD4/MD5 |
 | `RSYNC_ENABLE_ZSTD` | `OFF` | zstd compression |
 | `RSYNC_ENABLE_LZ4` | `OFF` | LZ4 compression |
-| `RSYNC_ENABLE_XXHASH` | `OFF` | xxhash checksums |
+| `RSYNC_ENABLE_XXHASH` | `ON` | xxh64/xxh3/xxh128 checksums (bundled copy) |
 | `RSYNC_ENABLE_ICONV` | `OFF` | `--iconv` character conversion |
 | `RSYNC_ENABLE_SIMD` | `OFF` | SIMD/asm checksum acceleration (x86-64) |
 | `RSYNC_EXTERNAL_ZLIB` | `OFF` | Link system zlib instead of the bundled copy |
+| `RSYNC_EXTERNAL_XXHASH` | `OFF` | Link system xxhash instead of the bundled copy |
 | `RSYNC_STATIC_CRT` | `ON` | Link the C runtime statically (MSVC only; see below) |
 | `RSYNC_HARDEN` | `ON` | Exploit mitigations: CFG, CET, strict `/GS`, Spectre (MSVC only) |
 | `RSYNC_STRICT_MITIGATIONS` | `OFF` | Also ACG, CIG and strict handle checks (see below) |
