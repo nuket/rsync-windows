@@ -291,8 +291,13 @@ try {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
         # Download and unpack beside the targets, not over them: an interrupted
-        # transfer must not leave a truncated rsync.exe sitting on the machine PATH.
-        $tmp = Join-Path $InstallDir "$asset.download"
+        # transfer must not leave a truncated rsync.exe sitting on the machine
+        # PATH. The scratch name still has to END in .zip: Windows PowerShell
+        # 5.1's Expand-Archive refuses any other extension outright ("*.download
+        # is not a supported archive file format"), where PowerShell 7 just
+        # reads the file -- and 5.1 is what the UAC relaunch above falls back to
+        # on a box with no pwsh installed.
+        $tmp = Join-Path $InstallDir "download-$asset"
         Invoke-WebRequest -Uri $exeUrl -OutFile $tmp -UseBasicParsing
         Write-Info "downloaded $asset ($([math]::Round((Get-Item $tmp).Length / 1MB, 2)) MB)"
 
