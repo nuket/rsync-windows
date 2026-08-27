@@ -13939,3 +13939,143 @@ limit. 2.5GbE runs at 39x the original rate.
 A full 2.3GB tree now copies in 8.3 seconds at 271 MB/s, and every file in it compares
 byte-for-byte by SHA-256 against the source. The test suite passes 24/24 on both x64 and
 x86, including the ssh transfer tests.
+
+## Fable 5 Correctness Check
+
+```
+● Reviewed all three diffs (win32io.c in full, the CMake/xxhash changes, the doc) and traced how
+  the pump interacts with the thread-based generator/receiver split, close_sibling_fd, dup2,
+  and the ssh child plumbing. Findings, most serious first:
+
+  1. pump_stop() can free a pump its thread is still using — win32/win32io.c:282-292
+
+  InterlockedExchange(&p->stop, 1);
+  SetEvent(p->room_evt);
+  CancelIoEx(p->h, NULL);
+  WaitForSingleObject(p->thread, 2000);
+  /* ...then unconditionally: */
+  DeleteCriticalSection(&p->lock); free(p->ring); free(p);
+
+  CancelIoEx only cancels a ReadFile that is already in flight. If the pump thread is between
+  its while (!p->stop) check and the ReadFile call (a window of a few instructions), the cancel
+  finds nothing, the read then blocks until the peer writes or closes, the 2 s join times out,
+  and pump_stop frees p anyway. When bytes finally arrive the thread writes into the freed ring
+  and enters a deleted critical section.
+
+  The window is tiny and pump_stop is rarely reached in practice — close_sibling_fd is ((void)0)
+  on Windows (win32/win32compat.h:106), so the generator never closes the receiver's f_in, and
+  the transfer fds normally live until process exit — but it is a real use-after-free on the
+  close path (clientserver.c:976, error pipes, local-child pipes). Fix: retry the cancel while
+  waiting, and on final timeout leak p rather than free it:
+
+  while (WaitForSingleObject(p->thread, 50) == WAIT_TIMEOUT) {
+        if (++tries > 40) { CloseHandle(p->thread); return; }  /* leak, never UAF */
+        CancelIoEx(p->h, NULL);
+  }
+
+  2. Stale GetLastError() on a zero-byte successful read — win32io.c:194-196
+
+  if (!ReadFile(p->h, chunk, want, &got, NULL) || got == 0) {
+        p->err = got ? 0 : GetLastError();
+
+  When ReadFile succeeds with got == 0, got ? 0 : ... still evaluates GetLastError(), which is
+  whatever the previous API call left behind. If it happens to be non-zero and not one of the
+  three EOF codes, pump_read returns -1/EIO instead of 0 (EOF). Should be keyed on the ReadFile
+  return value: BOOL ok = ReadFile(...); p->err = ok ? 0 : GetLastError();. Practically hard to
+  hit (byte-mode PIPE_WAIT reads only return 0 bytes on a zero-length write from the peer), but
+  the expression is wrong as written.
+
+  3. pump_read() with count == 0 blocks — win32io.c:296-338
+
+  POSIX read(fd, buf, 0) returns 0 immediately; the pump path falls through to
+  WaitForSingleObject(data_evt, INFINITE) on an empty ring. rsync's perform_io (io.c:882-890)
+  only polls when the buffer has room, so nothing reaches this today — but a one-line if
+  (!count) return 0; guard removes the divergence.
+
+  4. Latent: dup/dup2 don't know about pumps — win32io.c:446-462
+
+  _dup2(old, new) silently closes new's handle; a pump on new would keep reading a dead handle
+  while pumps[new] still claims the fd. _dup(fd) of a pumped fd yields a second handle to the
+  same pipe whose direct reads would race the pump thread. Neither is reachable now (the only
+  dup2 callers, clientserver.c:580/584, are on the pre-xfer-exec fork path), so this is a note
+  for the next person rather than a bug — win32_dup2 should pump_stop(newfd) first.
+
+  What I checked and found correct
+
+  - Ring index arithmetic and both wrap-around copies; want ≤ space stays true across the
+    unlocked ReadFile because only the consumer shrinks len.
+  - No lost wake-ups: ResetEvent(room_evt)/SetEvent(room_evt) and
+    ResetEvent(data_evt)/SetEvent(data_evt) are all under the lock, so the wait-after-reset
+    pattern is race-free.
+  - Two threads (generator + receiver) touch pumps[] and fd_nonblock[] unsynchronised, but only
+    ever at distinct indices (f_in vs error_pipe[0]), and the generator never reads f_in after
+    the split (iobuf.in_fd is replaced with the error pipe, main.c:1128).
+  - F_SETFL ordering: set_nonblocking(f_in) runs before the first select, putting the pipe in
+    PIPE_NOWAIT; pump_for restores PIPE_WAIT and pump_read honours the recorded flag. Consistent
+    either way.
+  - Timeout arithmetic in the pump wait path, MAXIMUM_WAIT_OBJECTS overflow → fall through,
+    WAIT_FAILED → EIO.
+  - CMake: SUPPORT_XXHASH/SUPPORT_XXH3 reach config.h via cmake/config.h.in:239-240; bundled
+    sources and include dir are gated identically; xxhash.h is pristine v0.8.3 (XXH_VERSION_* at
+    xxhash.h:548-550); xxhash.c is the upstream wrapper. The #define SUPPORT_XXH3 1
+    re-definition in checksum.c:34 is an identical redefinition, legal and warning-free.
+  - Doc numbers are internally consistent with the commit messages (39× = 273.9/7; 95% =
+    112.5/118).
+
+  Nothing here affects the measured results or the passing tests; #1 is the only one I'd fix
+  before this ships anywhere, #2 and #3 are two-line hardening. Say the word and I'll apply all
+  three and rerun the suite.
+
+✻ Churned for 5m 17s
+
+❯ fix all three, rerun the tests, and commit; also when you say the transfer fds normally live
+  until process exit is that a possible source of a denial of service somehow by someone
+  maliciously exhausting fds?
+
+● Done. All three fixes are committed as ddc5bd57, tests are green on both architectures, and
+  the installed binary is refreshed.
+
+  What changed (win32/win32io.c)
+
+  - pump_stop() now loops CancelIoEx() + 50 ms join until the thread has really exited; if it
+    still hasn't after 2 s it leaks the pump instead of freeing it. The use-after-free window is
+    gone.
+  - EOF error code is keyed on ReadFile()'s return value, so a successful zero-byte read reports
+    EOF, not a stale GetLastError().
+  - pump_read() with count == 0 returns 0 immediately, as POSIX read() does.
+
+  Full windows-build-and-test.bat --host max@192.168.178.150: 24 passed on x64 and 24 passed on
+  x86, ssh transfer tests included, no warnings. C:\tools\rsync\rsync.exe is the new build (its
+  --version still says g0bdaf485 because it was compiled before the commit existed; the code is
+  the fixed code).
+
+  WINDOWS-PORT.md has 93 lines of your own uncommitted edits — I left those and PERF.txt alone.
+
+  On the DoS question
+
+  No — "the transfer fds live until process exit" isn't an exhaustion vector, for three reasons:
+
+  1. The peer can't make rsync open fds. A pump is created only for a pipe fd that rsync itself
+     put into a read set. On Windows that's a fixed handful per process: f_in from ssh (or the
+     local child), the generator↔receiver error pipe, and stdin when rsync runs as --server
+     under sshd. Nothing in the protocol lets the remote side add to that set — it sends bytes,
+     not handles. So a process holds at most 2–3 pumps (≈1 MB ring + a thread each), for its
+     whole life, regardless of what the peer does.
+  2. There is no long-lived listener to exhaust. Daemon mode (--daemon, rsync://) is not built
+     on Windows — fork() maps to win32_no_fork() returning ENOSYS (win32/win32compat.h:543,
+     listed as unsupported in BUILD-CMAKE.md:291). The only network-facing shape is
+     rsync-over-ssh, where sshd spawns one short-lived rsync.exe per session. An attacker who
+     wants to hold N processes open has to authenticate to sshd N times; that's sshd's
+     MaxSessions/MaxStartups territory and was true before these commits.
+  3. The read-ahead is bounded. The worst a malicious peer can do with the pump specifically is
+     push 1 MB into the ring and stop; the pump then blocks on room_evt and the connection sits
+     there until rsync's --timeout fires — same as an idle connection did before, plus one
+     megabyte.
+
+  The one thing the pump does add is a thread per pumped pipe, but that's 2–3 per process, not
+  per peer action. If a Windows daemon mode is ever added, the per-connection cost would need
+  re-examining — but that's a hypothetical that also brings fork(), chroot(), and everything
+  else the daemon needs.
+
+✻ Baked for 37s
+```
