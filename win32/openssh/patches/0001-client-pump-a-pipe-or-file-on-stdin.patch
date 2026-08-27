@@ -1,0 +1,281 @@
+diff --git a/contrib/win32/win32compat/termio.c b/contrib/win32/win32compat/termio.c
+index 4d3c783..ea0bf28 100644
+--- a/contrib/win32/win32compat/termio.c
++++ b/contrib/win32/win32compat/termio.c
+@@ -49,6 +49,228 @@
+ #include "misc_internal.h"
+ 
+ extern int in_raw_mode;
++
++/*
++ * A pipe or a file on a sync fd is bulk data, and the console's way of
++ * reading it -- a thread per read, TERM_IO_BUF_SIZE (3KB) at a time, an APC
++ * and a thread join to collect each one -- is what held an upload from
++ * ssh.exe at 17MB/s on a 2.5Gbit link: a bulk transfer runs lockstepped on
++ * the peer's 98KB window adjusts, and each adjust cost 33 thread round
++ * trips before the next 98KB could go out.
++ *
++ * So a pipe or file gets a pump instead: one thread for the fd's lifetime,
++ * reading in large pieces into a ring, from which read() is served.  The
++ * main thread learns of new bytes through the same APC channel the console
++ * path uses, but only when it is actually waiting for some.  The console
++ * keeps the thread-per-read path: its reads are keystrokes, and raw-mode
++ * console reads need the per-thread interrupt below.
++ */
++#define SYNC_IO_BULK_BUF_SIZE (256 * 1024)   /* read_details.buf for a pumped fd */
++#define SYNC_PUMP_RING_SIZE   (1024 * 1024)
++#define SYNC_PUMP_CHUNK       (256 * 1024)
++
++struct sync_pump {
++	HANDLE h;                 /* the pipe or file being read */
++	HANDLE thread;
++	HANDLE room_evt;          /* auto-reset: the ring has room again */
++	CRITICAL_SECTION lock;
++	char  *ring;
++	DWORD  head, len;         /* head: next byte out */
++	BOOL   eof;               /* the source is done; err says how */
++	DWORD  err;
++	BOOL   apc_queued;        /* a wake-up is already on its way to main_thread */
++	volatile LONG stop;
++	struct w32_io *pio;       /* NULL once the fd is gone and the thread outlived it */
++};
++
++static BOOL
++sync_pump_wanted(struct w32_io* pio)
++{
++	DWORD t = FILETYPE(pio);
++	return t == FILE_TYPE_PIPE || t == FILE_TYPE_DISK;
++}
++
++/* Hand the read buffer what the ring holds.  Lock held.  TRUE if the fd now
++ * has something for read(): bytes, or the end of the source. */
++static BOOL
++sync_pump_deliver_locked(struct sync_pump* p)
++{
++	struct w32_io* pio = p->pio;
++
++	if (p->len) {
++		DWORD n = min(p->len, pio->read_details.buf_size);
++		DWORD first = min(n, SYNC_PUMP_RING_SIZE - p->head);
++
++		memcpy(pio->read_details.buf, p->ring + p->head, first);
++		if (n > first)
++			memcpy(pio->read_details.buf + first, p->ring, n - first);
++		p->head = (p->head + n) % SYNC_PUMP_RING_SIZE;
++		p->len -= n;
++		pio->read_details.remaining = n;
++		pio->read_details.completed = 0;
++		pio->read_details.error = 0;
++		pio->read_details.pending = FALSE;
++		SetEvent(p->room_evt);
++		return TRUE;
++	}
++	if (p->eof) {
++		pio->read_details.remaining = 0;
++		pio->read_details.completed = 0;
++		pio->read_details.error = p->err;
++		pio->read_details.pending = FALSE;
++		return TRUE;
++	}
++	return FALSE;
++}
++
++/* On main_thread: the pump has something and read() was waiting for it. */
++static VOID CALLBACK
++SyncPumpAPCProc(_In_ ULONG_PTR dwParam)
++{
++	struct sync_pump* p = (struct sync_pump*)dwParam;
++
++	EnterCriticalSection(&p->lock);
++	p->apc_queued = FALSE;
++	if (p->pio && p->pio->read_details.pending)
++		sync_pump_deliver_locked(p);
++	LeaveCriticalSection(&p->lock);
++}
++
++static unsigned __stdcall
++SyncPumpThread(_In_ LPVOID lpParameter)
++{
++	struct sync_pump* p = (struct sync_pump*)lpParameter;
++	char* chunk = malloc(SYNC_PUMP_CHUNK);
++
++	debug5("SyncPump thread, pump:%p", p);
++	if (!chunk)
++		return 1;
++
++	while (!p->stop) {
++		DWORD space, want, got = 0, err = 0;
++		BOOL ok, wake;
++
++		EnterCriticalSection(&p->lock);
++		space = SYNC_PUMP_RING_SIZE - p->len;
++		LeaveCriticalSection(&p->lock);
++		if (!space) {
++			/* timed, so a stop is noticed even if nobody reads */
++			WaitForSingleObject(p->room_evt, 200);
++			continue;
++		}
++
++		want = min(space, SYNC_PUMP_CHUNK);
++		ok = ReadFile(p->h, chunk, want, &got, NULL);
++		if (!ok || got == 0) {
++			err = ok ? ERROR_HANDLE_EOF : GetLastError();
++			if (!err)
++				err = ERROR_HANDLE_EOF;
++		}
++
++		EnterCriticalSection(&p->lock);
++		if (err) {
++			p->eof = TRUE;
++			p->err = err;
++		} else {
++			DWORD tail = (p->head + p->len) % SYNC_PUMP_RING_SIZE;
++			DWORD first = min(got, SYNC_PUMP_RING_SIZE - tail);
++
++			memcpy(p->ring + tail, chunk, first);
++			if (got > first)
++				memcpy(p->ring, chunk + first, got - first);
++			p->len += got;
++		}
++		/* wake the main thread only if read() is waiting and no wake-up
++		 * is already queued: an APC per chunk would be noise */
++		wake = p->pio && p->pio->read_details.pending && !p->apc_queued;
++		if (wake)
++			p->apc_queued = TRUE;
++		LeaveCriticalSection(&p->lock);
++
++		if (wake && !QueueUserAPC(SyncPumpAPCProc, main_thread, (ULONG_PTR)p)) {
++			EnterCriticalSection(&p->lock);
++			p->apc_queued = FALSE;
++			LeaveCriticalSection(&p->lock);
++		}
++		if (err)
++			break;
++	}
++
++	free(chunk);
++	return 0;
++}
++
++static struct sync_pump*
++sync_pump_start(struct w32_io* pio)
++{
++	struct sync_pump* p = calloc(1, sizeof *p);
++
++	if (!p)
++		goto fail;
++	if (!(p->ring = malloc(SYNC_PUMP_RING_SIZE)))
++		goto fail;
++	if (!(p->room_evt = CreateEventW(NULL, FALSE, FALSE, NULL)))
++		goto fail;
++	InitializeCriticalSection(&p->lock);
++	p->h = WINHANDLE(pio);
++	p->pio = pio;
++	p->thread = (HANDLE)_beginthreadex(NULL, 0, SyncPumpThread, p, 0, NULL);
++	if (!p->thread) {
++		DeleteCriticalSection(&p->lock);
++		goto fail;
++	}
++	pio->internal.context = p;
++	debug4("sync pump started for io:%p", pio);
++	return p;
++
++fail:
++	errno = errno_from_Win32LastError();
++	if (p) {
++		if (p->room_evt)
++			CloseHandle(p->room_evt);
++		free(p->ring);
++		free(p);
++	}
++	return NULL;
++}
++
++/* Stop the pump on close.  The thread may be blocked in ReadFile on a source
++ * that never delivers; cancel it and give it a moment, and if it still will
++ * not go, cut it loose rather than free memory under it. */
++static void
++sync_pump_stop(struct w32_io* pio)
++{
++	struct sync_pump* p = (struct sync_pump*)pio->internal.context;
++	int tries;
++
++	if (!p)
++		return;
++	pio->internal.context = NULL;
++
++	InterlockedExchange(&p->stop, 1);
++	SetEvent(p->room_evt);
++	for (tries = 0; ; tries++) {
++		CancelIoEx(p->h, NULL);
++		if (WaitForSingleObject(p->thread, 50) != WAIT_TIMEOUT)
++			break;
++		if (tries >= 20) {
++			debug3("sync pump for io:%p would not stop; leaking it", pio);
++			EnterCriticalSection(&p->lock);
++			p->pio = NULL;
++			LeaveCriticalSection(&p->lock);
++			CloseHandle(p->thread);
++			/* drain a wake-up it may have queued for the fd going away */
++			SleepEx(0, TRUE);
++			return;
++		}
++	}
++	SleepEx(0, TRUE);
++	CloseHandle(p->thread);
++	CloseHandle(p->room_evt);
++	DeleteCriticalSection(&p->lock);
++	free(p->ring);
++	free(p);
++}
+ BOOL isFirstTime = TRUE;
+ 
+ /* APC that gets queued on main thread when a sync Read completes on worker thread */
+@@ -150,12 +372,33 @@ syncio_initiate_read(struct w32_io* pio)
+ 
+ 	debug5("syncio_initiate_read io:%p", pio);
+ 	if (pio->read_details.buf_size == 0) {
+-		pio->read_details.buf = malloc(TERM_IO_BUF_SIZE);
++		/*
++		 * TERM_IO_BUF_SIZE (3KB) is sized for a console, where a read is a
++		 * few keystrokes.  A pipe or a file on stdin is bulk data, and each
++		 * read here costs a thread: read 3KB at a time, that came to 33
++		 * thread round trips per 98KB channel window and held an upload
++		 * from ssh.exe at 17MB/s on a 2.5Gbit link.  Read those in big
++		 * pieces instead.
++		 */
++		DWORD size = (FILETYPE(pio) == FILE_TYPE_CHAR) ? TERM_IO_BUF_SIZE : SYNC_IO_BULK_BUF_SIZE;
++		pio->read_details.buf = malloc(size);
+ 		if (pio->read_details.buf == NULL) {
+ 			errno = ENOMEM;
+ 			return -1;
+ 		}
+-		pio->read_details.buf_size = TERM_IO_BUF_SIZE;
++		pio->read_details.buf_size = size;
++	}
++
++	if (sync_pump_wanted(pio)) {
++		struct sync_pump* p = (struct sync_pump*)pio->internal.context;
++
++		if (!p && !(p = sync_pump_start(pio)))
++			return -1;
++		EnterCriticalSection(&p->lock);
++		if (!sync_pump_deliver_locked(p))
++			pio->read_details.pending = TRUE;   /* the pump will wake us */
++		LeaveCriticalSection(&p->lock);
++		return 0;
+ 	}
+ 
+ 	read_thread = (HANDLE) _beginthreadex(NULL, 0, ReadThread, pio, 0, NULL);
+@@ -277,6 +520,11 @@ syncio_close(struct w32_io* pio)
+ 		SleepEx(0, TRUE);
+ 	}
+ 
++	if (pio->internal.context) {
++		sync_pump_stop(pio);
++		pio->read_details.pending = FALSE;
++	}
++
+ 	CancelIoEx(WINHANDLE(pio), NULL);
+ 
+ 	/* If io is pending, let worker threads exit. */

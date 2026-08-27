@@ -1,0 +1,6 @@
+[submodule "openssh"]
+	path = openssh
+	url = https://github.com/PowerShell/openssh-portable
+	branch = latestw_all
+	ignore = dirty
+	shallow = true

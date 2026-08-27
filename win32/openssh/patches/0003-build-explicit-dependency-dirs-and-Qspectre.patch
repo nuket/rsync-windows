@@ -1,0 +1,114 @@
+diff --git a/contrib/win32/openssh/Directory.Build.props b/contrib/win32/openssh/Directory.Build.props
+new file mode 100644
+index 0000000..c0898c7
+--- /dev/null
++++ b/contrib/win32/openssh/Directory.Build.props
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Picked up by every vcxproj in this directory.  The projects already
++     carry CFG, CET, /sdl, a static CRT and LTCG; this adds the speculative-
++     execution mitigation, so ssh.exe matches the rsync.exe it ships with. -->
++<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
++  <ItemDefinitionGroup>
++    <ClCompile>
++      <AdditionalOptions>/Qspectre %(AdditionalOptions)</AdditionalOptions>
++    </ClCompile>
++  </ItemDefinitionGroup>
++</Project>
+diff --git a/contrib/win32/openssh/config.h.vs b/contrib/win32/openssh/config.h.vs
+index 3a19ea0..0acd48d 100644
+--- a/contrib/win32/openssh/config.h.vs
++++ b/contrib/win32/openssh/config.h.vs
+@@ -1765,6 +1765,10 @@
+ #define HAVE_RSA_METH_SET_PRIV_DEC 1
+ #define HAVE_RSA_METH_SET_FINISH 1
+ #define HAVE_EVP_PKEY_GET0_RSA 1
++/* LibreSSL has both; without these openbsd-compat supplies its own and a
++   static libcrypto.lib then defines them twice (a DLL import never did). */
++#define HAVE_EVP_DIGESTSIGN 1
++#define HAVE_EVP_DIGESTVERIFY 1
+ #define HAVE_EVP_MD_CTX_NEW 1
+ #define HAVE_EVP_MD_CTX_FREE 1
+ 
+diff --git a/contrib/win32/openssh/openbsd_compat.vcxproj b/contrib/win32/openssh/openbsd_compat.vcxproj
+index 0f5ba02..387e7ff 100644
+--- a/contrib/win32/openssh/openbsd_compat.vcxproj
++++ b/contrib/win32/openssh/openbsd_compat.vcxproj
+@@ -1,4 +1,4 @@
+-﻿<?xml version="1.0" encoding="utf-8"?>
++<?xml version="1.0" encoding="utf-8"?>
+ <Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <Import Project="paths.targets" />
+   <ItemGroup Label="ProjectConfigurations">
+@@ -294,7 +294,7 @@
+       <Optimization>Disabled</Optimization>
+       <PreprocessorDefinitions>_CRT_DECLARE_NONSTDC_NAMES=0;_WIN32_WINNT=0x601;WIN32;_DEBUG;_LIB;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>false</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir);$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+       <ControlFlowGuard>Guard</ControlFlowGuard>
+@@ -312,7 +312,7 @@
+       <Optimization>Disabled</Optimization>
+       <PreprocessorDefinitions>_CRT_DECLARE_NONSTDC_NAMES=0;_WIN32_WINNT=0x601;WIN32;_DEBUG;_LIB;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>false</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir);$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+       <ControlFlowGuard>Guard</ControlFlowGuard>
+@@ -330,7 +330,7 @@
+       <Optimization>Disabled</Optimization>
+       <PreprocessorDefinitions>_CRT_DECLARE_NONSTDC_NAMES=0;_WIN32_WINNT=0x601;WIN32;_DEBUG;_LIB;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>false</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir);$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+       <ControlFlowGuard>Guard</ControlFlowGuard>
+@@ -351,7 +351,7 @@
+       <Optimization>Disabled</Optimization>
+       <PreprocessorDefinitions>_CRT_DECLARE_NONSTDC_NAMES=0;_WIN32_WINNT=0x601;WIN32;_DEBUG;_LIB;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>false</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir);$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+       <ControlFlowGuard>Guard</ControlFlowGuard>
+@@ -374,7 +374,7 @@
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+       <PreprocessorDefinitions>_CRT_DECLARE_NONSTDC_NAMES=0;_LIB;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WIN32_WINNT=0x601;WIN32;NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>false</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir);$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+       <ControlFlowGuard>Guard</ControlFlowGuard>
+       <AdditionalOptions>/Gy /ZH:SHA_256 %(AdditionalOptions)</AdditionalOptions>
+@@ -395,7 +395,7 @@
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+       <PreprocessorDefinitions>_CRT_DECLARE_NONSTDC_NAMES=0;_LIB;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WIN32_WINNT=0x601;WIN32;NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>false</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir);$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+       <WholeProgramOptimization>true</WholeProgramOptimization>
+       <ControlFlowGuard>Guard</ControlFlowGuard>
+@@ -417,7 +417,7 @@
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+       <PreprocessorDefinitions>_CRT_DECLARE_NONSTDC_NAMES=0;_LIB;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WIN32_WINNT=0x601;WIN32;NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>false</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir);$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+       <WholeProgramOptimization>true</WholeProgramOptimization>
+       <ControlFlowGuard>Guard</ControlFlowGuard>
+@@ -442,7 +442,7 @@
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+       <PreprocessorDefinitions>_CRT_DECLARE_NONSTDC_NAMES=0;_LIB;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_WIN32_WINNT=0x601;WIN32;NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>false</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir);$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(OpenSSH-Src-Path)contrib\win32\win32compat;$(OpenSSH-Src-Path);$(OpenSSH-Src-Path)openbsd-compat;$(OpenSSH-Src-Path)libkrb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+       <WholeProgramOptimization>true</WholeProgramOptimization>
+       <ControlFlowGuard>Guard</ControlFlowGuard>

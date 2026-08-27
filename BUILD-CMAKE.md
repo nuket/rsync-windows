@@ -113,6 +113,54 @@ runtime. Note that mixing the two in a single process is the thing to avoid —
 each CRT has its own heap and its own fd table — but rsync links no C libraries
 outside its own tree, so there is nothing here to mix with.
 
+### The ssh.exe that ships with it
+
+rsync runs its remote end through an ssh client, and on Windows that is
+Microsoft's Win32-OpenSSH. Its client reads a pipe on stdin 3 KB at a time
+with a thread per read (`TERM_IO_BUF_SIZE`, sized for a console), which holds a
+transfer *from* a Windows machine at about 17 MB/s regardless of the link —
+the receive direction is unaffected. The release therefore carries its own
+`ssh.exe`, built from the same source with that fixed, and `rsync.exe` prefers
+an `ssh.exe` in its own directory over the one on `PATH` (a remote shell given
+with a path is used as given).
+
+The source is the `openssh/` submodule, Win32-OpenSSH pinned to a commit, plus
+the patches in `win32/openssh/patches/`, which is where the fix lives. To build
+it:
+
+    git submodule update --init --depth 1 openssh
+    .\win32\openssh\build-openssh.ps1 -Arch both
+
+The script applies the patches once, fetches the prebuilt LibreSSL 3.8.2 and
+zlib SDKs Microsoft publishes for Win32-OpenSSH (pinned by SHA-256), runs
+MSBuild on the OpenSSH projects, and leaves `build\ssh.exe` beside
+`rsync.exe` — which means the ssh transfer tests, run with `--host`, exercise
+the bundled client — and `build-x86\ssh-x86.exe`. Both carry the same
+mitigations as rsync.exe (CFG, CET, `/sdl`, `/Qspectre`; see below) and a
+static CRT, with zlib linked in.
+
+LibreSSL is *not* linked in. `ssh.exe` loads the `libcrypto.dll` that the
+Windows **OpenSSH Client** component installs in `System32` — Windows' own
+build of LibreSSL 3.8.2, the same version the SDK provides headers for. Two
+reasons. Windows' build uses AES-NI and runs AES at 5 GB/s on this machine,
+where LibreSSL 4.2 built from source with Microsoft's vcpkg port ran it in
+software at 140 MB/s (its CPU-feature probe is a GCC constructor that MSVC
+compiles away). And rsync.exe's `PreferSystem32Images` hardening
+(`win32/win32harden.c`) is inherited by the `ssh.exe` it starts, so under
+rsync that process takes the System32 copy whatever sits beside it. So no
+DLL ships; the requirement is the OpenSSH Client component at 9.5 or later,
+which `setup-windows-rsync.ps1` installs and checks. The 32-bit build is for
+32-bit Windows, whose System32 holds a 32-bit `libcrypto.dll`; 64-bit
+Windows has none, and that case is not supported.
+
+What is distributed, and under what: OpenSSH and its openbsd-compat code
+(the BSD and ISC licences in its `LICENCE`), Microsoft's Win32 compatibility
+layer (BSD, in the file headers), and zlib (the zlib licence). All permit
+static linking and redistribution with the notices retained, and the script
+writes every text into `NOTICE-ssh.txt` beside the binary, which the release
+attaches. Nothing here is GPL, and nothing here is linked with rsync — the two
+are separate programs in one directory, so rsync's GPL is not engaged.
+
 ### Hardening
 
 rsync parses input it does not control — a file list, a checksum stream and a

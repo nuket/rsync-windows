@@ -297,6 +297,67 @@ try {
         Write-Ok "installed $target"
     }
 
+    # --- ssh.exe beside it ----------------------------------------------------
+    # The release carries its own build of Microsoft's OpenSSH client: the one
+    # Windows ships reads its stdin 3KB at a time, which holds a transfer
+    # *from* this machine at ~17MB/s whatever the link. rsync.exe prefers an
+    # ssh.exe in its own directory, so this is all it takes. Same ~/.ssh, same
+    # ssh-agent, same known_hosts as the system one; nothing else changes.
+    # The release's ssh.exe loads the libcrypto.dll that the OpenSSH Client
+    # component (step 1) puts in System32: Windows' own LibreSSL, and the fast
+    # one. It is built against the 3.8.2 that OpenSSH Client 9.5 carries, so
+    # an older Windows gets a warning rather than a binary that will not start.
+    $sshAsset  = if ([Environment]::Is64BitOperatingSystem) { 'ssh.exe' } else { 'ssh-x86.exe' }
+    $sshTarget = Join-Path $InstallDir 'ssh.exe'
+    if ($release) {
+        $sshUrl = ($release.assets | Where-Object { $_.name -eq $sshAsset          }).browser_download_url
+        $sshSha = ($release.assets | Where-Object { $_.name -eq "$sshAsset.sha256" }).browser_download_url
+    } else {
+        $sshUrl = "$prefix/$sshAsset"
+        $sshSha = "$prefix/$sshAsset.sha256"
+    }
+    $sysCrypto = Join-Path $env:SystemRoot 'System32\libcrypto.dll'
+    if (-not (Test-Path $sysCrypto)) {
+        Write-Warning "$sysCrypto is missing -- the OpenSSH Client component is not installed -- and the release's ssh.exe needs it. Skipping ssh.exe; rsync will use the ssh on PATH."
+        $sshUrl = $null
+    } else {
+        $v = (Get-Item $sysCrypto).VersionInfo.FileVersion
+        if ($v -and ([version]($v -replace '[^0-9.]', '')) -lt [version]'3.8.2') {
+            Write-Warning "$sysCrypto is LibreSSL $v; the release's ssh.exe is built against 3.8.2 (Windows OpenSSH Client 9.5). Update Windows, or expect ssh.exe not to start."
+        }
+    }
+    if (-not $sshUrl) {
+        if (Test-Path $sysCrypto) { Write-Info "release $resolved carries no $sshAsset; rsync will use the ssh on PATH" }
+    } else {
+        # ssh.exe carries no port version, so "already current" is a hash
+        # comparison against the published .sha256 -- which is tiny.
+        $want = $null
+        try {
+            $shaTmp = "$sshTarget.sha256.download"
+            Invoke-WebRequest -Uri $sshSha -OutFile $shaTmp -UseBasicParsing
+            $want = (((Get-Content $shaTmp -Raw) -split '\s+')[0]).Trim().ToLower()
+            Remove-Item $shaTmp -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Warning "no checksum for ${sshAsset}: $($_.Exception.Message)"
+        }
+        $have = if (Test-Path $sshTarget) { (Get-FileHash $sshTarget -Algorithm SHA256).Hash.ToLower() } else { $null }
+        if ($want -and $have -eq $want) {
+            Write-Ok "already current: $sshTarget"
+        } else {
+            $tmp = "$sshTarget.download"
+            Invoke-WebRequest -Uri $sshUrl -OutFile $tmp -UseBasicParsing
+            Write-Info "downloaded $sshAsset ($([math]::Round((Get-Item $tmp).Length / 1MB, 2)) MB)"
+            $got = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower()
+            if ($want -and $want -ne $got) {
+                Remove-Item $tmp -Force
+                throw "SHA-256 mismatch for ${sshAsset}: expected $want, got $got"
+            }
+            if ($want) { Write-Ok "SHA-256 verified: $got" }
+            Move-Item -Path $tmp -Destination $sshTarget -Force
+            Write-Ok "installed $sshTarget"
+        }
+    }
+
     # --- Machine PATH ---------------------------------------------------------
     # MACHINE, not user: the remote end of an rsync runs non-interactively with
     # no login shell, and Win32-OpenSSH builds that session's environment from

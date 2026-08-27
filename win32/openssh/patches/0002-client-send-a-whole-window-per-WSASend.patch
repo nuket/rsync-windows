@@ -1,0 +1,19 @@
+diff --git a/contrib/win32/win32compat/socketio.c b/contrib/win32/win32compat/socketio.c
+index c4eceae..33f5d68 100644
+--- a/contrib/win32/win32compat/socketio.c
++++ b/contrib/win32/win32compat/socketio.c
+@@ -39,7 +39,13 @@
+ #include "misc_internal.h"
+ #include "debug.h"
+ 
+-#define INTERNAL_SEND_BUFFER_SIZE 70*1024 //70KB
++/*
++ * One WSASend is in flight at a time, and send() hands over at most this much
++ * per call; the rest waits for a select() round.  70KB meant a 98KB channel
++ * window took two rounds, and with a bulk upload lockstepped on window
++ * adjusts every round is throughput.
++ */
++#define INTERNAL_SEND_BUFFER_SIZE 1024*1024 //1MB
+ #define INTERNAL_RECV_BUFFER_SIZE 70*1024 //70KB
+ #define errno_from_WSALastError() errno_from_WSAError(WSAGetLastError())
+ 

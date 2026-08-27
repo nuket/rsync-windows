@@ -39,6 +39,8 @@ jobs:
         # which comes from git.  A depth-1 checkout still has HEAD, but the
         # tag-agreement check below wants the tag object too.
         fetch-depth: 0
+        # openssh/ is Win32-OpenSSH, pinned; ssh.exe is built from it below.
+        submodules: true
 
     - name: Install Ninja if the image lacks it
       shell: pwsh
@@ -58,6 +60,19 @@ jobs:
       # built and run through the test suite separately.  The ssh transfer
       # tests skip on their own without RSYNC_WIN_TEST_HOST.
       run: windows-build-and-test.bat --clean
+
+    - name: Build ssh.exe, x64 and x86
+      shell: pwsh
+      # Win32-OpenSSH from the openssh/ submodule with the patches in
+      # win32/openssh/patches: the client Windows ships reads its stdin 3KB
+      # at a time, which held a push from a Windows machine at 17MB/s.  The
+      # script builds against Microsoft's published LibreSSL 3.8.2 SDK -- the
+      # same libcrypto.dll the Windows OpenSSH Client component puts in
+      # System32, which is what ssh.exe loads -- and leaves build\ssh.exe and
+      # build-x86\ssh-x86.exe.  No DLL ships with either.
+      run: |
+        .\win32\openssh\build-openssh.ps1 -Arch both
+        if ($LASTEXITCODE -ne 0) { exit 1 }
 
     - name: Check no upstream test was absorbed unreviewed
       shell: pwsh
@@ -88,9 +103,19 @@ jobs:
         # binaries is that they are for different architectures, and a build
         # directory that somehow configured for the wrong one would otherwise
         # sail through as a duplicate of the other.
+        # ssh.exe needs a few more of Windows' own DLLs than rsync.exe does
+        # (Schannel, the crypto store, the user profile), plus libcrypto.dll,
+        # which the Windows OpenSSH Client component installs in System32 --
+        # deliberately not linked in: Windows' build of LibreSSL uses AES-NI,
+        # and rsync.exe's PreferSystem32Images hardening, inherited by the
+        # ssh.exe it starts, takes the System32 copy in any case.
+        $rsyncDlls = '^(WS2_32|ADVAPI32|KERNEL32)\.dll$'
+        $sshDlls   = '^(WS2_32|ADVAPI32|KERNEL32|CRYPT32|Secur32|USER32|USERENV|bcrypt|SHLWAPI|ole32|SHELL32|Netapi32|Rpcrt4|ntdll|libcrypto)\.dll$'
         $builds = @(
-          @{ Path = 'build\rsync.exe';             Arch = 'x64'; Machine = 'x64' },
-          @{ Path = 'build-x86\rsync-x86.exe';     Arch = 'x86'; Machine = 'x86' }
+          @{ Path = 'build\rsync.exe';             Arch = 'x64'; Machine = 'x64'; Allowed = $rsyncDlls },
+          @{ Path = 'build-x86\rsync-x86.exe';     Arch = 'x86'; Machine = 'x86'; Allowed = $rsyncDlls },
+          @{ Path = 'build\ssh.exe';               Arch = 'x64'; Machine = 'x64'; Allowed = $sshDlls },
+          @{ Path = 'build-x86\ssh-x86.exe';       Arch = 'x86'; Machine = 'x86'; Allowed = $sshDlls }
         )
 
         foreach ($b in $builds) {
@@ -119,13 +144,13 @@ jobs:
           # binary runs on a machine with no redistributable installed.  If a
           # VCRUNTIME or api-ms-win-crt import ever reappears, fail here rather
           # than ship something that will not start on a clean machine.
-          $unexpected = $dlls | Where-Object { $_ -notmatch '^(WS2_32|ADVAPI32|KERNEL32)\.dll$' }
+          $unexpected = $dlls | Where-Object { $_ -notmatch $b.Allowed }
           if ($unexpected) {
             Write-Error "$($b.Path) imports something outside the Windows base set: $($unexpected -join ', ')"
             exit 1
           }
         }
-        Write-Host "both are self-contained: only Windows base DLLs are imported"
+        Write-Host "all four are self-contained: only Windows' own DLLs are imported"
 
     - name: Stage the files to ship
       shell: pwsh
@@ -144,14 +169,18 @@ jobs:
         New-Item -ItemType Directory dist | Out-Null
         Copy-Item build\rsync.exe dist\
         Copy-Item build-x86\rsync-x86.exe dist\
+        Copy-Item build\ssh.exe dist\
+        Copy-Item build-x86\ssh-x86.exe dist\
         Copy-Item COPYING dist\COPYING.txt
+        Copy-Item build\NOTICE-ssh.txt dist\
         Copy-Item BUILD-CMAKE.md dist\
-        foreach ($exe in 'rsync.exe', 'rsync-x86.exe') {
+        foreach ($exe in 'rsync.exe', 'rsync-x86.exe', 'ssh.exe', 'ssh-x86.exe') {
           $hash = (Get-FileHash "dist\$exe" -Algorithm SHA256).Hash.ToLower()
           "$hash  $exe" | Out-File -Encoding ascii "dist\$exe.sha256"
           Write-Host "$exe  $hash"
         }
         "VER=$ver" >>$Env:GITHUB_ENV
+        "SSH_VER=$((& build\ssh.exe -V 2>&1) -join '')" >>$Env:GITHUB_ENV
 
         # <upstream release>-g<port rev>.  The release half comes from
         # version.h and the rev names the commit here that built it, so the
@@ -252,8 +281,16 @@ jobs:
         | --- | --- |
         | ``rsync.exe`` | 64-bit Windows -- the one to take unless you know you need the other |
         | ``rsync-x86.exe`` | 32-bit Windows, and 64-bit machines running something that will only load a 32-bit image |
+        | ``ssh.exe`` | the ssh client rsync.exe runs, 64-bit -- put it in the same directory as rsync.exe |
+        | ``ssh-x86.exe`` | the same for rsync-x86.exe on 32-bit Windows; rename it to ``ssh.exe`` beside it |
 
-        Same source, same options, same behaviour -- the two differ only in the architecture they were compiled for, and each has a ``.sha256`` beside it.
+        Same source, same options, same behaviour -- the two rsyncs differ only in the architecture they were compiled for, and every file has a ``.sha256`` beside it.
+
+        ## Why an ssh.exe
+
+        rsync runs its remote end through ssh, and on Windows that means Microsoft's OpenSSH client. The one Windows ships reads its stdin 3KB at a time with a thread per read, which holds a transfer *from* a Windows machine at about 17MB/s no matter how fast the link is. This ``ssh.exe`` is the same client -- $Env:SSH_VER, built from the pinned ``openssh/`` submodule -- with that fixed, and rsync.exe prefers it automatically when it sits in the same directory: with it, a push runs at the speed of the link. Everything else about it is Microsoft's: it uses the same ``~/.ssh``, the same ssh-agent, the same known_hosts. An ``-e`` naming a different ssh by path is used as given.
+
+        It needs the **OpenSSH Client** Windows component (Settings > Optional features; ``setup-windows-rsync.ps1`` installs it), because it uses the ``libcrypto.dll`` that component puts in System32 -- Windows' own build of LibreSSL, which uses AES-NI and runs AES at several GB/s. That is deliberate: rsync.exe's process hardening makes an ssh.exe it starts take the System32 copy regardless, and a LibreSSL built from source for this release ran AES in software at a tenth of the speed. No DLL ships with it, so the 32-bit build is for 32-bit Windows, where System32 holds a 32-bit libcrypto.dll. It is built against the same LibreSSL 3.8.2 that Windows ships (OpenSSH Client 9.5 and later), with the same mitigations as rsync.exe -- CFG, CET, ``/sdl``, ``/Qspectre`` -- and with zlib linked in. Everything in it is under a permissive licence -- OpenSSH (BSD), Microsoft's Win32 layer (BSD), zlib -- and every text is in the attached ``NOTICE-ssh.txt``.
 
         ## Reading the version
 
@@ -289,6 +326,9 @@ jobs:
         gh release create $tag `
           dist\rsync.exe dist\rsync.exe.sha256 `
           dist\rsync-x86.exe dist\rsync-x86.exe.sha256 `
+          dist\ssh.exe dist\ssh.exe.sha256 `
+          dist\ssh-x86.exe dist\ssh-x86.exe.sha256 `
+          dist\NOTICE-ssh.txt `
           --title "rsync $Env:RSYNC_VER_BASE for Windows" `
           --notes $notes `
           --target $Env:GITHUB_SHA `
