@@ -19,19 +19,20 @@ System32-only DLL search path).
 ### Installing on Windows
 
 Building is optional. Every release on [the releases page][w1] carries
-`rsync.exe` (x64) and `rsync-x86.exe` (x86) with a `.sha256` beside each, and
-both are self-contained — drop one somewhere on your `PATH` and it runs.
+`rsync-windows-x64.zip` and `rsync-windows-x86.zip` with a `.sha256` beside
+each. A zip holds `rsync.exe` and `ssh.exe`, both self-contained — unpack it
+somewhere on your `PATH`, keep the two together, and it runs.
 
-Each release also carries an `ssh.exe` (and `ssh-x86.exe`). rsync does not
-speak ssh itself; it runs an ssh client, and the one Windows ships reads its
-stdin 3KB at a time with a thread per read, which holds a transfer *from* a
-Windows machine at about 17MB/s however fast the link is. The `ssh.exe` in the
-release is Microsoft's own client, built from the pinned `openssh/` submodule
-with that fixed (see `win32/openssh/`), and `rsync.exe` prefers it whenever it
-sits in the same directory. It uses the same `~/.ssh`, agent and `known_hosts`
-as the system one — and the same `libcrypto.dll`, the one the Windows OpenSSH
-Client component (9.5 or later) installs in System32, so that component has to
-be present. An `-e` naming another ssh by path is used as given.
+The `ssh.exe` is there because rsync does not speak ssh itself; it runs an ssh
+client, and the one Windows ships reads its stdin 3KB at a time with a thread
+per read, which holds a transfer *from* a Windows machine at about 17MB/s
+however fast the link is. The one in the zip is Microsoft's own client, built
+from the pinned `openssh/` submodule with that fixed (see `win32/openssh/`),
+and `rsync.exe` prefers it whenever it sits in the same directory. It uses the
+same `~/.ssh`, agent and `known_hosts` as the system one — and the same
+`libcrypto.dll`, the one the Windows OpenSSH Client component (9.5 or later)
+installs in System32, so that component has to be present. An `-e` naming
+another ssh by path is used as given.
 
 [w1]: https://github.com/nuket/rsync-windows/releases
 
@@ -52,10 +53,10 @@ from the repo root. It elevates itself through UAC, then:
    capability's own `OpenSSH-Server-In-TCP` firewall rule to *all* profiles.
    A VM's host-only or bridged adapter is routinely classified Public, and
    that is the usual reason a plainly running `sshd` is plainly unreachable;
-4. resolves the **latest release**, picks the build matching the OS bitness,
-   verifies it against the published SHA-256, installs it as
-   `C:\Tools\rsync\rsync.exe` with the release's `ssh.exe` beside it, and puts
-   that directory on the **machine** `PATH`;
+4. resolves the **latest release**, picks the zip matching the OS bitness,
+   verifies it against the published SHA-256, unpacks `rsync.exe` and
+   `ssh.exe` into `C:\Tools\rsync`, and puts that directory on the
+   **machine** `PATH`;
 5. optionally authorises a public key for inbound ssh, with the ACLs
    Win32-OpenSSH requires before it will honour one.
 

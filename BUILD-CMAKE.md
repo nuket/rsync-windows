@@ -135,7 +135,8 @@ The script applies the patches once, fetches the prebuilt LibreSSL 3.8.2 and
 zlib SDKs Microsoft publishes for Win32-OpenSSH (pinned by SHA-256), runs
 MSBuild on the OpenSSH projects, and leaves `build\ssh.exe` beside
 `rsync.exe` — which means the ssh transfer tests, run with `--host`, exercise
-the bundled client — and `build-x86\ssh-x86.exe`. Both carry the same
+the bundled client — and `build-x86\ssh-x86.exe` (the release packs each
+pair as `rsync.exe` + `ssh.exe` in a per-architecture zip). Both carry the same
 mitigations as rsync.exe (CFG, CET, `/sdl`, `/Qspectre`; see below) and a
 static CRT, with zlib linked in.
 

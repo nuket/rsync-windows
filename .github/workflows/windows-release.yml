@@ -166,19 +166,27 @@ jobs:
           exit 1
         }
 
-        New-Item -ItemType Directory dist | Out-Null
-        Copy-Item build\rsync.exe dist\
-        Copy-Item build-x86\rsync-x86.exe dist\
-        Copy-Item build\ssh.exe dist\
-        Copy-Item build-x86\ssh-x86.exe dist\
-        Copy-Item COPYING dist\COPYING.txt
+        # One zip per architecture, and the same names inside each: rsync.exe
+        # and the ssh.exe it runs belong together, and a release asset list
+        # is flat -- no directories -- so the architecture goes in the zip's
+        # name rather than the files'.  The -x86 suffixes the build gives its
+        # outputs stop at the zip boundary.
+        New-Item -ItemType Directory dist, stage\x64, stage\x86 | Out-Null
+        Copy-Item build\rsync.exe            stage\x64\rsync.exe
+        Copy-Item build\ssh.exe              stage\x64\ssh.exe
+        Copy-Item build-x86\rsync-x86.exe    stage\x86\rsync.exe
+        Copy-Item build-x86\ssh-x86.exe      stage\x86\ssh.exe
+        foreach ($a in 'x64', 'x86') {
+          Copy-Item COPYING              "stage\$a\COPYING.txt"
+          Copy-Item build\NOTICE-ssh.txt "stage\$a\NOTICE-ssh.txt"
+          $zip = "rsync-windows-$a.zip"
+          Compress-Archive -Path "stage\$a\*" -DestinationPath "dist\$zip" -CompressionLevel Optimal
+          $hash = (Get-FileHash "dist\$zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Out-File -Encoding ascii "dist\$zip.sha256"
+          Write-Host "$zip  $hash"
+        }
         Copy-Item build\NOTICE-ssh.txt dist\
         Copy-Item BUILD-CMAKE.md dist\
-        foreach ($exe in 'rsync.exe', 'rsync-x86.exe', 'ssh.exe', 'ssh-x86.exe') {
-          $hash = (Get-FileHash "dist\$exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $exe" | Out-File -Encoding ascii "dist\$exe.sha256"
-          Write-Host "$exe  $hash"
-        }
         "VER=$ver" >>$Env:GITHUB_ENV
         "SSH_VER=$((& build\ssh.exe -V 2>&1) -join '')" >>$Env:GITHUB_ENV
 
@@ -279,12 +287,10 @@ jobs:
 
         | download | for |
         | --- | --- |
-        | ``rsync.exe`` | 64-bit Windows -- the one to take unless you know you need the other |
-        | ``rsync-x86.exe`` | 32-bit Windows, and 64-bit machines running something that will only load a 32-bit image |
-        | ``ssh.exe`` | the ssh client rsync.exe runs, 64-bit -- put it in the same directory as rsync.exe |
-        | ``ssh-x86.exe`` | the same for rsync-x86.exe on 32-bit Windows; rename it to ``ssh.exe`` beside it |
+        | ``rsync-windows-x64.zip`` | 64-bit Windows -- the one to take unless you know you need the other |
+        | ``rsync-windows-x86.zip`` | 32-bit Windows |
 
-        Same source, same options, same behaviour -- the two rsyncs differ only in the architecture they were compiled for, and every file has a ``.sha256`` beside it.
+        Each zip holds ``rsync.exe``, the ``ssh.exe`` it runs (see below), ``COPYING.txt`` and ``NOTICE-ssh.txt``. Unpack it into a directory on your ``PATH`` -- ``C:\Tools\rsync`` is what ``setup-windows-rsync.ps1`` uses -- and keep the two exes together. Same source, same options, same behaviour: the two zips differ only in the architecture they were compiled for, and each has a ``.sha256`` beside it.
 
         ## Why an ssh.exe
 
@@ -303,6 +309,8 @@ jobs:
         | ``$Env:RSYNC_VER_BASE`` | the upstream rsync release this is a build of |
         | ``g$Env:RSYNC_VER_PORT`` | the commit in this repository that built it ([browse](https://github.com/$Env:GITHUB_REPOSITORY/commit/$Env:GITHUB_SHA)) |
 
+        ``ssh.exe`` reports its own version (``ssh -V``): $Env:SSH_VER.
+
         Releases here are cut only from upstream **releases**. This repository is the Windows adaptation layer for rsync: the first half of the version says which rsync you are getting, the second says which revision of the Windows work built it. A new upstream release moves the first; a fix to the port moves the second. ``rsync --version`` prints the same string, and both binaries carry it in their file properties.
 
         Builds between releases are not published here. Every push to ``windows-cmake-port`` is still built and tested, and its binaries are attached to that run under **Actions** if you want one.
@@ -310,11 +318,10 @@ jobs:
         ## Verifying a download
 
         ``````
-        certutil -hashfile rsync.exe SHA256
-        certutil -hashfile rsync-x86.exe SHA256
+        certutil -hashfile rsync-windows-x64.zip SHA256
         ``````
 
-        and compare each against the matching ``.sha256`` file.
+        and compare against the matching ``.sha256`` file.
 
         ## Notes
 
@@ -324,10 +331,8 @@ jobs:
         "@
 
         gh release create $tag `
-          dist\rsync.exe dist\rsync.exe.sha256 `
-          dist\rsync-x86.exe dist\rsync-x86.exe.sha256 `
-          dist\ssh.exe dist\ssh.exe.sha256 `
-          dist\ssh-x86.exe dist\ssh-x86.exe.sha256 `
+          dist\rsync-windows-x64.zip dist\rsync-windows-x64.zip.sha256 `
+          dist\rsync-windows-x86.zip dist\rsync-windows-x86.zip.sha256 `
           dist\NOTICE-ssh.txt `
           --title "rsync $Env:RSYNC_VER_BASE for Windows" `
           --notes $notes `
