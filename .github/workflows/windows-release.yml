@@ -179,6 +179,10 @@ jobs:
         foreach ($a in 'x64', 'x86') {
           Copy-Item COPYING              "stage\$a\COPYING.txt"
           Copy-Item build-x64\NOTICE-ssh.txt "stage\$a\NOTICE-ssh.txt"
+          # The installer, so an unpacked zip sets itself up: run from beside
+          # rsync.exe the script installs those files instead of downloading.
+          Copy-Item setup-windows-rsync.ps1 "stage\$a\setup-windows-rsync.ps1"
+          Copy-Item setup-windows-rsync.bat "stage\$a\setup-windows-rsync.bat"
           $zip = "rsync-windows-$a.zip"
           Compress-Archive -Path "stage\$a\*" -DestinationPath "dist\$zip" -CompressionLevel Optimal
           $hash = (Get-FileHash "dist\$zip" -Algorithm SHA256).Hash.ToLower()
@@ -290,7 +294,7 @@ jobs:
         | ``rsync-windows-x64.zip`` | 64-bit Windows -- the one to take unless you know you need the other |
         | ``rsync-windows-x86.zip`` | 32-bit Windows |
 
-        Each zip holds ``rsync.exe``, the ``ssh.exe`` it runs (see below), ``COPYING.txt`` and ``NOTICE-ssh.txt``. Unpack it into a directory on your ``PATH`` -- ``C:\Tools\rsync`` is what ``setup-windows-rsync.ps1`` uses -- and keep the two exes together. Same source, same options, same behaviour: the two zips differ only in the architecture they were compiled for, and each has a ``.sha256`` beside it.
+        Each zip holds ``rsync.exe``, the ``ssh.exe`` it runs (see below), ``COPYING.txt``, ``NOTICE-ssh.txt``, and an installer: ``setup-windows-rsync.bat`` with the ``setup-windows-rsync.ps1`` it runs. Unpack the zip anywhere and double-click the ``.bat``: it asks for elevation, copies the files to ``C:\Tools\rsync``, puts that on the machine ``PATH``, and sets up the OpenSSH client, ``ssh-agent`` and (unless ``-SkipServer``) ``sshd``. Or skip the installer and just unpack into a directory on your ``PATH``, keeping the two exes together. Same source, same options, same behaviour: the two zips differ only in the architecture they were compiled for, and each has a ``.sha256`` beside it.
 
         ## Why an ssh.exe
 

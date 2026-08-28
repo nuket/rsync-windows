@@ -21,7 +21,11 @@ System32-only DLL search path).
 Building is optional. Every release on [the releases page][w1] carries
 `rsync-windows-x64.zip` and `rsync-windows-x86.zip` with a `.sha256` beside
 each. A zip holds `rsync.exe` and `ssh.exe`, both self-contained — unpack it
-somewhere on your `PATH`, keep the two together, and it runs.
+somewhere on your `PATH`, keep the two together, and it runs. It also holds
+`setup-windows-rsync.bat` (and the `.ps1` it runs): double-click that from
+the unpacked folder and it installs those files to `C:\Tools\rsync`, puts the
+directory on the machine `PATH` and sets up ssh, as described below — the same
+script, just fed from disk instead of downloading.
 
 The `ssh.exe` is there because rsync does not speak ssh itself; it runs an ssh
 client, and the one Windows ships reads its stdin 3KB at a time with a thread

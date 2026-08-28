@@ -17,11 +17,21 @@
     does the same.  Open a fresh window afterwards before expecting `rsync` to resolve:
     the PATH change reaches only shells started after it.
 
+    FROM A DOWNLOADED ZIP
+
+    Every release zip carries this script and setup-windows-rsync.bat beside rsync.exe.
+    Unpack the zip anywhere, then double-click the .bat -- or run either command above
+    from the unpacked folder.  The script sees the rsync.exe next to it and installs
+    THOSE files, without touching GitHub: the same steps as below, minus the download.
+    The bitness of the unpacked rsync.exe is checked against this Windows first.
+    -Source DIR does the same for files unpacked somewhere else.
+
     Common variants, each appended to the command above (details under PARAMETERS and
     EXAMPLES below):
 
         -SkipServer                               client side only: no sshd, no firewall rule
         -Tag v3.5.0-g00786d79 -InstallDir D:\bin  a specific release, somewhere else
+        -Source C:\Downloads\rsync-windows-x64    install an already-unpacked zip
         -AuthorizedKey $HOME\.ssh\id_ed25519.pub  also authorise a key for inbound ssh
 
     WHAT IT DOES
@@ -37,9 +47,11 @@
       4. rsync.exe + ssh.exe        - the latest release of github.com/nuket/rsync-windows:
                                       the zip for this OS's bitness, SHA-256 verified,
                                       unpacked to C:\Tools\rsync and put on the MACHINE
-                                      PATH.  The ssh.exe beside rsync.exe is the one
-                                      rsync uses; it is the Windows client with its
-                                      slow-upload bug fixed (see the README).
+                                      PATH -- or, run from inside an unpacked zip (or
+                                      with -Source), the files already on disk, copied
+                                      there instead.  The ssh.exe beside rsync.exe is
+                                      the one rsync uses; it is the Windows client with
+                                      its slow-upload bug fixed (see the README).
       5. authorized_keys (optional) - -AuthorizedKey installs a public key with the ACLs
                                       Win32-OpenSSH insists on before it will honour it.
 
@@ -54,7 +66,14 @@
     path with spaces in it makes the client-side --rsync-path escape hatch painful to quote.
 
 .PARAMETER Tag
-    Release to install, e.g. 'v3.5.0-g00786d79'. Default 'latest'.
+    Release to install, e.g. 'v3.5.0-g00786d79'. Default 'latest'. Ignored when the
+    files come from disk (-Source, or the script running from inside an unpacked zip).
+
+.PARAMETER Source
+    A directory holding an unpacked release zip (rsync.exe, ssh.exe, the licence texts).
+    Install from there instead of downloading. Defaults to the script's own directory
+    when an rsync.exe sits in it, which is how the copy of this script inside every
+    release zip works; give it explicitly for files unpacked elsewhere.
 
 .PARAMETER AuthorizedKey
     A public key to authorise for inbound ssh: either the key text itself
@@ -87,6 +106,18 @@
     .\setup-windows-rsync.ps1 -Tag v3.5.0-g00786d79
 
     Pin a particular release rather than taking the latest.
+
+.EXAMPLE
+    setup-windows-rsync.bat
+
+    From inside an unpacked release zip: installs the rsync.exe and ssh.exe beside it.
+    Same as running the script from that folder; the .bat just supplies the
+    -ExecutionPolicy Bypass command line.
+
+.EXAMPLE
+    .\setup-windows-rsync.ps1 -Source C:\Downloads\rsync-windows-x64
+
+    Install a zip that was unpacked somewhere else, no download.
 #>
 
 # After the help block, not before it: a #Requires line ahead of the block
@@ -98,6 +129,7 @@
 param(
     [string] $InstallDir = 'C:\Tools\rsync',
     [string] $Tag        = 'latest',
+    [string] $Source,
     [string] $AuthorizedKey,
     [string] $ForUser    = $env:USERNAME,
     [switch] $SkipServer
@@ -105,6 +137,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Repo = 'nuket/rsync-windows'
+
+# Inside an unpacked release zip this script sits beside rsync.exe; that is
+# the signal to install what is on disk rather than download.  Resolved to a
+# full path here, before the UAC relaunch, so the elevated copy gets it
+# explicitly instead of re-deriving it.
+if (-not $Source -and (Test-Path (Join-Path $PSScriptRoot 'rsync.exe'))) {
+    $Source = $PSScriptRoot
+}
+if ($Source) {
+    $Source = (Resolve-Path -LiteralPath $Source).Path.TrimEnd('\')
+}
 
 # TLS 1.2: Windows PowerShell 5.1 still defaults to SSL3/TLS1.0, which github.com refuses.
 [Net.ServicePointManager]::SecurityProtocol =
@@ -140,6 +183,7 @@ if (-not $isAdmin) {
             " -InstallDir $(& $q $InstallDir)" +
             " -Tag $(& $q $Tag)" +
             " -ForUser $(& $q $ForUser)"
+    if ($Source)        { $argv += " -Source $(& $q $Source)" }
     if ($AuthorizedKey) { $argv += " -AuthorizedKey $(& $q $AuthorizedKey)" }
     if ($SkipServer)    { $argv += ' -SkipServer' }
     # Pick the host to re-launch rather than reusing our own. A Store-installed
@@ -256,6 +300,23 @@ if ($SkipServer) {
 # the x86 one otherwise, both under the name rsync.exe: it is what the sending
 # side asks for over the wire, and renaming saves every caller a --rsync-path.
 # ---------------------------------------------------------------------------
+# The architecture a PE image was built for, from its COFF header: 0x8664 is
+# x64, 0x14c is x86.  A zip unpacked by hand is not named by the script, so
+# this is how an x64 rsync.exe on 32-bit Windows is caught before it lands
+# on the PATH and fails to start.
+function Get-PeMachine([string] $Path) {
+    $fs = [IO.File]::OpenRead($Path)
+    try {
+        $br = New-Object IO.BinaryReader($fs)
+        $fs.Seek(0x3C, 'Begin') | Out-Null
+        $peOffset = $br.ReadUInt32()
+        $fs.Seek($peOffset + 4, 'Begin') | Out-Null
+        return $br.ReadUInt16()
+    } finally {
+        $fs.Dispose()
+    }
+}
+
 Write-Step "rsync for Windows ($Repo)"
 
 # One zip per architecture, holding rsync.exe and the ssh.exe it runs under
@@ -265,39 +326,64 @@ $target    = Join-Path $InstallDir 'rsync.exe'
 $sshTarget = Join-Path $InstallDir 'ssh.exe'
 
 try {
-    # Resolve the release. The API gives us the tag, which is what makes the
-    # "already current?" check below possible; without it we could only ever
-    # re-download and compare afterwards.
-    $api = if ($Tag -eq 'latest') {
-        "https://api.github.com/repos/$Repo/releases/latest"
+    $wrongArch = $false
+    if ($Source) {
+        # Files already on disk: the copy of this script inside a release
+        # zip, or -Source.  The version comes from the exe itself, the same
+        # string the release tag is built from, so the "already current?"
+        # check below works exactly as it does for a download.
+        $srcExe = Join-Path $Source 'rsync.exe'
+        if (-not (Test-Path $srcExe)) { throw "no rsync.exe in $Source" }
+        if ($Tag -ne 'latest') { Write-Warning "-Tag $Tag ignored: installing the files in $Source" }
+        $machine = Get-PeMachine $srcExe
+        $is64    = [Environment]::Is64BitOperatingSystem
+        if ($machine -eq 0x8664 -and -not $is64) {
+            throw "$srcExe is the x64 build and this is 32-bit Windows; unpack rsync-windows-x86.zip instead"
+        }
+        if ($machine -eq 0x14c -and $is64) {
+            # The x86 rsync.exe runs on 64-bit Windows, but its 32-bit ssh.exe
+            # cannot load the 64-bit libcrypto.dll in System32, and there is no
+            # 32-bit one to give it.  Say so, install rsync alone.
+            Write-Warning "$srcExe is the x86 build on 64-bit Windows: rsync.exe will run, but its ssh.exe cannot use System32's 64-bit libcrypto.dll, so rsync will fall back to the ssh on PATH. Unpack rsync-windows-x64.zip for the full speed."
+            $wrongArch = $true
+        }
+        $resolved = 'v' + (Get-Item $srcExe).VersionInfo.ProductVersion
+        Write-Info "source: $Source ($resolved)"
     } else {
-        "https://api.github.com/repos/$Repo/releases/tags/$Tag"
-    }
-    $release  = $null
-    $resolved = $Tag
-    try {
-        # A User-Agent is mandatory on the GitHub API; without one it 403s.
-        $release  = Invoke-RestMethod -Uri $api -UseBasicParsing `
-                        -Headers @{ 'User-Agent' = 'setup-windows-rsync' }
-        $resolved = $release.tag_name
-        Write-Info "release: $resolved"
-    } catch {
-        # Unauthenticated API calls are rate-limited to 60/hour per IP, which a
-        # provisioning run behind a shared NAT can genuinely exhaust. The
-        # /releases/latest/download/ redirect needs no API budget, so fall back
-        # to it and accept that we lose the version check.
-        Write-Warning "GitHub API unavailable ($($_.Exception.Message)); falling back to the redirect URL."
-    }
+        # Resolve the release. The API gives us the tag, which is what makes the
+        # "already current?" check below possible; without it we could only ever
+        # re-download and compare afterwards.
+        $api = if ($Tag -eq 'latest') {
+            "https://api.github.com/repos/$Repo/releases/latest"
+        } else {
+            "https://api.github.com/repos/$Repo/releases/tags/$Tag"
+        }
+        $release  = $null
+        $resolved = $Tag
+        try {
+            # A User-Agent is mandatory on the GitHub API; without one it 403s.
+            $release  = Invoke-RestMethod -Uri $api -UseBasicParsing `
+                            -Headers @{ 'User-Agent' = 'setup-windows-rsync' }
+            $resolved = $release.tag_name
+            Write-Info "release: $resolved"
+        } catch {
+            # Unauthenticated API calls are rate-limited to 60/hour per IP, which a
+            # provisioning run behind a shared NAT can genuinely exhaust. The
+            # /releases/latest/download/ redirect needs no API budget, so fall back
+            # to it and accept that we lose the version check.
+            Write-Warning "GitHub API unavailable ($($_.Exception.Message)); falling back to the redirect URL."
+        }
 
-    if ($release) {
-        $exeUrl = ($release.assets | Where-Object { $_.name -eq $asset          }).browser_download_url
-        $shaUrl = ($release.assets | Where-Object { $_.name -eq "$asset.sha256" }).browser_download_url
-        if (-not $exeUrl) { throw "release $resolved has no asset named $asset" }
-    } else {
-        $base   = "https://github.com/$Repo/releases"
-        $prefix = if ($Tag -eq 'latest') { "$base/latest/download" } else { "$base/download/$Tag" }
-        $exeUrl = "$prefix/$asset"
-        $shaUrl = "$prefix/$asset.sha256"
+        if ($release) {
+            $exeUrl = ($release.assets | Where-Object { $_.name -eq $asset          }).browser_download_url
+            $shaUrl = ($release.assets | Where-Object { $_.name -eq "$asset.sha256" }).browser_download_url
+            if (-not $exeUrl) { throw "release $resolved has no asset named $asset" }
+        } else {
+            $base   = "https://github.com/$Repo/releases"
+            $prefix = if ($Tag -eq 'latest') { "$base/latest/download" } else { "$base/download/$Tag" }
+            $exeUrl = "$prefix/$asset"
+            $shaUrl = "$prefix/$asset.sha256"
+        }
     }
 
     # The zip's ssh.exe is the release's own build of Microsoft's OpenSSH
@@ -321,6 +407,8 @@ try {
         }
     }
 
+    if ($wrongArch) { $wantSsh = $false }
+
     # Skip the download when what is installed already IS this release. The
     # exe carries the version string the tag is built from -- tag v3.5.0-gABC
     # against ProductVersion 3.5.0-gABC -- so this compares builds, not
@@ -332,51 +420,70 @@ try {
         if ($installed) { Write-Info "installed rsync $installed -> updating to $resolved" }
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-        # Download and unpack beside the targets, not over them: an interrupted
-        # transfer must not leave a truncated rsync.exe sitting on the machine
-        # PATH. The scratch name still has to END in .zip: Windows PowerShell
-        # 5.1's Expand-Archive refuses any other extension outright ("*.download
-        # is not a supported archive file format"), where PowerShell 7 just
-        # reads the file -- and 5.1 is what the UAC relaunch above falls back to
-        # on a box with no pwsh installed.
-        $tmp = Join-Path $InstallDir "download-$asset"
-        Invoke-WebRequest -Uri $exeUrl -OutFile $tmp -UseBasicParsing
-        Write-Info "downloaded $asset ($([math]::Round((Get-Item $tmp).Length / 1MB, 2)) MB)"
-
-        # Verify against the .sha256 published alongside it. Same origin, so this
-        # is an integrity check on the transfer, not a defence against a hostile
-        # release -- but a truncated or proxy-mangled download is the failure that
-        # actually happens, and it fails here rather than mid-transfer later.
-        if ($shaUrl) {
-            # -OutFile, not .Content: GitHub serves the .sha256 as
-            # application/octet-stream, and Invoke-WebRequest hands back a
-            # byte[] rather than a string for any non-text content type. Reading
-            # .Content directly parses the first BYTE as the hash and the
-            # comparison then fails on every correct download.
-            $shaTmp = "$tmp.sha256"
-            Invoke-WebRequest -Uri $shaUrl -OutFile $shaTmp -UseBasicParsing
-            $want = (((Get-Content $shaTmp -Raw) -split '\s+')[0]).Trim().ToLower()
-            Remove-Item $shaTmp -Force -ErrorAction SilentlyContinue
-            $got  = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower()
-            if ($want -and $want -ne $got) {
-                Remove-Item $tmp -Force
-                throw "SHA-256 mismatch for ${asset}: expected $want, got $got"
+        $files = 'rsync.exe', 'ssh.exe', 'COPYING.txt', 'NOTICE-ssh.txt'
+        if ($Source) {
+            if ($Source -eq $InstallDir.TrimEnd('\')) {
+                # Unpacked straight into the install directory: nothing to
+                # copy, the PATH step below is what is left to do.
+                Write-Ok "files already in place at $InstallDir"
+            } else {
+                foreach ($f in $files) {
+                    $src = Join-Path $Source $f
+                    if (-not (Test-Path $src)) { continue }
+                    if ($f -eq 'ssh.exe' -and -not $wantSsh) { continue }
+                    Copy-Item -LiteralPath $src -Destination (Join-Path $InstallDir $f) -Force
+                }
+                Write-Ok "installed $target$(if ($wantSsh) { ' and ssh.exe' }) from $Source"
             }
-            Write-Ok "SHA-256 verified: $got"
-        }
+        } else {
+            # Download and unpack beside the targets, not over them: an
+            # interrupted transfer must not leave a truncated rsync.exe sitting
+            # on the machine PATH. The scratch name still has to END in .zip:
+            # Windows PowerShell 5.1's Expand-Archive refuses any other
+            # extension outright ("*.download is not a supported archive file
+            # format"), where PowerShell 7 just reads the file -- and 5.1 is
+            # what the UAC relaunch above falls back to on a box with no pwsh
+            # installed.
+            $tmp = Join-Path $InstallDir "download-$asset"
+            Invoke-WebRequest -Uri $exeUrl -OutFile $tmp -UseBasicParsing
+            Write-Info "downloaded $asset ($([math]::Round((Get-Item $tmp).Length / 1MB, 2)) MB)"
 
-        $unpack = Join-Path $InstallDir '.unpack'
-        if (Test-Path $unpack) { Remove-Item -Recurse -Force $unpack }
-        Expand-Archive -Path $tmp -DestinationPath $unpack -Force
-        Remove-Item $tmp -Force
-        foreach ($f in 'rsync.exe', 'ssh.exe', 'COPYING.txt', 'NOTICE-ssh.txt') {
-            $src = Join-Path $unpack $f
-            if (-not (Test-Path $src)) { continue }
-            if ($f -eq 'ssh.exe' -and -not $wantSsh) { continue }
-            Move-Item -Path $src -Destination (Join-Path $InstallDir $f) -Force
+            # Verify against the .sha256 published alongside it. Same origin,
+            # so this is an integrity check on the transfer, not a defence
+            # against a hostile release -- but a truncated or proxy-mangled
+            # download is the failure that actually happens, and it fails here
+            # rather than mid-transfer later.
+            if ($shaUrl) {
+                # -OutFile, not .Content: GitHub serves the .sha256 as
+                # application/octet-stream, and Invoke-WebRequest hands back a
+                # byte[] rather than a string for any non-text content type.
+                # Reading .Content directly parses the first BYTE as the hash
+                # and the comparison then fails on every correct download.
+                $shaTmp = "$tmp.sha256"
+                Invoke-WebRequest -Uri $shaUrl -OutFile $shaTmp -UseBasicParsing
+                $want = (((Get-Content $shaTmp -Raw) -split '\s+')[0]).Trim().ToLower()
+                Remove-Item $shaTmp -Force -ErrorAction SilentlyContinue
+                $got  = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower()
+                if ($want -and $want -ne $got) {
+                    Remove-Item $tmp -Force
+                    throw "SHA-256 mismatch for ${asset}: expected $want, got $got"
+                }
+                Write-Ok "SHA-256 verified: $got"
+            }
+
+            $unpack = Join-Path $InstallDir '.unpack'
+            if (Test-Path $unpack) { Remove-Item -Recurse -Force $unpack }
+            Expand-Archive -Path $tmp -DestinationPath $unpack -Force
+            Remove-Item $tmp -Force
+            foreach ($f in $files) {
+                $src = Join-Path $unpack $f
+                if (-not (Test-Path $src)) { continue }
+                if ($f -eq 'ssh.exe' -and -not $wantSsh) { continue }
+                Move-Item -Path $src -Destination (Join-Path $InstallDir $f) -Force
+            }
+            Remove-Item -Recurse -Force $unpack
+            Write-Ok "installed $target$(if ($wantSsh) { ' and ssh.exe' })"
         }
-        Remove-Item -Recurse -Force $unpack
-        Write-Ok "installed $target$(if ($wantSsh) { ' and ssh.exe' })"
     }
 
     # --- Machine PATH ---------------------------------------------------------
@@ -410,8 +517,12 @@ try {
     Write-Info (& $target --version 2>&1 | Select-Object -First 1)
 } catch {
     Write-Warning "rsync install failed: $($_.Exception.Message)"
-    Write-Warning "Download $asset from https://github.com/$Repo/releases manually,"
-    Write-Warning "save it as $target, and add $InstallDir to the machine PATH."
+    if ($Source) {
+        Write-Warning "Copy rsync.exe and ssh.exe from $Source to $InstallDir by hand,"
+    } else {
+        Write-Warning "Download $asset from https://github.com/$Repo/releases manually, unpack it to $InstallDir,"
+    }
+    Write-Warning "and add $InstallDir to the machine PATH."
 }
 
 # ---------------------------------------------------------------------------
