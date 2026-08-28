@@ -16,10 +16,22 @@ index 0000000..c0898c7
 +  </ItemDefinitionGroup>
 +</Project>
 diff --git a/contrib/win32/openssh/config.h.vs b/contrib/win32/openssh/config.h.vs
-index 3a19ea0..0acd48d 100644
+index 3a19ea0..de7a5b8 100644
 --- a/contrib/win32/openssh/config.h.vs
 +++ b/contrib/win32/openssh/config.h.vs
-@@ -1765,6 +1765,10 @@
+@@ -755,6 +755,11 @@
+ /* Define to 1 if you have the `poll' function. */
+ /* #undef HAVE_POLL */
+ 
++/* pselect() is provided by contrib/win32/win32compat/w32fd.c; the portable
++   fallback in openbsd-compat/bsd-pselect.c creates a pipe per call, which
++   on Windows is a named pipe and costs a third of a bulk transfer. */
++#define HAVE_PSELECT 1
++
+ /* Define to 1 if you have the <poll.h> header file. */
+ #define HAVE_POLL_H 1
+ 
+@@ -1765,6 +1770,10 @@
  #define HAVE_RSA_METH_SET_PRIV_DEC 1
  #define HAVE_RSA_METH_SET_FINISH 1
  #define HAVE_EVP_PKEY_GET0_RSA 1

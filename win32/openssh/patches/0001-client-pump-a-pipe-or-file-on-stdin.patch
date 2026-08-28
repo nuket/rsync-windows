@@ -1,8 +1,8 @@
 diff --git a/contrib/win32/win32compat/termio.c b/contrib/win32/win32compat/termio.c
-index 4d3c783..ea0bf28 100644
+index 4d3c783..57a8575 100644
 --- a/contrib/win32/win32compat/termio.c
 +++ b/contrib/win32/win32compat/termio.c
-@@ -49,6 +49,228 @@
+@@ -49,6 +49,543 @@
  #include "misc_internal.h"
  
  extern int in_raw_mode;
@@ -25,6 +25,21 @@ index 4d3c783..ea0bf28 100644
 +#define SYNC_IO_BULK_BUF_SIZE (256 * 1024)   /* read_details.buf for a pumped fd */
 +#define SYNC_PUMP_RING_SIZE   (1024 * 1024)
 +#define SYNC_PUMP_CHUNK       (256 * 1024)
++
++/* pio->internal.context for a sync fd: the read pump and the write pump
++ * (see below), either of which may exist without the other. */
++struct sync_ctx {
++	struct sync_pump  *rd;
++	struct sync_wpump *wr;
++};
++
++static struct sync_ctx*
++sync_ctx_get(struct w32_io* pio)
++{
++	if (!pio->internal.context)
++		pio->internal.context = calloc(1, sizeof(struct sync_ctx));
++	return (struct sync_ctx*)pio->internal.context;
++}
 +
 +struct sync_pump {
 +	HANDLE h;                 /* the pipe or file being read */
@@ -171,12 +186,16 @@ index 4d3c783..ea0bf28 100644
 +	InitializeCriticalSection(&p->lock);
 +	p->h = WINHANDLE(pio);
 +	p->pio = pio;
++	if (!sync_ctx_get(pio)) {
++		DeleteCriticalSection(&p->lock);
++		goto fail;
++	}
 +	p->thread = (HANDLE)_beginthreadex(NULL, 0, SyncPumpThread, p, 0, NULL);
 +	if (!p->thread) {
 +		DeleteCriticalSection(&p->lock);
 +		goto fail;
 +	}
-+	pio->internal.context = p;
++	sync_ctx_get(pio)->rd = p;
 +	debug4("sync pump started for io:%p", pio);
 +	return p;
 +
@@ -197,12 +216,13 @@ index 4d3c783..ea0bf28 100644
 +static void
 +sync_pump_stop(struct w32_io* pio)
 +{
-+	struct sync_pump* p = (struct sync_pump*)pio->internal.context;
++	struct sync_ctx* c = (struct sync_ctx*)pio->internal.context;
++	struct sync_pump* p = c ? c->rd : NULL;
 +	int tries;
 +
 +	if (!p)
 +		return;
-+	pio->internal.context = NULL;
++	c->rd = NULL;
 +
 +	InterlockedExchange(&p->stop, 1);
 +	SetEvent(p->room_evt);
@@ -228,10 +248,305 @@ index 4d3c783..ea0bf28 100644
 +	free(p->ring);
 +	free(p);
 +}
++/*
++ * The write side has the mirror-image problem: syncio_initiate_write()
++ * creates a THREAD for every write to a pipe or file, and the completion
++ * APC joins it.  A download through the client is ~131k such writes per
++ * 4GB, and on a 20Gbit link that thread churn -- NtCreateThreadEx plus the
++ * join -- was a third of the main thread's time.
++ *
++ * So a pipe or file gets a write pump: one thread for the fd's lifetime
++ * draining a ring with blocking WriteFile().  A write copies into the ring
++ * and is reported complete at once, through the same APC path the thread
++ * version used, so fileio_write() and select() see exactly what they saw
++ * before; only when the ring is full does the completion wait for the
++ * pump to make room.  The ring is flushed on close and at exit, since the
++ * bytes in it have been reported written.  Console fds keep the thread
++ * path: their writes go through WriteConsoleW/processBuffer.
++ */
++#define SYNC_WPUMP_RING_SIZE (1024 * 1024)
++#define SYNC_WPUMP_CHUNK     (256 * 1024)
++#define SYNC_WPUMP_FLUSH_MS  10000
++
++struct sync_wpump {
++	HANDLE h;
++	HANDLE thread;
++	HANDLE data_evt;          /* auto-reset: the ring (or defer) has bytes */
++	CRITICAL_SECTION lock;
++	char  *ring;
++	DWORD  head, len;         /* head: next byte out */
++	const char *defer_p;      /* the tail of a write the ring had no room for */
++	DWORD  defer_n;
++	DWORD  err;               /* first WriteFile error; the pump is dead after it */
++	BOOL   apc_queued;
++	volatile LONG stop;
++	struct w32_io *pio;       /* NULL once the fd is gone and the thread outlived it */
++};
++
++static struct sync_wpump *live_wpumps[64];
++static int num_live_wpumps;
++static BOOL wpump_atexit_set;
++
++/* On main_thread: the write in flight is done (copied, or failed). */
++static VOID CALLBACK
++SyncWpumpAPCProc(_In_ ULONG_PTR dwParam)
++{
++	struct sync_wpump* p = (struct sync_wpump*)dwParam;
++
++	EnterCriticalSection(&p->lock);
++	p->apc_queued = FALSE;
++	if (p->pio) {
++		struct w32_io* pio = p->pio;
++		if (p->err)
++			pio->write_details.error = p->err;
++		pio->write_details.remaining = 0;
++		pio->write_details.completed = 0;
++		pio->write_details.pending = FALSE;
++	}
++	LeaveCriticalSection(&p->lock);
++}
++
++/* Lock held.  Queue the completion APC unless one is already on its way. */
++static BOOL
++sync_wpump_wake_locked(struct sync_wpump* p)
++{
++	if (p->apc_queued || !p->pio)
++		return FALSE;
++	p->apc_queued = TRUE;
++	return TRUE;
++}
++
++static unsigned __stdcall
++SyncWpumpThread(_In_ LPVOID lpParameter)
++{
++	struct sync_wpump* p = (struct sync_wpump*)lpParameter;
++	char* chunk = malloc(SYNC_WPUMP_CHUNK);
++
++	debug5("SyncWpump thread, pump:%p", p);
++	if (!chunk)
++		return 1;
++
++	for (;;) {
++		DWORD take, wrote = 0, err = 0;
++		BOOL wake = FALSE, empty;
++
++		EnterCriticalSection(&p->lock);
++		/* the tail of a write that did not fit: pull it in as room appears */
++		if (p->defer_n) {
++			DWORD space = SYNC_WPUMP_RING_SIZE - p->len;
++			DWORD n = min(space, p->defer_n);
++			if (n) {
++				DWORD tail = (p->head + p->len) % SYNC_WPUMP_RING_SIZE;
++				DWORD first = min(n, SYNC_WPUMP_RING_SIZE - tail);
++				memcpy(p->ring + tail, p->defer_p, first);
++				if (n > first)
++					memcpy(p->ring, p->defer_p + first, n - first);
++				p->len += n;
++				p->defer_p += n;
++				p->defer_n -= n;
++				if (!p->defer_n)
++					wake = sync_wpump_wake_locked(p);
++			}
++		}
++		empty = p->len == 0;
++		if (!empty) {
++			take = min(p->len, SYNC_WPUMP_CHUNK);
++			take = min(take, SYNC_WPUMP_RING_SIZE - p->head);
++			memcpy(chunk, p->ring + p->head, take);
++		}
++		LeaveCriticalSection(&p->lock);
++
++		if (wake && !QueueUserAPC(SyncWpumpAPCProc, main_thread, (ULONG_PTR)p)) {
++			EnterCriticalSection(&p->lock);
++			p->apc_queued = FALSE;
++			LeaveCriticalSection(&p->lock);
++		}
++		if (empty) {
++			if (p->stop)
++				break;
++			/* timed, so a stop is noticed even if nobody writes */
++			WaitForSingleObject(p->data_evt, 200);
++			continue;
++		}
++
++		if (!WriteFile(p->h, chunk, take, &wrote, NULL)) {
++			err = GetLastError();
++			if (!err)
++				err = ERROR_WRITE_FAULT;
++		}
++
++		EnterCriticalSection(&p->lock);
++		if (err) {
++			/* dead: drop what is queued, report on this or the next write */
++			p->err = err;
++			p->len = 0;
++			p->defer_n = 0;
++			wake = sync_wpump_wake_locked(p);
++		} else {
++			p->head = (p->head + wrote) % SYNC_WPUMP_RING_SIZE;
++			p->len -= wrote;
++		}
++		LeaveCriticalSection(&p->lock);
++		if (wake && !QueueUserAPC(SyncWpumpAPCProc, main_thread, (ULONG_PTR)p)) {
++			EnterCriticalSection(&p->lock);
++			p->apc_queued = FALSE;
++			LeaveCriticalSection(&p->lock);
++		}
++		if (err)
++			break;
++	}
++
++	free(chunk);
++	return 0;
++}
++
++/* Let the pump drain, then stop it.  The thread may be stuck in a WriteFile
++ * nobody is reading; cut it loose after a while rather than hang, and if it
++ * still will not go, leak the pump rather than free memory under it. */
++static void
++sync_wpump_stop(struct sync_wpump* p)
++{
++	int i;
++
++	InterlockedExchange(&p->stop, 1);
++	SetEvent(p->data_evt);
++	if (WaitForSingleObject(p->thread, SYNC_WPUMP_FLUSH_MS) == WAIT_TIMEOUT) {
++		debug3("sync write pump %p: peer not draining, abandoning the rest", p);
++		CancelSynchronousIo(p->thread);
++		if (WaitForSingleObject(p->thread, 1000) == WAIT_TIMEOUT) {
++			EnterCriticalSection(&p->lock);
++			p->pio = NULL;
++			LeaveCriticalSection(&p->lock);
++			CloseHandle(p->thread);
++			SleepEx(0, TRUE);
++			return;
++		}
++	}
++	/* run a completion it may have queued before we free it */
++	SleepEx(0, TRUE);
++	for (i = 0; i < num_live_wpumps; i++)
++		if (live_wpumps[i] == p) {
++			live_wpumps[i] = live_wpumps[--num_live_wpumps];
++			break;
++		}
++	CloseHandle(p->thread);
++	CloseHandle(p->data_evt);
++	DeleteCriticalSection(&p->lock);
++	free(p->ring);
++	free(p);
++}
++
++/* exit() with bytes still in a ring would lose what was reported written. */
++static void
++sync_wpump_exit(void)
++{
++	while (num_live_wpumps)
++		sync_wpump_stop(live_wpumps[num_live_wpumps - 1]);
++}
++
++static struct sync_wpump*
++sync_wpump_start(struct w32_io* pio)
++{
++	struct sync_ctx* c = sync_ctx_get(pio);
++	struct sync_wpump* p;
++
++	if (!c || num_live_wpumps == (int)(sizeof live_wpumps / sizeof live_wpumps[0])) {
++		errno = ENOMEM;
++		return NULL;
++	}
++	if (!(p = calloc(1, sizeof *p)))
++		goto fail;
++	if (!(p->ring = malloc(SYNC_WPUMP_RING_SIZE)))
++		goto fail;
++	if (!(p->data_evt = CreateEventW(NULL, FALSE, FALSE, NULL)))
++		goto fail;
++	InitializeCriticalSection(&p->lock);
++	p->h = WINHANDLE(pio);
++	p->pio = pio;
++	p->thread = (HANDLE)_beginthreadex(NULL, 0, SyncWpumpThread, p, 0, NULL);
++	if (!p->thread) {
++		DeleteCriticalSection(&p->lock);
++		goto fail;
++	}
++	if (!wpump_atexit_set) {
++		atexit(sync_wpump_exit);
++		wpump_atexit_set = TRUE;
++	}
++	live_wpumps[num_live_wpumps++] = p;
++	c->wr = p;
++	debug4("sync write pump started for io:%p", pio);
++	return p;
++
++fail:
++	errno = errno_from_Win32LastError();
++	if (p) {
++		if (p->data_evt)
++			CloseHandle(p->data_evt);
++		free(p->ring);
++		free(p);
++	}
++	return NULL;
++}
++
++/* The pump's syncio_initiate_write(): pio->write_details.buf holds num_bytes.
++ * The caller marks the write pending on our return; the completion APC
++ * clears it -- at the next alertable wait if the bytes fit the ring now,
++ * otherwise when the pump has taken the rest. */
++static int
++sync_wpump_write(struct w32_io* pio, DWORD num_bytes)
++{
++	struct sync_ctx* c = sync_ctx_get(pio);
++	struct sync_wpump* p = c ? c->wr : NULL;
++	DWORD space, n, tail, first;
++	BOOL wake;
++
++	if (!c) {
++		errno = ENOMEM;
++		return -1;
++	}
++	if (!p && !(p = sync_wpump_start(pio)))
++		return -1;
++
++	EnterCriticalSection(&p->lock);
++	if (p->err) {
++		DWORD err = p->err;
++		LeaveCriticalSection(&p->lock);
++		errno = errno_from_Win32Error(err);
++		if (FILETYPE(pio) == FILE_TYPE_PIPE && errno == ERROR_BROKEN_PIPE)
++			errno = EPIPE;
++		return -1;
++	}
++	space = SYNC_WPUMP_RING_SIZE - p->len;
++	n = min(space, num_bytes);
++	if (n) {
++		tail = (p->head + p->len) % SYNC_WPUMP_RING_SIZE;
++		first = min(n, SYNC_WPUMP_RING_SIZE - tail);
++		memcpy(p->ring + tail, pio->write_details.buf, first);
++		if (n > first)
++			memcpy(p->ring, pio->write_details.buf + first, n - first);
++		p->len += n;
++	}
++	if (n < num_bytes) {
++		p->defer_p = pio->write_details.buf + n;
++		p->defer_n = num_bytes - n;
++		wake = FALSE;
++	} else
++		wake = sync_wpump_wake_locked(p);
++	SetEvent(p->data_evt);
++	LeaveCriticalSection(&p->lock);
++
++	/* The bytes are in the ring and will be written, so the completion
++	 * cannot be refused: queueing an APC to our own thread fails only
++	 * under memory pressure, so keep at it. */
++	while (wake && !QueueUserAPC(SyncWpumpAPCProc, main_thread, (ULONG_PTR)p))
++		Sleep(1);
++	return 0;
++}
++
  BOOL isFirstTime = TRUE;
  
  /* APC that gets queued on main thread when a sync Read completes on worker thread */
-@@ -150,12 +372,33 @@ syncio_initiate_read(struct w32_io* pio)
+@@ -150,12 +687,38 @@ syncio_initiate_read(struct w32_io* pio)
  
  	debug5("syncio_initiate_read io:%p", pio);
  	if (pio->read_details.buf_size == 0) {
@@ -255,8 +570,13 @@ index 4d3c783..ea0bf28 100644
 +	}
 +
 +	if (sync_pump_wanted(pio)) {
-+		struct sync_pump* p = (struct sync_pump*)pio->internal.context;
++		struct sync_ctx* c = sync_ctx_get(pio);
++		struct sync_pump* p = c ? c->rd : NULL;
 +
++		if (!c) {
++			errno = ENOMEM;
++			return -1;
++		}
 +		if (!p && !(p = sync_pump_start(pio)))
 +			return -1;
 +		EnterCriticalSection(&p->lock);
@@ -267,13 +587,42 @@ index 4d3c783..ea0bf28 100644
  	}
  
  	read_thread = (HANDLE) _beginthreadex(NULL, 0, ReadThread, pio, 0, NULL);
-@@ -277,6 +520,11 @@ syncio_close(struct w32_io* pio)
+@@ -236,6 +799,8 @@ syncio_initiate_write(struct w32_io* pio, DWORD num_bytes)
+ {
+ 	HANDLE write_thread;
+ 	debug5("syncio_initiate_write initiate io:%p", pio);
++	if (sync_pump_wanted(pio))
++		return sync_wpump_write(pio, num_bytes);
+ 	memset(&(pio->sync_write_status), 0, sizeof(pio->sync_write_status));
+ 	pio->sync_write_status.to_transfer = num_bytes;
+ 	write_thread = (HANDLE)_beginthreadex(NULL, 0, WriteThread, pio, 0, NULL);
+@@ -262,6 +827,17 @@ syncio_close(struct w32_io* pio)
+ {
+ 	debug4("syncio_close - pio:%p", pio);
+ 
++	/* A pumped fd: flush the ring (its bytes were reported written) and
++	 * stop the pump before the handle goes.  Nothing is pending on the
++	 * thread path below for such an fd. */
++	if (pio->internal.context && ((struct sync_ctx*)pio->internal.context)->wr) {
++		struct sync_ctx* c = (struct sync_ctx*)pio->internal.context;
++		struct sync_wpump* p = c->wr;
++		c->wr = NULL;
++		sync_wpump_stop(p);
++		pio->write_details.pending = FALSE;
++	}
++
+ 	/*
+ 	* Wait for io write operation that is called by worker thread to terminate
+ 	* to avoid the write operation being terminated prematurely by CancelIoEx.
+@@ -277,6 +853,13 @@ syncio_close(struct w32_io* pio)
  		SleepEx(0, TRUE);
  	}
  
 +	if (pio->internal.context) {
 +		sync_pump_stop(pio);
 +		pio->read_details.pending = FALSE;
++		free(pio->internal.context);
++		pio->internal.context = NULL;
 +	}
 +
  	CancelIoEx(WINHANDLE(pio), NULL);

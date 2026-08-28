@@ -6,11 +6,13 @@
     rsync on Windows runs the remote side through an ssh client, and the one
     Windows ships reads a pipe on its stdin 3KB at a time with a thread per
     read -- which held a push from a Windows machine at about 17MB/s however
-    fast the link was (WINDOWS-PORT.md, "Moar Speed!").  This script builds
+    fast the link was (WINDOWS-PORT.md, "Moar Speed!") -- and, once the link
+    is fast enough to show it, creates a thread for every write to stdout and
+    a named pipe for every pass through its main loop.  This script builds
     the same client, Microsoft's Win32-OpenSSH, from the pinned copy in the
-    openssh/ submodule with the patches in win32/openssh/patches applied, and
-    leaves ssh.exe in the rsync build directory, where rsync.exe prefers it
-    over the one on PATH.
+    openssh/ submodule with the patches in win32/openssh/patches applied
+    (see BUILD-CMAKE.md for what each one does), and leaves ssh.exe in the
+    rsync build directory, where rsync.exe prefers it over the one on PATH.
 
     Its libcrypto is the one Windows already has.  ssh.exe links against the
     LibreSSL SDK Microsoft publishes for Win32-OpenSSH (headers and import

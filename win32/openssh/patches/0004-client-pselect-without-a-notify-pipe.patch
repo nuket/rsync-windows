@@ -1,0 +1,77 @@
+diff --git a/contrib/win32/win32compat/inc/sys/select.h b/contrib/win32/win32compat/inc/sys/select.h
+index 3cc5020..830bf90 100644
+--- a/contrib/win32/win32compat/inc/sys/select.h
++++ b/contrib/win32/win32compat/inc/sys/select.h
+@@ -30,5 +30,11 @@ int w32_select(int fds, w32_fd_set * , w32_fd_set * , w32_fd_set * ,
+ 	const struct w32_timeval *);
+ #define select(a,b,c,d,e)	w32_select((a), (b), (c), (d), (e))
+ 
++/* A real pselect() (w32fd.c), so openbsd-compat/bsd-pselect.c and its
++ * notify pipe per call are not used; config.h.vs defines HAVE_PSELECT. */
++struct timespec;
++int pselect(int fds, w32_fd_set *, w32_fd_set *, w32_fd_set *,
++	const struct timespec *, const void *sigmask);
++
+ 
+ 
+diff --git a/contrib/win32/win32compat/w32fd.c b/contrib/win32/win32compat/w32fd.c
+index b4c4368..6797314 100644
+--- a/contrib/win32/win32compat/w32fd.c
++++ b/contrib/win32/win32compat/w32fd.c
+@@ -40,6 +40,7 @@
+ #include "inc\sys\un.h"
+ #include "inc\utf.h"
+ #include "inc\stdio.h"
++#include "inc\signal.h"   /* sigset_t, sigprocmask for pselect() */
+ 
+ #include "w32fd.h"
+ #include "signal_internal.h"
+@@ -728,6 +729,48 @@ w32_fcntl(int fd, int cmd, ... /* arg */)
+ 	return ret;
+ }
+ 
++/*
++ * pselect(2) for Win32.
++ *
++ * Without this, OpenSSH's portable fallback (openbsd-compat/bsd-pselect.c)
++ * stands in, and it guards the gap between checking for a signal and
++ * blocking in select() by creating a notify pipe on EVERY call whenever a
++ * signal handler is installed -- which the client loop always has.  On
++ * Windows pipe() is a named pipe plus an open, two closes and the ACL work
++ * that goes with them: about a third of the client's main thread on a
++ * 20Gbit link, once per packet.
++ *
++ * The gap does not exist here.  Signals in this port are raised by queueing
++ * an APC to the main thread and setting pending_signals, and w32_select()
++ * waits alertably and processes pending signals both before it blocks and
++ * when it wakes -- so a signal arriving at any point interrupts the select
++ * the way the notify pipe was meant to.  The mask is honoured by the same
++ * sigprocmask() emulation the fallback used.
++ */
++int
++pselect(int nfds, w32_fd_set* readfds, w32_fd_set* writefds, w32_fd_set* exceptfds,
++	const struct timespec *timeout, const void *sigmask)
++{
++	struct timeval tv, *tvp = NULL;
++	sigset_t osig;
++	int ret, saved_errno;
++
++	if (timeout != NULL) {
++		tv.tv_sec = (long)timeout->tv_sec;
++		tv.tv_usec = (long)(timeout->tv_nsec / 1000);
++		tvp = &tv;
++	}
++	if (sigmask == NULL)
++		return w32_select(nfds, readfds, writefds, exceptfds, tvp);
++
++	sigprocmask(SIG_SETMASK, (const sigset_t *)sigmask, &osig);
++	ret = w32_select(nfds, readfds, writefds, exceptfds, tvp);
++	saved_errno = errno;
++	sigprocmask(SIG_SETMASK, &osig, NULL);
++	errno = saved_errno;
++	return ret;
++}
++
+ #define SELECT_EVENT_LIMIT 512
+ int
+ w32_select(int fds, w32_fd_set* readfds, w32_fd_set* writefds, w32_fd_set* exceptfds, const struct timeval *timeout)

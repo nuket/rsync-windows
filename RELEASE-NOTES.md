@@ -67,13 +67,30 @@ longer take many times longer than a full copy.
         rsync -rt -e "ssh -c aes128-gcm@openssh.com" src/ user@host:dst/
 
   - The ssh.exe in the zip is Microsoft's own Win32-OpenSSH client with its
-    stdin handling fixed.  The one Windows ships reads 3 KB at a time and
-    holds any transfer *from* a Windows machine at about 17 MB/s; this one
-    reaches the wire.  Same ~/.ssh, same ssh-agent, same known_hosts.
+    I/O fixed.  The one Windows ships reads 3 KB at a time and holds any
+    transfer *from* a Windows machine at about 17 MB/s; this one reaches the
+    wire on Ethernet, and about 750 MB/s each way over 20 Gbit Thunderbolt
+    networking (rsync 700 MB/s pushing, 650 MB/s pulling; a laptop core
+    running AES-GCM is the limit there).  Same ~/.ssh, same ssh-agent, same
+    known_hosts.
+
+  - On Thunderbolt networking set the MTU to the maximum on both ends
+    (65330 on Windows with Intel driver 1.41.1423, `ip link set dev
+    thunderbolt0 mtu 65330` on Linux): at 1500 the Linux end's per-packet
+    work capped a transfer into it at ~420 MB/s.
 
 
-What changed since v3.5.0-g00786d79
+What changed since v3.5.0-gf800ace2
 -----------------------------------
+
+  - The ssh.exe no longer creates a thread for every write to stdout, nor a
+    named pipe for every pass through its main loop (OpenSSH's portable
+    pselect() fallback did that).  Neither shows on Ethernet; on a 20 Gbit
+    link they held the client at ~340 MB/s sending and ~220 MB/s receiving,
+    against ~750 MB/s now.
+
+What changed in v3.5.0-gf800ace2
+--------------------------------
 
   - Delta transfers of files edited in place are up to 16x faster: the
     sender no longer rolls its checksum byte by byte through every changed
