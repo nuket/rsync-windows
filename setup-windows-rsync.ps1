@@ -1,4 +1,3 @@
-#Requires -Version 5.1
 <#
 .SYNOPSIS
     Make a Windows box reachable over rsync-over-ssh, in both directions.
@@ -89,6 +88,11 @@
 
     Pin a particular release rather than taking the latest.
 #>
+
+# After the help block, not before it: a #Requires line ahead of the block
+# stops PowerShell from picking the block up as help (`Get-Help .\setup-windows-rsync.ps1`
+# then shows only the syntax line).
+#Requires -Version 5.1
 
 [CmdletBinding()]
 param(
