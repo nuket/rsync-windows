@@ -36,9 +36,10 @@ from the pinned `openssh/` submodule with that fixed (see `win32/openssh/`),
 along with three more things that only show on a fast link — a thread created
 for every write to stdout, a named pipe created for every pass through the
 main loop by OpenSSH's portable `pselect()` fallback, and socket sends and
-receives done on the crypto thread rather than beside it — which together took
-it from ~340 to ~1000MB/s sending and ~220 to ~930MB/s receiving over 20Gbit
-Thunderbolt networking (rsync: ~850MB/s each way). `rsync.exe`
+receives done on the crypto thread rather than beside it — plus two staging
+copies per byte removed, which together took it from ~340MB/s sending and
+~220MB/s receiving to ~1GB/s each way over 20Gbit Thunderbolt networking
+(rsync: ~860MB/s pushing, ~840MB/s pulling). `rsync.exe`
 prefers it whenever it sits in the same directory. It uses the
 same `~/.ssh`, agent and `known_hosts` as the system one — and the same
 `libcrypto.dll`, the one the Windows OpenSSH Client component (9.5 or later)
