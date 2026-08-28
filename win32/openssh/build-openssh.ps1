@@ -36,7 +36,7 @@
     in the repository, which is ignored by git.
 
 .PARAMETER Out
-    Where the binary lands.  Default: build\ssh.exe for x64, so the ssh
+    Where the binary lands.  Default: build-x64\ssh.exe for x64, so the ssh
     transfer tests run with it, and build-x86\ssh-x86.exe for x86 -- under a
     name rsync-x86.exe does not pick up, because on the 64-bit machine that
     builds it there is no 32-bit libcrypto.dll for it to load.
@@ -156,7 +156,7 @@ foreach ($a in $archs) {
     $triplet  = "$a-custom"
     $platform = if ($a -eq 'x86') { 'Win32' } else { 'x64' }
     $exeName  = if ($a -eq 'x86') { 'ssh-x86.exe' } else { 'ssh.exe' }
-    $outDir   = if ($Out) { $Out } elseif ($a -eq 'x86') { Join-Path $repo 'build-x86' } else { Join-Path $repo 'build' }
+    $outDir   = if ($Out) { $Out } elseif ($a -eq 'x86') { Join-Path $repo 'build-x86' } else { Join-Path $repo 'build-x64' }
 
     # The projects look for headers and libraries where vcpkg's manifest mode
     # would have put them.  Nothing here uses vcpkg; the SDK is laid out in

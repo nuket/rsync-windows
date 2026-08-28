@@ -22,7 +22,7 @@ rem  Developer Command Prompt.
 rem
 rem  Two architectures, and each gets its own everything:
 rem
-rem      x64   build\rsync.exe          the build people want
+rem      x64   build-x64\rsync.exe      the build people want
 rem      x86   build-x86\rsync-x86.exe  for 32-bit Windows, and for the
 rem                                     occasional 64-bit machine running
 rem                                     something that will only load a
@@ -163,12 +163,16 @@ goto success
 :arch_ok
 
 rem Each architecture needs its own build directory -- Ninja caches the
-rem compiler it configured with -- and its own name for the result.
+rem compiler it configured with -- and its own name for the result.  The
+rem directory is the --build-dir prefix plus the architecture, so neither
+rem build is the unmarked one and a stale tree cannot be mistaken for the
+rem other architecture's.
 if /i "!ARCH!"=="x86" (
     set "BUILD_DIR=!BUILD_DIR!-x86"
     set "EXE_NAME=rsync-x86.exe"
     set "VCVARS=vcvarsamd64_x86.bat"
 ) else (
+    set "BUILD_DIR=!BUILD_DIR!-x64"
     set "EXE_NAME=rsync.exe"
     set "VCVARS=vcvars64.bat"
 )
@@ -373,13 +377,14 @@ echo.
 echo   --arch ARCH        x64, x86, or both ^(default^)
 echo   --clean            delete the build directory first
 echo   --config CFG       Release ^(default^), Debug or RelWithDebInfo
-echo   --build-dir DIR    build directory ^(default: build^)
+echo   --build-dir DIR    build directory prefix ^(default: build, giving
+echo                      build-x64 and build-x86^)
 echo   --host USER@HOST   also run the ssh transfer tests against HOST
 echo   --tests PATTERN    run only matching tests ^(may be repeated^)
 echo   --no-tests         build only
 echo   -h, --help         show this text
 echo.
-echo x64 builds build\rsync.exe; x86 builds build-x86\rsync-x86.exe.  Both
+echo x64 builds build-x64\rsync.exe; x86 builds build-x86\rsync-x86.exe.  Both
 echo builds and tests each in turn.
 echo.
 echo Requires Visual Studio 2022 with the C++ tools, and Python 3.6+.

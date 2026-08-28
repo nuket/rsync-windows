@@ -56,7 +56,7 @@ jobs:
       shell: cmd
       # windows-build-and-test.bat finds MSVC through vswhere and calls the
       # right vcvars itself, so no toolchain action is needed.  It defaults to
-      # --arch both: x64 into build\, x86 into build-x86\, each configured,
+      # --arch both: x64 into build-x64\, x86 into build-x86\, each configured,
       # built and run through the test suite separately.  The ssh transfer
       # tests skip on their own without RSYNC_WIN_TEST_HOST.
       run: windows-build-and-test.bat --clean
@@ -68,7 +68,7 @@ jobs:
       # at a time, which held a push from a Windows machine at 17MB/s.  The
       # script builds against Microsoft's published LibreSSL 3.8.2 SDK -- the
       # same libcrypto.dll the Windows OpenSSH Client component puts in
-      # System32, which is what ssh.exe loads -- and leaves build\ssh.exe and
+      # System32, which is what ssh.exe loads -- and leaves build-x64\ssh.exe and
       # build-x86\ssh-x86.exe.  No DLL ships with either.
       run: |
         .\win32\openssh\build-openssh.ps1 -Arch both
@@ -112,9 +112,9 @@ jobs:
         $rsyncDlls = '^(WS2_32|ADVAPI32|KERNEL32)\.dll$'
         $sshDlls   = '^(WS2_32|ADVAPI32|KERNEL32|CRYPT32|Secur32|USER32|USERENV|bcrypt|SHLWAPI|ole32|SHELL32|Netapi32|Rpcrt4|ntdll|libcrypto)\.dll$'
         $builds = @(
-          @{ Path = 'build\rsync.exe';             Arch = 'x64'; Machine = 'x64'; Allowed = $rsyncDlls },
+          @{ Path = 'build-x64\rsync.exe';             Arch = 'x64'; Machine = 'x64'; Allowed = $rsyncDlls },
           @{ Path = 'build-x86\rsync-x86.exe';     Arch = 'x86'; Machine = 'x86'; Allowed = $rsyncDlls },
-          @{ Path = 'build\ssh.exe';               Arch = 'x64'; Machine = 'x64'; Allowed = $sshDlls },
+          @{ Path = 'build-x64\ssh.exe';               Arch = 'x64'; Machine = 'x64'; Allowed = $sshDlls },
           @{ Path = 'build-x86\ssh-x86.exe';       Arch = 'x86'; Machine = 'x86'; Allowed = $sshDlls }
         )
 
@@ -155,7 +155,7 @@ jobs:
     - name: Stage the files to ship
       shell: pwsh
       run: |
-        $ver    = (Get-Item build\rsync.exe).VersionInfo.ProductVersion
+        $ver    = (Get-Item build-x64\rsync.exe).VersionInfo.ProductVersion
         $ver86  = (Get-Item build-x86\rsync-x86.exe).VersionInfo.ProductVersion
 
         # One release, one version: both binaries come out of the same
@@ -172,23 +172,23 @@ jobs:
         # name rather than the files'.  The -x86 suffixes the build gives its
         # outputs stop at the zip boundary.
         New-Item -ItemType Directory dist, stage\x64, stage\x86 | Out-Null
-        Copy-Item build\rsync.exe            stage\x64\rsync.exe
-        Copy-Item build\ssh.exe              stage\x64\ssh.exe
+        Copy-Item build-x64\rsync.exe            stage\x64\rsync.exe
+        Copy-Item build-x64\ssh.exe              stage\x64\ssh.exe
         Copy-Item build-x86\rsync-x86.exe    stage\x86\rsync.exe
         Copy-Item build-x86\ssh-x86.exe      stage\x86\ssh.exe
         foreach ($a in 'x64', 'x86') {
           Copy-Item COPYING              "stage\$a\COPYING.txt"
-          Copy-Item build\NOTICE-ssh.txt "stage\$a\NOTICE-ssh.txt"
+          Copy-Item build-x64\NOTICE-ssh.txt "stage\$a\NOTICE-ssh.txt"
           $zip = "rsync-windows-$a.zip"
           Compress-Archive -Path "stage\$a\*" -DestinationPath "dist\$zip" -CompressionLevel Optimal
           $hash = (Get-FileHash "dist\$zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $zip" | Out-File -Encoding ascii "dist\$zip.sha256"
           Write-Host "$zip  $hash"
         }
-        Copy-Item build\NOTICE-ssh.txt dist\
+        Copy-Item build-x64\NOTICE-ssh.txt dist\
         Copy-Item BUILD-CMAKE.md dist\
         "VER=$ver" >>$Env:GITHUB_ENV
-        "SSH_VER=$((& build\ssh.exe -V 2>&1) -join '')" >>$Env:GITHUB_ENV
+        "SSH_VER=$((& build-x64\ssh.exe -V 2>&1) -join '')" >>$Env:GITHUB_ENV
 
         # <upstream release>-g<port rev>.  The release half comes from
         # version.h and the rev names the commit here that built it, so the

@@ -132,7 +132,7 @@ endif()
 # mitigations are worth having.  These are the ones the toolchain can bake in;
 # the ones that have to be switched on at runtime live in win32/win32harden.c.
 #
-# Check the result with:  dumpbin /headers /loadconfig build\rsync.exe
+# Check the result with:  dumpbin /headers /loadconfig build-x64\rsync.exe
 # ---------------------------------------------------------------------------
 if(MSVC AND RSYNC_HARDEN)
     add_compile_options(

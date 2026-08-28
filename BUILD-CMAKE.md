@@ -58,7 +58,7 @@ is needed), then configures, builds and tests **both** architectures in turn:
 
 | Architecture | Build directory | Binary |
 | --- | --- | --- |
-| x64 (default) | `build\` | `rsync.exe` |
+| x64 (default) | `build-x64\` | `rsync.exe` |
 | x86 | `build-x86\` | `rsync-x86.exe` |
 
 Ninja generates for one compiler, and which compiler that is comes from the
@@ -75,7 +75,7 @@ architecture is whichever that targets, and the output name follows from it:
 ```powershell
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-.\build\rsync.exe --version
+.\build-x64\rsync.exe --version
 ```
 
 Both binaries are self-contained — no Cygwin or MSYS DLLs — and identical but
@@ -102,7 +102,7 @@ you can assume of a machine you have just copied a binary onto. With `/MT`
 the only imports left are part of Windows itself:
 
 ```
-> dumpbin /dependents build\rsync.exe
+> dumpbin /dependents build-x64\rsync.exe
     WS2_32.dll
     ADVAPI32.dll
     KERNEL32.dll
@@ -134,7 +134,7 @@ it:
 
 The script applies the patches once, fetches the prebuilt LibreSSL 3.8.2 and
 zlib SDKs Microsoft publishes for Win32-OpenSSH (pinned by SHA-256), runs
-MSBuild on the OpenSSH projects, and leaves `build\ssh.exe` beside
+MSBuild on the OpenSSH projects, and leaves `build-x64\ssh.exe` beside
 `rsync.exe` — which means the ssh transfer tests, run with `--host`, exercise
 the bundled client — and `build-x86\ssh-x86.exe` (the release packs each
 pair as `rsync.exe` + `ssh.exe` in a per-architecture zip). Both carry the same
@@ -206,9 +206,9 @@ in the Winsock catalog:
 Verify what actually landed:
 
 ```powershell
-dumpbin /headers build\rsync.exe    # Control Flow Guard, CET compatible,
+dumpbin /headers build-x64\rsync.exe    # Control Flow Guard, CET compatible,
                                     # Dynamic base, NX compatible, High Entropy
-dumpbin /loadconfig build\rsync.exe # Dependent Load Flag 0800, Guard CF count
+dumpbin /loadconfig build-x64\rsync.exe # Dependent Load Flag 0800, Guard CF count
 ```
 
 **`RSYNC_STRICT_MITIGATIONS`** (off) adds three more that are genuinely useful
@@ -509,7 +509,7 @@ cmake --build build --target win32-tests
 or directly, to pick individual tests:
 
 ```powershell
-python win32\tests\run.py --rsync-bin build\rsync.exe [TEST ...]
+python win32\tests\run.py --rsync-bin build-x64\rsync.exe [TEST ...]
 ```
 
 Set `RSYNC_WIN_TEST_HOST=user@host` (key-based login, rsync installed) to

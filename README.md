@@ -9,7 +9,7 @@ Unix ownership and link *creation* do not (see BUILD-CMAKE.md).
 
     windows-build-and-test.bat
 
-builds it and runs the test suite, for x64 (`build\rsync.exe`) and x86
+builds it and runs the test suite, for x64 (`build-x64\rsync.exe`) and x86
 (`build-x86\rsync-x86.exe`) in turn. Either result is standalone, importing
 only `WS2_32`, `ADVAPI32` and `KERNEL32` — all shipped with Windows — with the
 C runtime linked in and the usual exploit mitigations enabled (Control Flow
