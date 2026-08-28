@@ -37,11 +37,28 @@ another ssh by path is used as given.
 [w1]: https://github.com/nuket/rsync-windows/releases
 
 To take a fresh box all the way to sending *and* receiving over rsync-over-ssh,
-run
+there is `setup-windows-rsync.ps1`. To run it:
 
-    powershell -ExecutionPolicy Bypass -File setup-windows-rsync.ps1
+1. Get the script onto the machine — clone this repository, or download just
+   that one file from it.
+2. Open a PowerShell window. Windows PowerShell 5.1 or PowerShell 7, either
+   is fine, and it does **not** need to be an elevated one.
+3. Change to the directory holding the script and run
 
-from the repo root. It elevates itself through UAC, then:
+       powershell -ExecutionPolicy Bypass -File .\setup-windows-rsync.ps1
+
+4. Answer the UAC prompt. The script relaunches itself elevated in a **new**
+   console window and does its work there; that window stays open at the end
+   so you can read what it did.
+5. Open a fresh PowerShell window before using `rsync`: the `PATH` change
+   reaches only shells started after it.
+
+`-ExecutionPolicy Bypass` is there only because the script is unsigned; in a
+session whose policy already allows local scripts, `.\setup-windows-rsync.ps1`
+on its own does the same. `Get-Help .\setup-windows-rsync.ps1 -Full` prints
+the same instructions and every option.
+
+Elevated, the script then:
 
 1. installs the **OpenSSH Client** capability — rsync does not speak ssh
    itself, it execs an `ssh` binary, and on Windows that is the one this
@@ -60,12 +77,13 @@ from the repo root. It elevates itself through UAC, then:
 5. optionally authorises a public key for inbound ssh, with the ACLs
    Win32-OpenSSH requires before it will honour one.
 
-What it does is adjustable:
+What it does is adjustable — each of these goes on the end of the command
+above:
 
-    .\setup-windows-rsync.ps1                                    # sshd + agent + rsync
-    .\setup-windows-rsync.ps1 -AuthorizedKey $HOME\.ssh\id_ed25519.pub
-    .\setup-windows-rsync.ps1 -SkipServer                        # client side only
-    .\setup-windows-rsync.ps1 -InstallDir D:\bin -Tag v3.5.0-g521ad8ad
+    -AuthorizedKey $HOME\.ssh\id_ed25519.pub   # also authorise a key for inbound ssh
+    -SkipServer                                # client side only: no sshd, no firewall rule
+    -InstallDir D:\bin                         # somewhere other than C:\Tools\rsync
+    -Tag v3.5.0-g00786d79                      # a particular release rather than the latest
 
 Re-running is safe: each step checks before it acts, and rsync is re-downloaded
 only when the installed binary is not the release being asked for. The run
