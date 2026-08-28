@@ -316,8 +316,20 @@ char *map_ptr(struct map_struct *map, OFF_T offset, int32 len)
 	window_size = map->def_window_size;
 	if (window_start + window_size > map->file_size)
 		window_size = (int32)(map->file_size - window_start);
-	if (window_size < len + align_fudge)
+	if (window_size < len + align_fudge) {
 		window_size = ALIGNED_LENGTH(len + align_fudge);
+		/* The alignment rounds the window up to a 1 KB boundary the
+		 * file itself need not reach.  A request larger than the
+		 * default window that ends within the last KB of the file
+		 * (the sender's hoisted map, see hash_search()) would
+		 * otherwise read past EOF, and the short read is reported
+		 * as a read error that makes the receiver redo the file.
+		 * Only trim when the request itself fits the file: an
+		 * overshooting request keeps the old zero-filled behaviour. */
+		if (offset + len <= map->file_size
+		 && window_start + window_size > map->file_size)
+			window_size = (int32)(map->file_size - window_start);
+	}
 
 	/* make sure we have allocated enough memory for the window */
 	if (window_size > map->p_size) {

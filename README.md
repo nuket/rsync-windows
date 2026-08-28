@@ -34,6 +34,18 @@ same `~/.ssh`, agent and `known_hosts` as the system one — and the same
 installs in System32, so that component has to be present. An `-e` naming
 another ssh by path is used as given.
 
+The sender's delta search is also faster than upstream's on files that are
+modified in place — disk images, databases, anything a program rewrites
+sectors of. Upstream rolls its checksum through every changed block one byte
+at a time, with a cache-missing table lookup per byte, which held a laptop
+core at 100% for ~30MB/s on a VM image pulled to Linux. This port keys the
+lookup table on the full weak checksum and prefetches it, hoists the window
+management out of the per-byte loop, and — before rolling through a changed
+block at all — checks whether the next few blocks still sit where the basis
+file has them, which on such files they almost always do. Same wire format,
+same result file; on a 2.2GB image with three quarters of its blocks touched
+the pull went from 106s to 6.7s, i.e. from CPU-bound to line rate.
+
 [w1]: https://github.com/nuket/rsync-windows/releases
 
 To take a fresh box all the way to sending *and* receiving over rsync-over-ssh,

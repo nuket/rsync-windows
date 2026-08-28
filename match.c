@@ -66,46 +66,92 @@ extern RSYNC_TLS struct stats stats;
 #define MAX_CHAIN_LEN 1024
 #endif
 
-static uint32 tablesize;
-static int32 *hash_table;
+/* The sender's lookup table for the receiver's weak checksums.
+ *
+ * hash_search() probes this once per byte of unmatched data, so its layout
+ * decides how fast a delta transfer can run through changed regions.  The
+ * original design -- a 16-bit hash of sum1 into an int32 table, then a walk
+ * down a chain of sum_buf entries comparing the full sum1 -- costs two
+ * data-dependent cache misses per byte once the file has more than a few
+ * thousand blocks: one into the table and one into the chain, because the
+ * table itself cannot tell whether any block really has this sum1.  On a
+ * 20 GB disk image (160k blocks, a 1 MB table, a 4 MB sums array) that is
+ * what pins a laptop core at 100% for ~30 MB/s.
+ *
+ * Instead, an open-addressed table keyed on the full 32-bit sum1: each slot
+ * holds the sum1 and the head of a chain that contains ONLY blocks with that
+ * exact sum1.  A miss -- the overwhelmingly common case on changed data --
+ * is settled by the one slot, and hash_search() prefetches that slot a few
+ * dozen bytes ahead of time (see LOOKAHEAD), so the miss no longer waits on
+ * memory at all.  Blocks with equal weak checksums (runs of zeros in disk
+ * images produce thousands) still chain, most recent first, exactly as
+ * before, and the --inplace pruning still unlinks through the head pointer.
+ *
+ * This is a sender-side data structure only: it changes which candidate
+ * blocks are compared, in which order, and nothing on the wire. */
+struct hash_slot {
+	uint32 sum1;	/* weak checksum shared by every block on the chain */
+	int32 idx;	/* first block with that sum1; HASH_EMPTY if never used */
+};
 
-#define SUM2HASH2(s1,s2) (((s1) + (s2)) & 0xFFFF)
-#define SUM2HASH(sum) SUM2HASH2((sum)&0xFFFF,(sum)>>16)
+/* A chain that --inplace pruning has emptied is left as a tombstone with
+ * idx == -1: it must keep stopping nobody, since keys inserted after it
+ * probed past it.  Only HASH_EMPTY ends a probe. */
+#define HASH_EMPTY (-2)
 
-#define BIG_SUM2HASH(sum) ((sum)%tablesize)
+static struct hash_slot *hash_table;
+static uint32 hash_mask;	/* tablesize - 1; tablesize is a power of two */
+static int hash_shift;		/* 32 - log2(tablesize) */
+
+/* Fibonacci hashing: one multiply, and the high bits it keeps are the ones
+ * every input bit influences, so sum1 values that differ only in the low
+ * byte (adjacent-looking data) still spread across the table. */
+#define SUM1HASH(sum) ((uint32)((sum) * 0x9E3779B1u) >> hash_shift)
+
+#define MIN_TABLESIZE 1024
 
 static void build_hash_table(struct sum_struct *s)
 {
 	static uint32 alloc_size;
+	uint32 tablesize, want;
 	int32 i;
 
-	/* Dynamically calculate the hash table size so that the hash load
-	 * for big files is about 80%.  A number greater than the traditional
-	 * size must be odd or s2 will not be able to span the entire set. */
-	tablesize = (uint32)(s->count/8) * 10 + 11;
-	if (tablesize < TRADITIONAL_TABLESIZE)
-		tablesize = TRADITIONAL_TABLESIZE;
-	if (tablesize > alloc_size || tablesize < alloc_size - 16*1024) {
+	/* A power of two at least twice the block count: a load factor of at
+	 * most 1/2 keeps the linear-probe runs short, and strictly more slots
+	 * than blocks guarantees the probe in hash_search() always reaches an
+	 * empty slot.  The cap keeps tablesize from wrapping to zero for a
+	 * (theoretical) count near INT32_MAX; even then count < tablesize. */
+	want = (uint32)s->count * 2 + 1;
+	tablesize = MIN_TABLESIZE;
+	while (tablesize < want && tablesize < 0x80000000u)
+		tablesize <<= 1;
+	hash_mask = tablesize - 1;
+	hash_shift = 32;
+	for (want = tablesize; want > 1; want >>= 1)
+		hash_shift--;
+
+	if (tablesize != alloc_size) {
 		if (hash_table)
 			free(hash_table);
-		hash_table = new_array(int32, tablesize);
+		hash_table = new_array(struct hash_slot, tablesize);
 		alloc_size = tablesize;
 	}
 
-	memset(hash_table, 0xFF, tablesize * sizeof hash_table[0]);
+	for (i = 0; (uint32)i < tablesize; i++)
+		hash_table[i].idx = HASH_EMPTY;
 
-	if (tablesize == TRADITIONAL_TABLESIZE) {
-		for (i = 0; i < s->count; i++) {
-			uint32 t = SUM2HASH(s->sums[i].sum1);
-			s->sums[i].chain = hash_table[t];
-			hash_table[t] = i;
+	for (i = 0; i < s->count; i++) {
+		uint32 sum = s->sums[i].sum1;
+		uint32 h = SUM1HASH(sum);
+		while (hash_table[h].idx != HASH_EMPTY && hash_table[h].sum1 != sum)
+			h = (h + 1) & hash_mask;
+		if (hash_table[h].idx == HASH_EMPTY) {
+			hash_table[h].sum1 = sum;
+			hash_table[h].idx = -1;
 		}
-	} else {
-		for (i = 0; i < s->count; i++) {
-			uint32 t = BIG_SUM2HASH(s->sums[i].sum1);
-			s->sums[i].chain = hash_table[t];
-			hash_table[t] = i;
-		}
+		/* Most recent block first, as the chained table did. */
+		s->sums[i].chain = hash_table[h].idx;
+		hash_table[h].idx = i;
 	}
 }
 
@@ -159,6 +205,113 @@ static void matched(int f, struct sum_struct *s, struct map_struct *buf, OFF_T o
 }
 
 
+/* hash_search() rolls the weak checksum forward one byte at a time through
+ * data that does not match a block, looking the sum up in hash_table at
+ * every offset.  Two things make that loop cheap:
+ *
+ * LOOKAHEAD: a second rolling checksum runs LOOKAHEAD bytes ahead of the
+ * real one, and the table slot for ITS value is prefetched.  By the time
+ * the real search reaches that offset the slot is in L1, and the loop no
+ * longer stalls on a cache miss per byte.  The lookahead is only bookkeeping
+ * -- it never decides a match -- so its window can be dropped and rebuilt
+ * with get_checksum1() whenever the search jumps (after a match, or near
+ * the end of the file where a full-size window ahead does not exist).
+ *
+ * MAP_HOIST: map_ptr() is asked for the block plus up to MAP_HOIST bytes
+ * beyond it, and the pointer is then walked directly for that many rolls,
+ * instead of calling map_ptr() once per byte (a fifth of the sender's time,
+ * measured).  `avail' counts how many rolls the pointer is good for.  Any
+ * other map_ptr() call in the loop -- a checksum, a flushed literal -- sets
+ * avail = 0, which forces the next roll to fetch the window afresh rather
+ * than trust that the window did not move. */
+#define LOOKAHEAD 32
+#define MAP_HOIST (256 * 1024)
+
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <xmmintrin.h>
+#define PREFETCH(p) _mm_prefetch((const char *)(p), _MM_HINT_T0)
+#elif defined(__GNUC__)
+#define PREFETCH(p) __builtin_prefetch(p)
+#else
+#define PREFETCH(p) do { } while (0)
+#endif
+
+/* Look for a block of the basis file at exactly `pos' in the sender's file.
+ * Returns the block's index, or -1.  This is the same test hash_search()
+ * applies while rolling, minus the --inplace bookkeeping (callers skip the
+ * probe in that mode), and it prefers `want_i', the block the previous
+ * match predicts, so the RLL coder keeps seeing adjacent tokens.
+ * `map' must already cover [pos, pos + blength) -- see the caller. */
+static int32 probe_block(struct sum_struct *s, schar *map, OFF_T len, OFF_T pos,
+			 int32 want_i, char *sum2)
+{
+	int32 l = (int32)MIN((OFF_T)s->blength, len - pos);
+	uint32 sum = get_checksum1((char *)map, l);
+	uint32 h = SUM1HASH(sum);
+	int32 i, chain_len = 0;
+	int done_csum2 = 0;
+
+	for (;;) {
+		i = hash_table[h].idx;
+		if (i == HASH_EMPTY)
+			return -1;
+		if (hash_table[h].sum1 == sum)
+			break;
+		h = (h + 1) & hash_mask;
+	}
+
+	if (want_i < s->count && s->sums[want_i].sum1 == sum && s->sums[want_i].len == l) {
+		get_checksum2((char *)map, l, sum2);
+		done_csum2 = 1;
+		if (memcmp(sum2, sum2_at(s, want_i), s->s2length) == 0)
+			return want_i;
+	}
+
+	for (; i >= 0; i = s->sums[i].chain) {
+		if (++chain_len > MAX_CHAIN_LEN)
+			return -1;
+		if (s->sums[i].len != l)
+			continue;
+		if (!done_csum2) {
+			get_checksum2((char *)map, l, sum2);
+			done_csum2 = 1;
+		}
+		if (memcmp(sum2, sum2_at(s, i), s->s2length) == 0)
+			return i;
+		false_alarms++;
+	}
+	return -1;
+}
+
+/* How many blocks past a broken one hash_search() tries at their aligned
+ * position before it falls back to rolling through the data byte by byte.
+ *
+ * Files that are modified in place -- disk images, databases, anything a
+ * program rewrites sectors of -- keep every unchanged block exactly where
+ * it was, so after a block fails to match, the block after it is almost
+ * always sitting at offset + blength.  The classic search only finds that
+ * by rolling the checksum through the whole broken block, one byte at a
+ * time, and that roll is what makes a delta transfer of a disk image run
+ * at a small fraction of the line rate.  A probe is one get_checksum1()
+ * over the block, roughly 15x cheaper per byte than rolling, so a few of
+ * them cost less than rolling through a single block.
+ *
+ * What it gives up: when a probe succeeds, any match that a byte-by-byte
+ * roll would have found INSIDE the skipped blocks -- a shifted copy of some
+ * basis block -- is sent as literal data instead.  That needs an insertion
+ * and a matching deletion within a few blocks of each other, and costs at
+ * most those blocks in transfer size, never correctness.  When every probe
+ * fails (shifted data, appended data, a wholly different file), the search
+ * rolls on exactly as before, and the probes are not retried until the
+ * next match, so a file that never matches pays for them exactly once.
+ *
+ * Sixteen, because a failed round then costs about what rolling through
+ * one block does (the roll is ~40x the work per byte on a laptop core),
+ * while a disk image whose guest wrote every second sector still gets
+ * runs of half a dozen consecutive changed blocks that a shorter round
+ * would leave to the roll. */
+#define ALIGNED_PROBES 16
+
 static void hash_search(int f,struct sum_struct *s,
 			struct map_struct *buf, OFF_T len)
 {
@@ -166,6 +319,9 @@ static void hash_search(int f,struct sum_struct *s,
 	int32 k, want_i, aligned_i, backup;
 	char sum2[MAX_DIGEST_LEN];
 	uint32 s1, s2, sum;
+	uint32 a1 = 0, a2 = 0;	/* the lookahead window's rolling checksum */
+	int ahead_valid = 0;
+	int32 avail = 0;	/* rolls the current map pointer is good for */
 	int more;
 	schar *map;
 
@@ -211,18 +367,19 @@ static void hash_search(int f,struct sum_struct *s,
 				big_num(offset), s2 & 0xFFFF, s1 & 0xFFFF);
 		}
 
-		if (tablesize == TRADITIONAL_TABLESIZE) {
-			hash_entry = SUM2HASH2(s1,s2);
-			if ((i = hash_table[hash_entry]) < 0)
+		sum = (s1 & 0xffff) | (s2 << 16);
+		hash_entry = SUM1HASH(sum);
+		for (;;) {
+			i = hash_table[hash_entry].idx;
+			if (i == HASH_EMPTY)
 				goto null_hash;
-			sum = (s1 & 0xffff) | (s2 << 16);
-		} else {
-			sum = (s1 & 0xffff) | (s2 << 16);
-			hash_entry = BIG_SUM2HASH(sum);
-			if ((i = hash_table[hash_entry]) < 0)
-				goto null_hash;
+			if (hash_table[hash_entry].sum1 == sum)
+				break;
+			hash_entry = (hash_entry + 1) & hash_mask;
 		}
-		prev = &hash_table[hash_entry];
+		if (i < 0)	/* a chain that --inplace pruning emptied */
+			goto null_hash;
+		prev = &hash_table[hash_entry].idx;
 
 		hash_hits++;
 		do {
@@ -262,6 +419,7 @@ static void hash_search(int f,struct sum_struct *s,
 
 			if (!done_csum2) {
 				map = (schar *)map_ptr(buf,offset,l);
+				avail = 0;
 				get_checksum2((char *)map,l,sum2);
 				done_csum2 = 1;
 			}
@@ -301,6 +459,7 @@ static void hash_search(int f,struct sum_struct *s,
 							backup = 0;
 						map = (schar *)map_ptr(buf, aligned_offset - backup, l + backup)
 						    + backup;
+						avail = 0;
 						sum = get_checksum1((char *)map, l);
 						if (sum != s->sums[i].sum1)
 							goto check_want_i;
@@ -336,6 +495,8 @@ static void hash_search(int f,struct sum_struct *s,
 			offset += s->sums[i].len - 1;
 			k = (int32)MIN((OFF_T)s->blength, len-offset);
 			map = (schar *)map_ptr(buf, offset, k);
+			avail = 0;
+			ahead_valid = 0;
 			sum = get_checksum1((char *)map, k);
 			s1 = sum & 0xFFFF;
 			s2 = sum >> 16;
@@ -349,9 +510,76 @@ static void hash_search(int f,struct sum_struct *s,
 		if (backup < 0)
 			backup = 0;
 
+		if (offset == last_match && !updating_basis_file && k == s->blength) {
+			/* We are right behind a match (or at the start) and the
+			 * block here does not match: before rolling through it,
+			 * try the next few blocks at their aligned positions.
+			 * One window covers the probes and the roll that may
+			 * follow, so failed probes do not thrash map_ptr(). */
+			OFF_T want = (OFF_T)k + (OFF_T)ALIGNED_PROBES * s->blength;
+			int32 wlen = (int32)MIN(len - offset, want);
+			schar *base = (schar *)map_ptr(buf, offset, wlen);
+			int j;
+			avail = 0;
+			for (j = 1; j <= ALIGNED_PROBES; j++) {
+				OFF_T p = offset + (OFF_T)j * s->blength;
+				int32 i;
+				if (p >= end)
+					break;
+				i = probe_block(s, base + (OFF_T)j * s->blength, len, p, want_i, sum2);
+				if (i < 0)
+					continue;
+				/* Send the skipped blocks as literal data and pick
+				 * up after the match, just as a rolled match does. */
+				want_i = i + 1;
+				matched(f, s, buf, p, i);
+				offset = p + s->sums[i].len - 1;
+				k = (int32)MIN((OFF_T)s->blength, len-offset);
+				map = (schar *)map_ptr(buf, offset, k);
+				sum = get_checksum1((char *)map, k);
+				s1 = sum & 0xFFFF;
+				s2 = sum >> 16;
+				matches++;
+				ahead_valid = 0;
+				backup = 0;
+				break;
+			}
+		}
+
+		if (avail <= LOOKAHEAD) {
+			/* Fetch the window covering everything from last_match
+			 * (so the literal flush below reads what is already
+			 * mapped) through the block and as far past it as the
+			 * lookahead and hoisting can use.  Past the file's end
+			 * there is nothing to roll in, and `more' is 0. */
+			OFF_T room = len - (offset + k);
+			if (room > MAP_HOIST)
+				room = MAP_HOIST;
+			avail = room > 0 ? (int32)room : 0;
+			map = (schar *)map_ptr(buf, offset - backup, k + avail + backup) + backup;
+			if (avail > LOOKAHEAD) {
+				if (!ahead_valid) {
+					uint32 asum = get_checksum1((char *)map + LOOKAHEAD, k);
+					a1 = asum & 0xFFFF;
+					a2 = asum >> 16;
+					ahead_valid = 1;
+				}
+			} else
+				ahead_valid = 0;
+		}
+		more = avail > 0;
+
+		if (ahead_valid) {
+			/* Roll the lookahead window one byte and prefetch the
+			 * slot its checksum will probe LOOKAHEAD rolls from now. */
+			a1 -= map[LOOKAHEAD] + CHAR_OFFSET;
+			a2 -= k * (map[LOOKAHEAD] + CHAR_OFFSET);
+			a1 += map[LOOKAHEAD + k] + CHAR_OFFSET;
+			a2 += a1;
+			PREFETCH(&hash_table[SUM1HASH((a1 & 0xffff) | (a2 << 16))]);
+		}
+
 		/* Trim off the first byte from the checksum */
-		more = offset + k < len;
-		map = (schar *)map_ptr(buf, offset - backup, k + more + backup) + backup;
 		s1 -= map[0] + CHAR_OFFSET;
 		s2 -= k * (map[0]+CHAR_OFFSET);
 
@@ -359,8 +587,10 @@ static void hash_search(int f,struct sum_struct *s,
 		if (more) {
 			s1 += map[k] + CHAR_OFFSET;
 			s2 += s1;
+			avail--;
 		} else
 			--k;
+		map++;
 
 		/* By matching early we avoid re-reading the
 		   data 3 times in the case where a token
@@ -368,8 +598,10 @@ static void hash_search(int f,struct sum_struct *s,
 		   match. The 3 reads are caused by the
 		   running match, the checksum update and the
 		   literal send. */
-		if (backup >= s->blength+CHUNK_SIZE && end-offset > CHUNK_SIZE)
+		if (backup >= s->blength+CHUNK_SIZE && end-offset > CHUNK_SIZE) {
 			matched(f, s, buf, offset - s->blength, -2);
+			avail = 0;
+		}
 	} while (++offset < end);
 
 	matched(f, s, buf, len, -1);
