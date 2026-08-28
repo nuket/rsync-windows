@@ -4,31 +4,58 @@
     Make a Windows box reachable over rsync-over-ssh, in both directions.
 
 .DESCRIPTION
+    HOW TO RUN IT
+
+    Open any PowerShell window -- Windows PowerShell 5.1 or PowerShell 7, it does not
+    have to be an elevated one -- change to the directory holding this script, and run:
+
+        powershell -ExecutionPolicy Bypass -File .\setup-windows-rsync.ps1
+
+    The script notices it is not elevated and relaunches itself through a UAC prompt in
+    a NEW console window, which stays open when it is done so the output can be read.
+    -ExecutionPolicy Bypass is only there because the script is unsigned; in a session
+    whose policy already allows local scripts, .\setup-windows-rsync.ps1 on its own
+    does the same.  Open a fresh window afterwards before expecting `rsync` to resolve:
+    the PATH change reaches only shells started after it.
+
+    Common variants, each appended to the command above (details under PARAMETERS and
+    EXAMPLES below):
+
+        -SkipServer                               client side only: no sshd, no firewall rule
+        -Tag v3.5.0-g00786d79 -InstallDir D:\bin  a specific release, somewhere else
+        -AuthorizedKey $HOME\.ssh\id_ed25519.pub  also authorise a key for inbound ssh
+
+    WHAT IT DOES
+
     One script, run once, on a fresh Windows 10 1809+ / Windows 11 / Server 2019+ box:
 
-      1. OpenSSH Client capability  - the ssh.exe rsync shells out to when this box SENDS.
+      1. OpenSSH Client capability  - the ssh.exe rsync shells out to when this box SENDS,
+                                      and the libcrypto.dll the release's own ssh.exe uses.
       2. ssh-agent service          - Automatic + started, so keys loaded with ssh-add
                                       survive and are visible to ssh.exe and git.
       3. OpenSSH Server (sshd)      - Automatic + started + inbound TCP 22 on ALL firewall
                                       profiles, so this box can RECEIVE.
-      4. rsync.exe                  - the latest release of github.com/nuket/rsync-windows,
-                                      SHA-256 verified, installed to C:\Tools\rsync and put
-                                      on the MACHINE PATH.
+      4. rsync.exe + ssh.exe        - the latest release of github.com/nuket/rsync-windows:
+                                      the zip for this OS's bitness, SHA-256 verified,
+                                      unpacked to C:\Tools\rsync and put on the MACHINE
+                                      PATH.  The ssh.exe beside rsync.exe is the one
+                                      rsync uses; it is the Windows client with its
+                                      slow-upload bug fixed (see the README).
       5. authorized_keys (optional) - -AuthorizedKey installs a public key with the ACLs
                                       Win32-OpenSSH insists on before it will honour it.
 
-    Idempotent: re-running skips anything already in place, and only re-downloads rsync
-    when the installed build is not the latest release.
+    Idempotent: re-running skips anything already in place, and only re-downloads the
+    release when what is installed is not the release being asked for.
 
     Elevates itself via UAC if not already running as Administrator.
 
 .PARAMETER InstallDir
-    Where rsync.exe lands. Default C:\Tools\rsync. Deliberately NOT under "Program Files":
-    the remote end of an rsync is invoked as a bare command line, and a path with spaces
-    in it makes the client-side --rsync-path escape hatch painful to quote.
+    Where rsync.exe and ssh.exe land. Default C:\Tools\rsync. Deliberately NOT under
+    "Program Files": the remote end of an rsync is invoked as a bare command line, and a
+    path with spaces in it makes the client-side --rsync-path escape hatch painful to quote.
 
 .PARAMETER Tag
-    Release to install, e.g. 'v3.5.0-g521ad8ad'. Default 'latest'.
+    Release to install, e.g. 'v3.5.0-g00786d79'. Default 'latest'.
 
 .PARAMETER AuthorizedKey
     A public key to authorise for inbound ssh: either the key text itself
@@ -43,13 +70,24 @@
     Use this on a box that only ever sends.
 
 .EXAMPLE
-    .\setup-windows-rsync.ps1
+    powershell -ExecutionPolicy Bypass -File .\setup-windows-rsync.ps1
+
+    The usual run: everything, from any PowerShell window, elevating itself.
 
 .EXAMPLE
     .\setup-windows-rsync.ps1 -AuthorizedKey $HOME\.ssh\id_ed25519.pub
 
+    Also authorise this machine's own key for inbound ssh.
+
 .EXAMPLE
     .\setup-windows-rsync.ps1 -SkipServer -InstallDir D:\bin
+
+    A box that only sends: no sshd, no firewall rule, binaries under D:\bin.
+
+.EXAMPLE
+    .\setup-windows-rsync.ps1 -Tag v3.5.0-g00786d79
+
+    Pin a particular release rather than taking the latest.
 #>
 
 [CmdletBinding()]
