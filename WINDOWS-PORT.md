@@ -14451,3 +14451,280 @@ x86, including the ssh transfer tests.
 
 ✻ Brewed for 20s
 ```
+
+# Moar Speed Pt. 2! Byte-by-Byte Delta Finder
+
+I'm not sure what's causing it, but the transfers dipped to around 55MB/s. Let's go, Claude.
+
+```
+❯ Ok, well, now for some reason when I run the command: rsync -rtv --progress -e
+  'aes128-gcm@openssh.com' Claude@192.168.178.86:VIRTUA~1/ "VirtualBox VMs/" on the
+  Linux system to synchronize the latest changes and snapshot files from Windows, I only
+  see around 55MB/s transfer rate, I'm not sure where rsync is now spending all of its
+  time, but it is not getting line rate. I suspect that it's trying to find all of the
+  diffs to send or something, rsync is using 100% of one core. But this transfer rate is
+  too slow, I think we can do better.
+
+● Done. Here's the full picture.
+
+  What was slow
+
+  Your pull is a delta transfer (no -W), and the sender side of rsync's delta algorithm
+  was the bottleneck — on Windows, at 100% of one core, exactly as you suspected:
+
+  - After a block fails to match, upstream hash_search() rolls its weak checksum forward
+    one byte at a time, and every byte does a data-dependent load into a 16-bit-hashed
+    table plus (for ~⅓ of bytes) a second one into the chained sums[] array. Both miss
+    cache on a big file.
+  - A running VM writes 4 KB sectors all over its disk, so most of the sender's 128 KB
+    blocks are "broken" and nearly the whole image goes through that loop.
+  - Measured on a synthetic 2.2 GB image with 78% of blocks touched: Linux (7950X) does
+    the same search at ~93 MB/s; your i5‑8350U at ~31 MB/s. Not the build flags (hardening
+    on/off: identical) — the profile was 75% in the loop itself, 19% in a per-byte
+    map_ptr() call.
+
+  What I changed (sender-side only, wire format unchanged)
+
+  1. Lookup table keyed on the full 32‑bit weak sum, open-addressed, with a 32‑byte
+     lookahead roll that prefetches the slot — a miss costs one prefetched 8‑byte load and
+     never touches sums[].
+  2. map_ptr() hoisted out of the per-byte loop (one call per 256 KB). This exposed a
+     latent map_ptr bug — its 1 KB window alignment can read past EOF for large requests
+     near the end and report a read error — fixed with a clamp.
+  3. Aligned probes: right behind a match, when the next block fails, try the next 16
+     blocks at their aligned positions (a plain block checksum, ~40× cheaper per byte than
+     rolling) before rolling at all. On in-place-modified files that's nearly always a
+     hit.
+
+  ┌────────────────────────────────────────────────┬────────────────┬────────────────┐
+  │                      Test                      │      old       │      new       │
+  ├────────────────────────────────────────────────┼────────────────┼────────────────┤
+  │ Local 512 MB delta slice                       │ 16.3 s         │ 1.1 s          │
+  ├────────────────────────────────────────────────┼────────────────┼────────────────┤
+  │ 2.2 GB image pulled Linux ← Windows, 78%       │ 106 s (~21     │ 6.7 s (line    │
+  │ blocks changed                                 │ MB/s)          │ rate)          │
+  └────────────────────────────────────────────────┴────────────────┴────────────────┘
+
+  (Timings taken while your other testing loaded the CPU; A/B pairs ran back to back.)
+
+  Validation
+
+  - 23 delta edge cases (empty/sub-block files, insert/delete/truncate/append, --inplace,
+    --append(-verify), -B 700/128K, md5, fixed seed, zero images, shifted copies):
+    byte-exact, literal counts identical to the old sender except the zero-image case (+4
+    KB, by design).
+  - windows-build-and-test.bat --host …: 24/24 for x64 and x86.
+  - Three real pulls: output hash identical to the source every time.
+
+  State
+
+  - Committed as e6b8481b and pushed; not tagged as a release — say the word and I'll tag
+    it so CI rebuilds the zips.
+  - The new x64 binary is installed in C:\Tools\rsync (old one kept as rsync.exe.prev), so
+    your next pull uses it as-is. You no longer need -W for VM images.
+  - Dotfiles: added a VsWhere step putting …\Microsoft Visual Studio\Installer on the user
+    PATH (commit 728d5f3, not pushed). Perf tools needed nothing new — WPT/xperf is
+    already installed; it just needs an elevated shell, so I wrote a no-admin sampler
+    instead.
+
+  Two things to know
+
+  - The command as you pasted it has -e 'aes128-gcm@openssh.com'; it needs -e 'ssh -c
+    aes128-gcm@openssh.com' (I assume that was a paste slip).
+  - Pre-existing, unrelated: a local transfer with --protocol=30 hangs with the installed
+    release too (both processes idle). I left it alone; happy to look if it matters to
+    you.
+
+✻ Baked for 56m 59s · done 1:24 PM
+
+❯ Out of curiosity: was the delta search on Windows broken by the fact that SIMD and
+  other vector optimizations are maybe not enabled by the compiler because we're using
+  MSVC? If so, is there a way to port or re-enable them?
+
+● Short answer: no — the missing SIMD wasn't what was slow, and porting it would buy
+  little now. Details:
+
+  What "no SIMD-roll" actually covers. simd-checksum-x86_64.cpp (and the .S "asm-roll")
+  vectorise one function: get_checksum1(), the weak checksum of a whole block. They're
+  GCC/Clang-only (vector extensions, __attribute__((target)), __builtin_cpu_supports), so
+  the MSVC build falls back to the scalar C version. But the hot loop that was pinning
+  your core — the byte-by-byte roll in hash_search() — is scalar on every platform,
+  upstream included. It's a serial dependency chain (each step's s2 += s1 depends on the
+  previous one) plus a table lookup per byte; the SIMD file never touches it. The profile
+  bore that out: before the fix, 75% hash_search + 19% map_ptr, and get_checksum1 didn't
+  even make the list. After the fix it's 4–6% of the sender.
+
+  Where get_checksum1 does matter. Once per block on the generator (receiver) side, which
+  computes it for every block of the existing file — that's the Linux end of your pull,
+  which already has SIMD-roll. On the sender it runs once after each match, and now also
+  for each aligned probe, so it's ~1 pass over the data at scalar speed (~1–1.5 GB/s per
+  core here vs. maybe 4–6 GB/s with AVX2). Against a 250 MB/s wire that's noise.
+
+  The other optimisations in that --version line:
+  - openssl-crypto / asm-MD5: MD4/MD5 only. Irrelevant — you negotiate xxh128/xxh3 with
+    the Linux side.
+  - xxhash under MSVC compiles with SSE2 (the x64 baseline), not AVX2; XXH3 was 1.7% of
+    the profile. Enabling its runtime dispatcher (xxh_x86dispatch.c, MSVC-supported) would
+    trim that further — small.
+
+  If we wanted it anyway: porting is straightforward, ~200 lines — rewrite the SSSE3/AVX2
+  paths with <immintrin.h> intrinsics, dispatch with __cpuid (or
+  IsProcessorFeaturePresent), and put the AVX2 variant in its own TU compiled with
+  /arch:AVX2 so the rest stays baseline. It would show up mainly in the other direction
+  (Linux → Windows, where Windows is the generator) and in local copies, and only once
+  disk/network aren't the limit. Happy to do it if you'd like the --version line to say
+  SIMD-roll, but it won't move your pull — that's now at line rate, and the remaining
+  sender cost is dominated by the literal data copy and xxh3 over the file.
+
+✻ Brewed for 32s · done 1:27 PM
+
+❯ I want it anyway, and also enable xxhash's runtime dispatcher. Wherever we can eke out
+  speed improvements, let us try.
+
+● Done — both are in, tested, committed (2efaee77), pushed, and installed in
+  C:\Tools\rsync.
+
+  What landed
+
+  SIMD block checksum — win32/win32checksum.c (+ win32checksum-avx2.c, win32checksum.h,
+  win32cpu.c/h): upstream's SSE2/SSSE3/AVX2 arithmetic as plain C with intrinsics, CPU
+  level chosen once from CPUID/XGETBV. The AVX2 routine is its own TU under /arch:AVX2 so
+  it's VEX-encoded throughout; nothing in it runs on a non-AVX2 CPU. rsync --version now
+  says SIMD-roll.
+
+  AVX2 xxHash — I tried xxHash's own xxh_x86dispatch.c first and it was 2.5× slower than
+  the plain build under MSVC (3.7 vs 9.5 GB/s): without per-function target attributes,
+  its AVX2 kernels get compiled with mixed VEX/legacy-SSE encodings and the transition
+  penalty eats everything. So instead CMake compiles xxhash.c a second time under
+  /arch:AVX2 with a symbol prefix, and win32/win32xxh.c picks that copy or the baseline at
+  runtime.
+
+  ┌────────────────────┬───────────────────┬──────────────────────────────────────┐
+  │      i5‑8350U      │      before       │                after                 │
+  ├────────────────────┼───────────────────┼──────────────────────────────────────┤
+  │ get_checksum1      │ 1.8 GB/s (scalar) │ 7.2 GB/s (AVX2); SSSE3 3.0, SSE2 2.6 │
+  ├────────────────────┼───────────────────┼──────────────────────────────────────┤
+  │ xxh128             │ 9 GB/s            │ 16 GB/s (x86 build too)              │
+  ├────────────────────┼───────────────────┼──────────────────────────────────────┤
+  │ 512 MB local delta │ 1.2–1.5 s         │ 1.05–1.1 s                           │
+  └────────────────────┴───────────────────┴──────────────────────────────────────┘
+
+  End-to-end it's modest, as predicted — your pull was already at line rate — but it's
+  real, and the receiver/generator direction (Linux → Windows) gets the bigger share.
+
+  On your questions
+
+  - Merged files: the test main() now lives inside win32checksum.c under #ifdef
+    TEST_WIN32CHECKSUM; CMake compiles the same file again as the t_win32checksum helper
+    (upstream's own pattern). The .h has to stay because the AVX2 routine must be a
+    separate TU.
+  - Coverage: t_win32checksum runs in the normal suite (test_helpers.py): every routine vs
+    scalar at 17 lengths × 2 alignments, a PAGE_NOACCESS guard page for lengths 1..4096
+    (over-read detection), AVX2-vs-baseline xxHash digest equality. Plus the 23-case delta
+    harness passes byte-exact, the full suite is 24/24 on x64 and x86, and a delta pull
+    matched Windows' AVX2 checksums against Linux's SIMD generator block-for-block (hash
+    identical, 1 GB in 1.5 s).
+
+  Two things worth knowing
+
+  - Cached CMake options: RSYNC_ENABLE_SIMD now defaults ON, but an existing build dir
+    keeps its old cached OFF (that bit me: the first suite run was scalar). The build
+    script now passes both options explicitly; the release workflow uses --clean, so
+    releases are fine. If you have other build dirs, reconfigure with
+    -DRSYNC_ENABLE_SIMD=ON -DRSYNC_XXH_DISPATCH=ON or wipe them.
+  - I also fixed a latent ordering bug: USE_ROLL_SIMD was being set after config.h was
+    generated, so even the GCC path here could never have enabled it.
+
+  Not tagged as a release — say so and I'll tag it. WINDOWS-PORT.md and PERF.txt are
+  untouched and uncommitted, as before.
+
+✻ Worked for 27m 39s · done 1:58 PM
+
+❯ Did you do a clean build before testing? I've gone ahead and deleted build/ and
+  build-x86/. What I want you to do now: do the x64 build in build-x64, update the batch
+  files and other references as needed. Then retest.
+
+● Everything's done and verified from a clean tree.
+
+  Your question: no, the earlier final runs were incremental (reconfigured in the existing
+  build/ and build-x86/, not wiped) — only the scratch tree had been clean-built once,
+  and that was before the file reorganisation. Good call to wipe them.
+
+  Rename to build-x64 — commit b0ad68fc, pushed:
+  - windows-build-and-test.bat: --build-dir is now a prefix (default build) and the script
+    appends -x64 or -x86, so neither tree is the unmarked one; header comment and help
+    text updated.
+  - .github/workflows/windows-release.yml: self-contained check, staging copies, version
+    read, SSH_VER, NOTICE-ssh.txt paths, comments.
+  - win32/openssh/build-openssh.ps1: default output build-x64\ssh.exe.
+  - BUILD-CMAKE.md, README.md, CMakeLists.txt comment, .gitignore note.
+  - WINDOWS-PORT.md still says build\ in old transcripts — left alone on purpose.
+
+  Clean build and retest (--clean --host max@192.168.178.150, fresh caches so the new
+  option defaults apply):
+  - x64 → build-x64\rsync.exe: 24/24, SIMD-roll on.
+  - x86 → build-x86\rsync-x86.exe: 24/24, SIMD-roll on.
+  - t_win32checksum on both: AVX2 selected, guard-page clean, all routines equal to
+    scalar. With the machine quieter now: get_checksum1 3.3 → 12.1 GB/s (x64 AVX2), xxh128
+    15.7 → 25.1 GB/s; x86 similar.
+  - Installed build-x64\rsync.exe into C:\Tools\rsync; from Linux via PATH: 512 MB
+    whole-file pull 2.1 s, then a mutated delta pull (80% matched) in 0.87 s, hash
+    identical. Test data removed on both sides.
+
+  Noticed windows-simd-speedups.png appeared untracked alongside PERF.txt and the modified
+  WINDOWS-PORT.md — I left all three for you, as before.
+
+✻ Brewed for 7m 36s · done 2:15 PM
+
+❯ Add a standalone setup powershell script and batch file to call it, and add those
+  files to the zip files to install the downloaded rsync version into the Windows
+  system. i.e. setup-windows-rsync.ps1 as it currently exists downloads and installs
+  from GitHub, but maybe it can be modified to be included in the zip files and run
+  locally to install the contents of the unpacked zip files. Then add a
+  setup-windows-rsync.bat helper file next to that which runs the powershell command
+  line to run the script.
+```
+
+Here's the before and after analysis, in pictures of the last few commits.
+
+![rsync for Windows performance improvements](windows-perf-timeline.png)
+
+Pushing data from Linux to Windows: in the beginning, the performance was 7.5MB/s, 
+this increased the fastest and the Linux sender has the most optimization, it fully
+saturates the 2.5Gbps link. 
+
+Pulling data from Windows sshd to Linux: in the beginning, we were seeing a bottleneck 
+due to the USB 2.5Gbps adapter; after updating its drivers, the optimizations kicked
+in, but Windows still has a small amount of overhead that means it doesn't perform as 
+well as the Linux stack.
+
+Pushing data from Windows to Linux: here were were getting around 17MB/s, due to an 
+issue with the Windows OpenSSH port; after a bunch of optimizations to a custom build 
+of the OpenSSH port, we saturate the link, but again Windows is slower than Linux
+at shuffling data around.
+
+![rsync for Windows delta-search improvements](windows-perf-delta-sync.png)
+
+The delta search algorithm in rsync had some bottlenecks, where it was falling back
+to byte-by-byte checksums for some reason. After tuning, the performance improves
+by an order of magnitude. We throw SIMD checksum optimizations in on top.
+
+![rsync for Windows hash rate improvements](windows-perf-hash-rates.png)
+
+The hash algorithms were using scalar configurations for some reason, probably due
+to the difference in MSVC vs gcc compilers and what optimizations are available to
+them w/o tweaking. After tuning, we see a massive speed up in both checksumming and
+block digests, meaning less CPU usage and more cycles for transferring and other things.
+
+Interestingly, the scalar performance almost doubles when switching from x86 to x64,
+but barely changes once we use the vectorized SIMD paths. This is to be expected, 
+but fun to see in the data.
+
+![rsync for Windows all-in improvements](windows-perf-transfer-rates.png)
+
+The real-world impact of the above changes shows in the overall transfer rates. A few
+hours worth of Claude work sees a 15x - ~39x speed improvement.
+
+At this point rsync for Windows will saturate a 2.5Gbps link, as long as you're using 
+AES for encryption. The chacha20 algorithm is not hardware accelerated, so it is CPU bound,
+at least for a single core. It remains an exercise to multithread that.

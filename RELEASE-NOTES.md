@@ -1,0 +1,111 @@
+rsync for Windows -- release notes
+==================================
+
+What this is
+------------
+
+rsync 3.5.0 built natively for Windows with MSVC -- no Cygwin, no MSYS --
+together with the ssh.exe it runs.  Push, pull, local copies, the delta
+algorithm, --delete, filters, batch mode and UTF-8 file names all work.
+Daemon mode, ACLs, xattrs, devices, Unix ownership and symlink creation do
+not.
+
+
+What is in the zip
+------------------
+
+    rsync.exe                 the program
+    ssh.exe                   the ssh client rsync runs (see "Speed" below)
+    setup-windows-rsync.bat   installer: double-click it
+    setup-windows-rsync.ps1   the script the .bat runs
+    COPYING.txt               rsync's licence (GPL v3)
+    NOTICE-ssh.txt            licences of what ssh.exe is built from
+    RELEASE-NOTES.txt         this file
+
+rsync-windows-x64.zip is for 64-bit Windows.  rsync-windows-x86.zip is for
+32-bit Windows only: its ssh.exe cannot use the 64-bit libcrypto.dll that
+64-bit Windows provides.
+
+
+Install
+-------
+
+Unpack the zip anywhere and double-click setup-windows-rsync.bat.  It asks
+for elevation, opens a new window that stays open when it is done, and:
+
+  1. installs the Windows OpenSSH Client component if it is missing
+     (ssh.exe needs its libcrypto.dll),
+  2. sets the ssh-agent service to start automatically,
+  3. installs and starts the OpenSSH Server, with a firewall rule for
+     port 22, so this machine can receive transfers
+     (add -SkipServer to leave that out),
+  4. copies rsync.exe and ssh.exe to C:\Tools\rsync and puts that
+     directory on the machine PATH.
+
+Open a new console afterwards: the PATH change reaches only shells started
+after it.  Re-running the installer is safe; it skips what is already done.
+
+To skip the installer, unpack onto a directory on your PATH and keep
+rsync.exe and ssh.exe together: rsync uses the ssh.exe beside it.
+
+Requires Windows 10 1809 or later, Windows 11, or Windows Server 2019 or
+later.
+
+
+Speed
+-----
+
+Both directions run at the wire on 1 GbE and 2.5 GbE links, and delta
+transfers of files that are edited in place (disk images, databases) no
+longer take many times longer than a full copy.
+
+  - Ask for AES-GCM.  OpenSSH's default cipher, chacha20-poly1305, has no
+    hardware acceleration and caps a transfer at roughly 150-170 MB/s on a
+    laptop; AES-GCM uses AES-NI and reaches the wire.  The cipher is chosen
+    by the side that starts the transfer:
+
+        rsync -rt -e "ssh -c aes128-gcm@openssh.com" src/ user@host:dst/
+
+  - The ssh.exe in the zip is Microsoft's own Win32-OpenSSH client with its
+    stdin handling fixed.  The one Windows ships reads 3 KB at a time and
+    holds any transfer *from* a Windows machine at about 17 MB/s; this one
+    reaches the wire.  Same ~/.ssh, same ssh-agent, same known_hosts.
+
+
+What changed since v3.5.0-g00786d79
+-----------------------------------
+
+  - Delta transfers of files edited in place are up to 16x faster: the
+    sender no longer rolls its checksum byte by byte through every changed
+    block.  A 2.2 GB file with most of its blocks changed pulled to Linux in
+    6.7 s instead of 106 s.
+  - The block checksum and xxHash use SSE2/SSSE3/AVX2 chosen at run time
+    (rsync --version now says SIMD-roll); 3.7x and 1.6x faster on one core.
+  - The installer ships inside the zip and installs from it, no download.
+  - A read past the end of a file in the sender's window management, which
+    could make the receiver redo a file, is fixed.
+
+Earlier in this port (v3.5.0-g00786d79 and before): rsync waited on pipes
+instead of sleeping on them (7 MB/s to line rate on a transfer into
+Windows), xxHash was bundled so transfers no longer fell back to MD5, and
+the ssh.exe above was added (17 MB/s to line rate on a transfer out of
+Windows).
+
+
+Known limitations
+-----------------
+
+  - No daemon mode (rsync://), no ACLs, no xattrs, no symlink creation.
+  - A *local* transfer with --protocol=30 hangs; protocol 31 and later,
+    the default, are fine.
+
+
+Checking a download
+-------------------
+
+Each zip has a .sha256 beside it on the releases page:
+
+    certutil -hashfile rsync-windows-x64.zip SHA256
+
+Source, build instructions and issues: https://github.com/nuket/rsync-windows
+(branch windows-cmake-port).  rsync itself: https://rsync.samba.org/

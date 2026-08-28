@@ -25,7 +25,8 @@ somewhere on your `PATH`, keep the two together, and it runs. It also holds
 `setup-windows-rsync.bat` (and the `.ps1` it runs): double-click that from
 the unpacked folder and it installs those files to `C:\Tools\rsync`, puts the
 directory on the machine `PATH` and sets up ssh, as described below — the same
-script, just fed from disk instead of downloading.
+script, just fed from disk instead of downloading. `RELEASE-NOTES.txt` in the
+zip is the short version of all of this.
 
 The `ssh.exe` is there because rsync does not speak ssh itself; it runs an ssh
 client, and the one Windows ships reads its stdin 3KB at a time with a thread

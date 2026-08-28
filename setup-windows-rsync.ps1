@@ -420,7 +420,7 @@ try {
         if ($installed) { Write-Info "installed rsync $installed -> updating to $resolved" }
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-        $files = 'rsync.exe', 'ssh.exe', 'COPYING.txt', 'NOTICE-ssh.txt'
+        $files = 'rsync.exe', 'ssh.exe', 'COPYING.txt', 'NOTICE-ssh.txt', 'RELEASE-NOTES.txt'
         if ($Source) {
             if ($Source -eq $InstallDir.TrimEnd('\')) {
                 # Unpacked straight into the install directory: nothing to

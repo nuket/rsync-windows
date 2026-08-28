@@ -183,6 +183,9 @@ jobs:
           # rsync.exe the script installs those files instead of downloading.
           Copy-Item setup-windows-rsync.ps1 "stage\$a\setup-windows-rsync.ps1"
           Copy-Item setup-windows-rsync.bat "stage\$a\setup-windows-rsync.bat"
+          # As .txt: it is plain text, and .txt opens with a double-click on
+          # any Windows, where .md asks what to open it with.
+          Copy-Item RELEASE-NOTES.md "stage\$a\RELEASE-NOTES.txt"
           $zip = "rsync-windows-$a.zip"
           Compress-Archive -Path "stage\$a\*" -DestinationPath "dist\$zip" -CompressionLevel Optimal
           $hash = (Get-FileHash "dist\$zip" -Algorithm SHA256).Hash.ToLower()
@@ -191,6 +194,7 @@ jobs:
         }
         Copy-Item build-x64\NOTICE-ssh.txt dist\
         Copy-Item BUILD-CMAKE.md dist\
+        Copy-Item RELEASE-NOTES.md dist\RELEASE-NOTES.txt
         "VER=$ver" >>$Env:GITHUB_ENV
         "SSH_VER=$((& build-x64\ssh.exe -V 2>&1) -join '')" >>$Env:GITHUB_ENV
 
@@ -294,7 +298,7 @@ jobs:
         | ``rsync-windows-x64.zip`` | 64-bit Windows -- the one to take unless you know you need the other |
         | ``rsync-windows-x86.zip`` | 32-bit Windows |
 
-        Each zip holds ``rsync.exe``, the ``ssh.exe`` it runs (see below), ``COPYING.txt``, ``NOTICE-ssh.txt``, and an installer: ``setup-windows-rsync.bat`` with the ``setup-windows-rsync.ps1`` it runs. Unpack the zip anywhere and double-click the ``.bat``: it asks for elevation, copies the files to ``C:\Tools\rsync``, puts that on the machine ``PATH``, and sets up the OpenSSH client, ``ssh-agent`` and (unless ``-SkipServer``) ``sshd``. Or skip the installer and just unpack into a directory on your ``PATH``, keeping the two exes together. Same source, same options, same behaviour: the two zips differ only in the architecture they were compiled for, and each has a ``.sha256`` beside it.
+        Each zip holds ``rsync.exe``, the ``ssh.exe`` it runs (see below), ``COPYING.txt``, ``NOTICE-ssh.txt``, ``RELEASE-NOTES.txt`` (the short version of this page), and an installer: ``setup-windows-rsync.bat`` with the ``setup-windows-rsync.ps1`` it runs. Unpack the zip anywhere and double-click the ``.bat``: it asks for elevation, copies the files to ``C:\Tools\rsync``, puts that on the machine ``PATH``, and sets up the OpenSSH client, ``ssh-agent`` and (unless ``-SkipServer``) ``sshd``. Or skip the installer and just unpack into a directory on your ``PATH``, keeping the two exes together. Same source, same options, same behaviour: the two zips differ only in the architecture they were compiled for, and each has a ``.sha256`` beside it.
 
         ## Why an ssh.exe
 
@@ -337,7 +341,7 @@ jobs:
         gh release create $tag `
           dist\rsync-windows-x64.zip dist\rsync-windows-x64.zip.sha256 `
           dist\rsync-windows-x86.zip dist\rsync-windows-x86.zip.sha256 `
-          dist\NOTICE-ssh.txt `
+          dist\NOTICE-ssh.txt dist\RELEASE-NOTES.txt `
           --title "rsync $Env:RSYNC_VER_BASE for Windows" `
           --notes $notes `
           --target $Env:GITHUB_SHA `
