@@ -69,8 +69,8 @@ longer take many times longer than a full copy.
   - The ssh.exe in the zip is Microsoft's own Win32-OpenSSH client with its
     I/O fixed.  The one Windows ships reads 3 KB at a time and holds any
     transfer *from* a Windows machine at about 17 MB/s; this one reaches the
-    wire on Ethernet, and about 750 MB/s each way over 20 Gbit Thunderbolt
-    networking (rsync 700 MB/s pushing, 650 MB/s pulling; a laptop core
+    wire on Ethernet, and about 1 GB/s sending and 930 MB/s receiving over
+    20 Gbit Thunderbolt networking (rsync ~850 MB/s each way; a laptop core
     running AES-GCM is the limit there).  Same ~/.ssh, same ssh-agent, same
     known_hosts.
 
@@ -85,9 +85,11 @@ What changed since v3.5.0-gf800ace2
 
   - The ssh.exe no longer creates a thread for every write to stdout, nor a
     named pipe for every pass through its main loop (OpenSSH's portable
-    pselect() fallback did that).  Neither shows on Ethernet; on a 20 Gbit
-    link they held the client at ~340 MB/s sending and ~220 MB/s receiving,
-    against ~750 MB/s now.
+    pselect() fallback did that), and its socket sends and receives run on
+    their own threads, overlapping the crypto instead of following it.
+    None of it shows on Ethernet; on a 20 Gbit link the client went from
+    ~340 MB/s sending and ~220 MB/s receiving to ~1 GB/s and ~930 MB/s
+    (rsync: ~850 MB/s each way).
 
 What changed in v3.5.0-gf800ace2
 --------------------------------

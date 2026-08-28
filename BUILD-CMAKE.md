@@ -130,7 +130,7 @@ the patches in `win32/openssh/patches/`, which is where the fixes live:
 | Patch | What it changes |
 | --- | --- |
 | `0001` | A pipe or file on stdin gets a reader thread with a 1 MB ring instead of a thread per 3 KB read; a pipe or file on stdout gets a writer thread with a ring instead of a thread per write. The first is the 17 MB/s upload cap; the second was a third of the client's time on a 20 Gbit link when receiving. Console fds keep the original paths. |
-| `0002` | A whole channel window goes out in one `WSASend` (1 MB send buffer, was 70 KB). |
+| `0002` | The connection socket gets a thread each way: `send()` copies into a 4 MB ring a thread sends straight from, `recv()` copies out of a ring a thread receives straight into. The socket work then overlaps the crypto instead of following it on the same thread, and each direction loses one copy. Measured over 20 Gbit Thunderbolt: send 764 → ~1020 MB/s, receive 573 → ~930 MB/s. |
 | `0003` | Build: explicit dependency directories, `/Qspectre`, and `HAVE_PSELECT` in `config.h.vs`. |
 | `0004` | A native `pselect()`. Without one, OpenSSH's portable fallback creates a *notify pipe on every call* to close a signal race that this port's alertable waits do not have — and on Windows `pipe()` is a named pipe, an open and two closes, per packet. This alone took the client from ~340 to ~800 MB/s on a 20 Gbit link. |
 

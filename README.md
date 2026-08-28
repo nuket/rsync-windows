@@ -33,10 +33,12 @@ client, and the one Windows ships reads its stdin 3KB at a time with a thread
 per read, which holds a transfer *from* a Windows machine at about 17MB/s
 however fast the link is. The one in the zip is Microsoft's own client, built
 from the pinned `openssh/` submodule with that fixed (see `win32/openssh/`),
-along with two more things that only show on a fast link — a thread created
-for every write to stdout, and a named pipe created for every pass through the
-main loop by OpenSSH's portable `pselect()` fallback — which together took it
-from ~340 to ~750MB/s each way over 20Gbit Thunderbolt networking. `rsync.exe`
+along with three more things that only show on a fast link — a thread created
+for every write to stdout, a named pipe created for every pass through the
+main loop by OpenSSH's portable `pselect()` fallback, and socket sends and
+receives done on the crypto thread rather than beside it — which together took
+it from ~340 to ~1000MB/s sending and ~220 to ~930MB/s receiving over 20Gbit
+Thunderbolt networking (rsync: ~850MB/s each way). `rsync.exe`
 prefers it whenever it sits in the same directory. It uses the
 same `~/.ssh`, agent and `known_hosts` as the system one — and the same
 `libcrypto.dll`, the one the Windows OpenSSH Client component (9.5 or later)
