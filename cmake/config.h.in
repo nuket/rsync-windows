@@ -243,6 +243,7 @@
 #cmakedefine USE_MD5_ASM 1
 #cmakedefine USE_ROLL_SIMD 1
 #cmakedefine USE_ROLL_ASM 1
+#cmakedefine USE_XXH_DISPATCH 1
 #cmakedefine EXTERNAL_ZLIB 1
 #cmakedefine USE_ICONV_OPEN 1
 #cmakedefine ICONV_CONST @ICONV_CONST@

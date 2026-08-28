@@ -296,7 +296,13 @@ if "!DO_CLEAN!"=="1" (
 rem --------------------------------------------------------------- configure
 
 echo [4/5] Configuring...
-cmake -S "!SRC_DIR!" -B "!BUILD_DIR!" -G Ninja -DCMAKE_BUILD_TYPE=!CONFIG!
+rem The two SIMD options are passed explicitly rather than left to their
+rem defaults: a CMake option keeps whatever value a build directory's cache
+rem already holds, so a directory configured before the defaults became ON
+rem would silently keep building the scalar checksums.  This script builds
+rem what the release ships, and the release has them on.
+cmake -S "!SRC_DIR!" -B "!BUILD_DIR!" -G Ninja -DCMAKE_BUILD_TYPE=!CONFIG! ^
+    -DRSYNC_ENABLE_SIMD=ON -DRSYNC_XXH_DISPATCH=ON
 if errorlevel 1 (
     echo.
     echo ERROR: cmake configure failed.

@@ -33,6 +33,12 @@
 # if XXH_VERSION_NUMBER >= 800
 #  define SUPPORT_XXH3 1
 # endif
+# ifdef USE_XXH_DISPATCH
+/* Redefines the XXH3 calls below to the port's wrappers, which run an AVX2
+ * build of xxhash.c when the CPU has AVX2 instead of the SSE2 kernels a
+ * baseline build is limited to.  See win32/win32xxh.c. */
+#  include "win32/win32xxh.h"
+# endif
 #endif
 
 extern int am_server;

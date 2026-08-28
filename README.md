@@ -46,6 +46,16 @@ file has them, which on such files they almost always do. Same wire format,
 same result file; on a 2.2GB image with three quarters of its blocks touched
 the pull went from 106s to 6.7s, i.e. from CPU-bound to line rate.
 
+The checksums themselves are vectorised too. Upstream's SIMD block checksum
+is GCC/Clang-only (function multiversioning), so `win32/win32checksum*.c`
+carries the same SSE2/SSSE3/AVX2 arithmetic as plain C with the CPU chosen
+once from CPUID (`rsync --version` says `SIMD-roll`), and the bundled xxHash
+is compiled a second time under `/arch:AVX2` and picked at runtime by
+`win32/win32xxh.c` — xxHash's own dispatcher add-on is slower than the
+baseline build under MSVC, which cannot keep AVX and legacy-SSE code apart
+inside one function. On an i5-8350U that is 1.8 → 7.2 GB/s for the block
+checksum and 9 → 16 GB/s for xxh128.
+
 [w1]: https://github.com/nuket/rsync-windows/releases
 
 To take a fresh box all the way to sending *and* receiving over rsync-over-ssh,

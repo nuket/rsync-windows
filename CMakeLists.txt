@@ -55,7 +55,15 @@ option(RSYNC_ENABLE_ZSTD      "Support zstd compression"        OFF)
 option(RSYNC_ENABLE_LZ4       "Support LZ4 compression"         OFF)
 option(RSYNC_ENABLE_XXHASH    "Support xxhash checksums"        ON)
 option(RSYNC_ENABLE_ICONV     "Support --iconv character conversion" OFF)
-option(RSYNC_ENABLE_SIMD      "Use SIMD/asm checksum acceleration" OFF)
+# On MSVC the SIMD checksum is a plain C port with its own CPU dispatch
+# (win32/win32checksum*.c), so it costs nothing to default on; the GCC/Clang
+# path needs a C++ compiler and stays opt-in as upstream has it.
+set(RSYNC_SIMD_DEFAULT OFF)
+if(MSVC)
+    set(RSYNC_SIMD_DEFAULT ON)
+endif()
+option(RSYNC_ENABLE_SIMD      "Use SIMD/asm checksum acceleration" ${RSYNC_SIMD_DEFAULT})
+option(RSYNC_XXH_DISPATCH     "Pick xxHash's AVX2/AVX-512 XXH3 code at runtime (x86, bundled xxhash only)" ${RSYNC_SIMD_DEFAULT})
 option(RSYNC_EXTERNAL_ZLIB    "Link the system zlib instead of the bundled copy" OFF)
 option(RSYNC_EXTERNAL_XXHASH  "Link the system xxhash instead of the bundled copy" OFF)
 option(RSYNC_STATIC_CRT       "Link the C runtime statically (MSVC only)" ON)
@@ -745,6 +753,31 @@ endif()
 # ---------------------------------------------------------------------------
 # config.h
 # ---------------------------------------------------------------------------
+# The SIMD decisions have to be made before config.h is written, since
+# USE_ROLL_SIMD and USE_XXH_DISPATCH are #defines in it; the source lists
+# that go with them are assembled further down.
+#
+# The compiler's own idea of the target, which survives cross-compiling
+# (CMAKE_SYSTEM_PROCESSOR is the host's).  MSVC reports x64, X86 or ARM64.
+set(RSYNC_MSVC_X86 OFF)
+if(MSVC AND CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "^([xX]64|[xX]86)$")
+    set(RSYNC_MSVC_X86 ON)
+endif()
+set(RSYNC_SIMD_MSVC OFF)
+set(RSYNC_SIMD_CXX OFF)
+if(RSYNC_ENABLE_SIMD AND RSYNC_MSVC_X86)
+    set(RSYNC_SIMD_MSVC ON)
+    set(USE_ROLL_SIMD 1)
+elseif(RSYNC_ENABLE_SIMD AND CMAKE_SIZEOF_VOID_P EQUAL 8
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(RSYNC_SIMD_CXX ON)
+    set(USE_ROLL_SIMD 1)
+endif()
+if(RSYNC_XXH_DISPATCH AND RSYNC_MSVC_X86
+   AND RSYNC_ENABLE_XXHASH AND NOT RSYNC_EXTERNAL_XXHASH)
+    set(USE_XXH_DISPATCH 1)
+endif()
+
 configure_file(cmake/config.h.in "${GEN_DIR}/config.h")
 
 # ---------------------------------------------------------------------------
@@ -846,12 +879,43 @@ if(WIN32)
 
 endif()
 
-if(RSYNC_ENABLE_SIMD AND CMAKE_SIZEOF_VOID_P EQUAL 8
-   AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+if(RSYNC_SIMD_MSVC)
+    # MSVC has no function multiversioning, so upstream's C++ file cannot
+    # build here; win32/win32checksum.c is the same arithmetic with the CPU
+    # choice made once from CPUID.  The AVX2 routine is its own translation
+    # unit under /arch:AVX2 so it is VEX-encoded throughout (mixing legacy
+    # SSE and AVX in one function costs a state-transition penalty); the
+    # dispatcher only calls it when CPUID and XGETBV say AVX2 is usable.
+    set(RSYNC_SIMD_SOURCES win32/win32checksum.c win32/win32checksum-avx2.c
+                           win32/win32cpu.c)
+    set_source_files_properties(win32/win32checksum-avx2.c
+        PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    list(APPEND RSYNC_ALL_SOURCES ${RSYNC_SIMD_SOURCES})
+elseif(RSYNC_SIMD_CXX)
     enable_language(CXX)
     set(CMAKE_CXX_STANDARD 17)
-    set(USE_ROLL_SIMD 1)
     list(APPEND RSYNC_ALL_SOURCES simd-checksum-x86_64.cpp)
+endif()
+
+# xxhash.c as bundled is compiled for the baseline ISA, so XXH3 runs its SSE2
+# kernels on every x86 CPU.  For AVX2 the same file is compiled a second
+# time, whole, under /arch:AVX2 with every symbol prefixed rsync_avx2_, and
+# win32/win32xxh.c picks that copy or the baseline one at runtime; checksum.c
+# routes its XXH3 calls through it when USE_XXH_DISPATCH is set.  (xxHash's
+# own dispatcher add-on is not used: on MSVC it is slower than the baseline
+# build, see win32xxh.c.)  Only the prefixed copy gets /arch:AVX2, so nothing
+# a non-AVX2 CPU runs is ever VEX-encoded.
+if(USE_XXH_DISPATCH)
+    add_library(xxhash_avx2 OBJECT xxhash/xxhash.c)
+    target_compile_definitions(xxhash_avx2 PRIVATE
+        XXH_VECTOR=2                 # XXH_AVX2
+        XXH_NAMESPACE=rsync_avx2_)
+    target_compile_options(xxhash_avx2 PRIVATE /arch:AVX2)
+    target_include_directories(xxhash_avx2 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/xxhash")
+    list(APPEND RSYNC_ALL_SOURCES win32/win32xxh.c $<TARGET_OBJECTS:xxhash_avx2>)
+    if(NOT RSYNC_SIMD_MSVC)
+        list(APPEND RSYNC_ALL_SOURCES win32/win32cpu.c)
+    endif()
 endif()
 
 add_executable(rsync ${RSYNC_ALL_SOURCES})
@@ -995,6 +1059,26 @@ rsync_test_helper(t_hashtable_overflow t_hashtable_overflow.c hashtable.c
                              util2.c t_stub.c lib/compat.c lib/snprintf.c
                              lib/wildmatch.c)
 rsync_test_helper(t_iwildmatch t_iwildmatch.c lib/wildmatch.c)
+# The port's checksum code: every SIMD get_checksum1() routine against the
+# scalar one, ending flush against a guard page, and the AVX2 XXH3 build
+# against the baseline one.  The test main() lives in win32checksum.c under
+# TEST_WIN32CHECKSUM, the way upstream keeps its inside the .cpp, so the
+# same file is compiled a second time here.  With SIMD or the xxhash
+# dispatch off the helper just reports that the part is not built.
+if(WIN32)
+    set(T_WIN32CHECKSUM_SOURCES win32/win32checksum.c win32/win32cpu.c)
+    if(RSYNC_SIMD_MSVC)
+        list(APPEND T_WIN32CHECKSUM_SOURCES win32/win32checksum-avx2.c)
+    endif()
+    if(USE_XXH_DISPATCH)
+        list(APPEND T_WIN32CHECKSUM_SOURCES ${XXHASH_SOURCES} $<TARGET_OBJECTS:xxhash_avx2>)
+    endif()
+    rsync_test_helper(t_win32checksum ${T_WIN32CHECKSUM_SOURCES})
+    target_compile_definitions(t_win32checksum PRIVATE TEST_WIN32CHECKSUM)
+    if(USE_XXH_DISPATCH)
+        target_include_directories(t_win32checksum PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/xxhash")
+    endif()
+endif()
 # No lib/wildmatch.c here: wildtest.c #includes it directly.
 rsync_test_helper(wildtest   wildtest.c lib/compat.c lib/snprintf.c
                              ${POPT_SOURCES})

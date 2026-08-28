@@ -29,7 +29,8 @@ against real `awk` on a Linux host.
 | `RSYNC_ENABLE_LZ4` | `OFF` | LZ4 compression |
 | `RSYNC_ENABLE_XXHASH` | `ON` | xxh64/xxh3/xxh128 checksums (bundled copy) |
 | `RSYNC_ENABLE_ICONV` | `OFF` | `--iconv` character conversion |
-| `RSYNC_ENABLE_SIMD` | `OFF` | SIMD/asm checksum acceleration (x86-64) |
+| `RSYNC_ENABLE_SIMD` | `ON` on MSVC, `OFF` elsewhere | SIMD `get_checksum1()`: SSE2/SSSE3/AVX2 chosen at runtime. MSVC builds `win32/win32checksum*.c`, a C port with its own CPUID dispatch; other compilers build upstream's `simd-checksum-x86_64.cpp` and need C++ |
+| `RSYNC_XXH_DISPATCH` | `ON` on MSVC, `OFF` elsewhere | Compile the bundled `xxhash.c` a second time under `/arch:AVX2` and let `win32/win32xxh.c` pick it at runtime, so XXH3/xxh128 use AVX2 when the CPU has it (bundled xxhash, x86/x64 only) |
 | `RSYNC_EXTERNAL_ZLIB` | `OFF` | Link system zlib instead of the bundled copy |
 | `RSYNC_EXTERNAL_XXHASH` | `OFF` | Link system xxhash instead of the bundled copy |
 | `RSYNC_STATIC_CRT` | `ON` | Link the C runtime statically (MSVC only; see below) |

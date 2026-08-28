@@ -82,6 +82,17 @@ RERR_MALLOC = 22   # errcode.h
 proc = helper('t_hashtable_overflow', expect=RERR_MALLOC)
 ok('t_hashtable_overflow refused the overflowing size (RERR_MALLOC)')
 
+# --- t_win32checksum (this port) -------------------------------------------
+# The SSE2/SSSE3/AVX2 get_checksum1() routines must agree with the scalar one
+# for every length and alignment, and must not read past a buffer that ends at
+# a guard page.  The weak checksum crosses the wire, so a wrong answer would
+# not crash: it would quietly turn every delta into a whole-file copy.
+proc = helper('t_win32checksum')
+report = proc.stdout + proc.stderr
+check('FAIL' not in report and 'mismatch' not in report,
+      "t_win32checksum reported a failure:\n" + report)
+ok('t_win32checksum: ' + (report.splitlines() or ['(no output)'])[0])
+
 # --- trimslash -------------------------------------------------------------
 # The same inputs and expected output as testsuite/trimslash_test.py.
 TRIM_INPUTS = [
