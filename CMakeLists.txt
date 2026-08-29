@@ -871,6 +871,7 @@ if(WIN32)
         win32/win32compat.c
         win32/win32proc.c
         win32/win32io.c
+        win32/win32shmpipe.c
         win32/win32dir.c
         win32/win32fork.c
         win32/win32args.c
@@ -984,7 +985,8 @@ if(WIN32)
     # because they reach into main.c/io.c, which no helper links.
     set(HELPER_WIN32_SOURCES
         win32/win32compat.c win32/win32io.c win32/win32dir.c
-        win32/win32proc.c win32/win32links.c win32/win32harden.c)
+        win32/win32proc.c win32/win32links.c win32/win32harden.c
+        win32/win32shmpipe.c)
 endif()
 
 function(rsync_test_helper name)

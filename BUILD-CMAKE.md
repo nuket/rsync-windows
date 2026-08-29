@@ -131,6 +131,7 @@ its own that the OpenSSH projects compile in:
 | File | What it is |
 | --- | --- |
 | `win32pumps.c`, `.h` | A reader and a writer thread for every fd that carries bulk data: a pipe or file on stdin/stdout, and the connection socket. Each pump owns a ring (1 MB for a pipe or file, 4 MB for the socket); `read()`, `write()`, `recv()` and `send()` copy straight between the caller's buffer and the ring, the thread reads or writes straight from it, and the main thread is woken by an APC only when it said it was waiting. A pump with nothing to do sleeps at once and is woken in batches — a writer once 128 KB has piled up, a reader once a chunk's worth of room has opened, and every writer with anything queued when the main thread is about to wait (patch 0009) — so the main thread pays one `SetEvent()` per four packets rather than one per packet, and no pump ever spins (an earlier version did, and burned a core per pump on a slow link). Each pump also gets an ideal processor away from the main thread's, so a woken pump does not run its `send()` on the main thread's core. Compiled into `posix_compat`, beside the files it serves. |
+| `win32shmio.c`, `.h` | stdin and stdout carried in a shared-memory ring instead of the pipe rsync created, when rsync offered one and the handshake came off (see [The hop to ssh](#the-hop-to-ssh)). Attaches before `main()`, since rsync waits to hear whether we understood it and ssh will not look at stdin until the session is up. `read()` and `write()` copy straight out of and into the ring; a notifier thread per direction, which moves no bytes, gives the main thread's alertable wait something to end it. Falls back to the pipe at every step. Compiled into `posix_compat`, beside `win32pumps.c`; the ring itself is `win32/win32shmpipe.c`, the same source `rsync.exe` is built from. |
 | `win32sendbuf.c`, `.h` | `write()` for the packet layer's output buffer that hands the buffer's storage to the socket pump whole, taking a block the pump has finished with in exchange (`sshbuf_swap_storage()`, patch 0005), instead of copying every byte into the pump's ring: the send side of the socket pump is a queue of blocks for this. Small writes are copied as before. One memcpy per byte fewer, 7% of the sending thread; `SSH_SENDBUF_COPY` in the environment keeps the copying path. Compiled into `libssh`, beside `packet.c`. |
 | `win32cnggcm.c`, `.h` | AES-GCM through Windows CNG (`BCryptEncrypt`/`BCryptDecrypt` with `BCRYPT_CHAIN_MODE_GCM`) instead of LibreSSL's EVP: 2.2 GB/s against 1.6 GB/s at 32 KB on the same core. Only the bulk cipher moves; key exchange, signatures, the other ciphers and MACs stay in `libcrypto.dll`. `SSH_AESGCM_BACKEND=libcrypto` in the environment forces the EVP path. Compiled into `libssh`, beside `cipher.c`. |
 
@@ -145,7 +146,7 @@ fails loudly rather than silently:
 | `0001` | `termio.c` and `fileio.c` route a pipe or file on a sync fd to the pumps before any of their own staging (the original path is a thread per 3 KB read — `TERM_IO_BUF_SIZE`, sized for a console — which is the 17 MB/s upload cap, and a thread per write, a third of the client's time on a 20 Gbit link when receiving). Console fds keep the original paths, with one fix: a char device that is not a console (`NUL`, which is what `-n` and `< NUL` give) now reads as end-of-file, where before its 0-byte reads counted as "nothing yet" and the main loop spun creating a thread per pass — a sixth of a download's main thread. |
 | `0002` | `socketio.c` routes a connected socket's `recv()`, `send()`, `select()`, `shutdown()` and `close()` to the pumps, so the socket work overlaps the crypto instead of following it on the same thread, and each direction loses one copy. Measured over 20 Gbit Thunderbolt when first done: send 764 → ~1020 MB/s, receive 573 → ~930 MB/s. |
 | `0003` | Build: a `Directory.Build.targets` that compiles the two units above into their projects and adds `/Qspectre`; explicit dependency directories; `HAVE_PSELECT` in `config.h.vs`. |
-| `0004` | A native `pselect()`. Without one, OpenSSH's portable fallback creates a *notify pipe on every call* to close a signal race that this port's alertable waits do not have — and on Windows `pipe()` is a named pipe, an open and two closes, per packet. This alone took the client from ~340 to ~800 MB/s on a 20 Gbit link. Also `w32_io_from_fd()`, the fd lookup `win32sendbuf.c` needs. |
+| `0004` | A native `pselect()`. Without one, OpenSSH's portable fallback creates a *notify pipe on every call* to close a signal race that this port's alertable waits do not have — and on Windows `pipe()` is a named pipe, an open and two closes, per packet. This alone took the client from ~340 to ~800 MB/s on a 20 Gbit link. Also `w32_io_from_fd()`, the fd lookup `win32sendbuf.c` needs, and one line in `w32_dup2()` so that a shared-memory ring on stdin or stdout follows the `dup()` the session channel is given. |
 | `0005` | `sshbuf_reset()` keeps its allocation and zeroes only what was used since the last reset (a high-water mark), instead of shrinking to 256 bytes, zeroing the whole buffer and growing it again on the next packet. Two `realloc`s and a needless `memset` per packet gone; ~6% on a 20 Gbit link. And `sshbuf_swap_storage()`, which lets `win32sendbuf.c` take a buffer's storage in exchange for another block. |
 | `0006` | `cipher.c` hands an AES-GCM context to `win32cnggcm.c` when the backend is wanted: four call sites (`init`, `crypt`, `free`, get/set IV) and a pointer in the context. With `0005`, and the pumps no longer signalling per packet, the client sends at ~1400 MB/s and receives at ~1260 MB/s (rsync ~1000 MB/s pushing, ~980 MB/s pulling). |
 | `0007` | `arc4random()` locks a critical section instead of a kernel Mutex. The packet layer draws random padding for every packet it sends, and the Mutex cost two system calls per draw — a tenth of the sending thread on a 20 Gbit link. |
@@ -518,6 +519,73 @@ Two details worth knowing:
   (`USE_STAT64_FUNCS`). Offsets are 64-bit.
 
 Set `RSYNC_WIN32_DEBUG=1` to trace the shim's fd operations to stderr.
+
+### The hop to ssh
+
+A push crosses from `rsync.exe` to `ssh.exe` through an anonymous pipe, and
+the kernel copies every byte twice to get it there — once in, once out —
+either side of the two ring buffers the processes keep anyway. Each 32KB
+chunk costs a `WriteFile` and a `ReadFile` besides. Measured on its own,
+between a parent and a child doing nothing else, a 1MB pipe moves 5.7GB/s at
+those chunk sizes; a single-producer/single-consumer ring in shared memory
+moves 22GB/s.
+
+Since the release ships both binaries, the pipe can be left as scaffolding
+and the bytes sent through such a ring instead (`win32/win32shmpipe.c`, the
+same source compiled into both). `win32_piped_child()` creates two of them,
+one per direction, and passes the inheritable handle numbers to the child in
+the environment; `win32/openssh/win32shmio.c` picks them up in ssh before
+`main()` and hands them to the read and write paths that the pumps would
+otherwise serve. Two copies per byte, and no system call per chunk.
+
+Three things make it safe to have in the default path:
+
+* **A handshake, both ways.** The child says *ready* once it has both rings
+  open; rsync says *go* only if it saw that; the child uses the rings only if
+  it sees *go*. An `ssh.exe` from before any of this existed ignores an
+  environment variable it does not know, and an rsync that gave up waiting
+  never says *go*, so the two ends cannot end up on different transports.
+  Only the `ssh.exe` beside `rsync.exe` is offered a ring at all — including
+  when `-e` names it by path — so nothing is asked of Windows' own client.
+* **A ring is not a pipe when the far side dies.** A pipe reports end of file
+  when the last handle to its other end closes, whatever killed the process
+  holding it; a section reports nothing. So each end keeps a handle to the
+  other process, and treats "gone, and the ring is empty" as end of file for
+  reads and `EPIPE` for writes.
+* **Something to wait on.** ssh's main loop learns of everything through one
+  alertable wait, so each direction gets a notifier thread that sleeps until
+  the main thread says it is about to block, waits on the ring's event, and
+  queues the same kind of APC a pump would. It moves no bytes, and while the
+  transfer keeps up it costs nothing at all — a `select()` that finds bytes
+  waiting never asks for it.
+
+The one place this reaches into Microsoft's code is a single line in
+`w32_dup2()` (patch 0004): `ssh_session2_open()` hands the session channel
+`dup()`s of fd 0, 1 and 2, and it is those the client loop reads and writes,
+so the rings have to follow the dup.
+
+Pushing a 4.3GB file to the Linux box over a 20Gbit link, runs alternating so
+the laptop's thermal drift lands on both:
+
+| | pipe | ring |
+|---|---|---|
+| throughput | 976 MB/s | 1021 MB/s |
+| `rsync.exe` CPU | 3.73 s | 2.57 s |
+| `ssh.exe` CPU | 8.14 s | 6.83 s |
+| both, per GB | 2.76 CPU-s | 2.19 CPU-s |
+
+A fifth of the work of a push, gone; the throughput follows more modestly,
+which is what a machine limited by its power budget rather than by any one
+stage looks like. A pull gains about the same (884 → 913 MB/s).
+
+`RSYNC_WIN32_NO_SHMPIPE=1` keeps the pipes, which is how the two columns
+above were measured and a way out if a ring ever misbehaves.
+`RSYNC_WIN32_SHMPIPE_DEBUG=1` makes both sides say on stderr which transport
+they settled on, and how many bytes went through the rings.
+
+When measuring any of this, pin the cipher: the default is
+`chacha20-poly1305@openssh.com`, which tops out around 260 MB/s on this
+laptop and hides everything else. `-e "ssh -c aes128-gcm@openssh.com"`.
 
 ### Profiling
 

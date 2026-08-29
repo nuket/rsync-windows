@@ -52,6 +52,7 @@
 #include "debug.h"
 #include "misc_internal.h"
 #include "win32pumps.h"
+#include "win32shmio.h"
 
 /* The wake-up itself does nothing beyond clearing its flag: returning from
  * the alertable wait is the point, the waiter re-checks what it waited for. */
@@ -361,11 +362,18 @@ sync_pump_stop(struct w32_io *pio)
 int
 syncio_pump_read(struct w32_io *pio, void *buf, size_t len)
 {
-	struct sync_ctx *c = sync_ctx_get(pio);
-	struct sync_pump *p = c ? c->rd : NULL;
+	struct sync_ctx *c;
+	struct sync_pump *p;
+	struct shmio *s;
 	DWORD n, first;
 	BOOL was_full;
 
+	/* rsync's own fd: the bytes are in a shared ring, not in the pipe. */
+	if ((s = shmio_for(pio, 0)) != NULL)
+		return shmio_read(s, pio, buf, len);
+
+	c = sync_ctx_get(pio);
+	p = c ? c->rd : NULL;
 	if (!c) {
 		errno = ENOMEM;
 		return -1;
@@ -421,8 +429,12 @@ syncio_pump_read(struct w32_io *pio, void *buf, size_t len)
 int
 syncio_pump_prepare(struct w32_io *pio)
 {
-	struct sync_ctx *c = sync_ctx_get(pio);
+	struct sync_ctx *c;
 
+	if (shmio_for(pio, 0))
+		return 0;   /* the ring is always there; nothing to start */
+
+	c = sync_ctx_get(pio);
 	if (!c) {
 		errno = ENOMEM;
 		return -1;
@@ -592,11 +604,17 @@ fail:
 int
 syncio_pump_write(struct w32_io *pio, const void *buf, size_t len)
 {
-	struct sync_ctx *c = sync_ctx_get(pio);
-	struct sync_wpump *p = c ? c->wr : NULL;
+	struct sync_ctx *c;
+	struct sync_wpump *p;
+	struct shmio *s;
 	DWORD n = (DWORD)len, tail, first;
 	BOOL was_empty;
 
+	if ((s = shmio_for(pio, 1)) != NULL)
+		return shmio_write(s, pio, buf, len);
+
+	c = sync_ctx_get(pio);
+	p = c ? c->wr : NULL;
 	if (!c) {
 		errno = ENOMEM;
 		return -1;
@@ -653,7 +671,11 @@ BOOL
 syncio_pump_available(struct w32_io *pio, BOOL rd)
 {
 	struct sync_ctx *c = (struct sync_ctx *)pio->internal.context;
+	struct shmio *s = shmio_for(pio, rd ? 0 : 1);
 	BOOL ready;
+
+	if (s)
+		return shmio_available(s, !rd);
 
 	if (rd) {
 		struct sync_pump *p = c ? c->rd : NULL;
@@ -685,6 +707,7 @@ syncio_pump_close(struct w32_io *pio)
 {
 	struct sync_ctx *c = (struct sync_ctx *)pio->internal.context;
 
+	shmio_close(pio);   /* a no-op unless this fd was one of rsync's rings */
 	if (!c)
 		return;
 	if (c->wr) {

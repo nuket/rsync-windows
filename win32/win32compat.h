@@ -301,6 +301,12 @@ int      win32_fcntl(int fd, int cmd, ...);
 int      win32_dup(int fd);
 int      win32_dup2(int oldfd, int newfd);
 
+/* Back an fd's reads or writes with a shared-memory ring instead of its pipe
+ * (win32shmpipe.h); win32_piped_child() does this for the ssh child's two
+ * fds when the child answers the handshake.  win32_close() frees the ring. */
+struct shmpipe;
+void     win32_shm_attach(int fd, struct shmpipe *sp, int for_write);
+
 #define read(f, b, n)   win32_read((f), (b), (unsigned int)(n))
 #define write(f, b, n)  win32_write((f), (b), (unsigned int)(n))
 #define close(f)        win32_close(f)

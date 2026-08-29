@@ -15,18 +15,21 @@ index 3cc5020..830bf90 100644
  
  
 diff --git a/contrib/win32/win32compat/w32fd.c b/contrib/win32/win32compat/w32fd.c
-index b4c4368..b972c71 100644
+index b4c4368..a28fbb6 100644
 --- a/contrib/win32/win32compat/w32fd.c
 +++ b/contrib/win32/win32compat/w32fd.c
-@@ -40,6 +40,7 @@
+@@ -40,8 +40,10 @@
  #include "inc\sys\un.h"
  #include "inc\utf.h"
  #include "inc\stdio.h"
 +#include "inc\signal.h"   /* sigset_t, sigprocmask for pselect() */
  
  #include "w32fd.h"
++#include "win32shmio.h"   /* rsync-windows: shmio_note_dup() */
  #include "signal_internal.h"
-@@ -202,6 +203,16 @@ fd_table_clear(int index)
+ #include <stdarg.h>
+ #include <errno.h>
+@@ -202,6 +204,16 @@ fd_table_clear(int index)
  	FD_CLR(index, &(fd_table.occupied));
  }
  
@@ -43,7 +46,7 @@ index b4c4368..b972c71 100644
  void 
  init_prog_paths()
  {
-@@ -728,6 +739,48 @@ w32_fcntl(int fd, int cmd, ... /* arg */)
+@@ -728,6 +740,48 @@ w32_fcntl(int fd, int cmd, ... /* arg */)
  	return ret;
  }
  
@@ -92,3 +95,13 @@ index b4c4368..b972c71 100644
  #define SELECT_EVENT_LIMIT 512
  int
  w32_select(int fds, w32_fd_set* readfds, w32_fd_set* writefds, w32_fd_set* exceptfds, const struct timeval *timeout)
+@@ -978,6 +1032,9 @@ w32_dup2(int oldfd, int newfd)
+ 		pio->internal.state = SOCK_READY;
+ 
+ 	fd_table_set(pio, newfd);
++	/* a shared-memory ring on stdin or stdout follows the dup
++	 * (rsync-windows, win32/openssh/win32shmio.c); a no-op otherwise */
++	shmio_note_dup(oldfd, pio);
+ 	return 0;
+ }
+ 

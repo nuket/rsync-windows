@@ -13,6 +13,7 @@
 
 #include "rsync.h"
 #include "win32/win32undef.h"
+#include "win32/win32shmpipe.h"
 
 extern int blocking_io;
 
@@ -305,16 +306,12 @@ static char *build_command_line(char **argv)
  * A bare "ssh" -- the default remote shell, or -e ssh -- resolves to it
  * when it is there; a remote shell given with a path is used as given.
  */
-static char *bundled_ssh(const char *program)
+/* The path of the ssh.exe beside rsync.exe, or NULL if there is none. */
+static char *bundled_ssh_path(void)
 {
 	static char path[MAXPATHLEN];
 	static int looked;
 	const char *base;
-
-	if (!program || strpbrk(program, "\\/"))
-		return NULL;
-	if (_stricmp(program, "ssh") != 0 && _stricmp(program, "ssh.exe") != 0)
-		return NULL;
 
 	if (!looked) {
 		DWORD n = GetModuleFileNameA(NULL, path, sizeof path);
@@ -331,6 +328,45 @@ static char *bundled_ssh(const char *program)
 		}
 	}
 	return path[0] ? path : NULL;
+}
+
+static char *bundled_ssh(const char *program)
+{
+	if (!program || strpbrk(program, "\\/"))
+		return NULL;
+	if (_stricmp(program, "ssh") != 0 && _stricmp(program, "ssh.exe") != 0)
+		return NULL;
+	return bundled_ssh_path();
+}
+
+/* Is this remote shell our own ssh.exe -- the only one that knows about the
+ * shared-memory rings?  A bare "ssh" resolves to it, and so does the same
+ * file named with a path, which is how a script that wants a particular
+ * build (or a measurement that pins the cipher) usually spells it. */
+static int is_bundled_ssh(const char *program)
+{
+	char full[MAXPATHLEN];
+	const char *ours = bundled_ssh_path();
+	DWORD n;
+
+	if (!ours)
+		return 0;
+	if (bundled_ssh(program))
+		return 1;
+	if (!program || !*program)
+		return 0;
+	n = GetFullPathNameA(program, sizeof full, full, NULL);
+	if (!n || n >= sizeof full)
+		return 0;
+	if (_stricmp(full, ours) == 0)
+		return 1;
+	/* "...\ssh" with the extension left off */
+	if (strlen(full) + sizeof ".exe" <= sizeof full) {
+		strcat(full, ".exe");
+		if (_stricmp(full, ours) == 0)
+			return 1;
+	}
+	return 0;
 }
 
 /* Create a pipe whose child end is inheritable and whose parent end is not.
@@ -366,12 +402,67 @@ static int make_pipe(HANDLE *parent_end, HANDLE *child_end, int parent_reads)
 	return 0;
 }
 
+/* ------------------------------------------------------- shared-memory ring */
+
+/*
+ * The bulk of a transfer crosses to ssh through the pipes above, and the
+ * kernel copies every byte twice to get it there.  When the child is the
+ * ssh.exe we ship -- the only one that knows about any of this -- offer it a
+ * pair of shared-memory rings instead (win32shmpipe.h): the section and its
+ * events are inheritable, so the child needs nothing but their handle
+ * numbers, which go in the environment.  Everything stays as it was if the
+ * child does not answer: the pipes are created either way and the fds are
+ * the same fds.
+ */
+#define SHM_RING_BYTES  (4 * 1024 * 1024)
+#define SHM_ENV         "RSYNC_WIN32_SHMPIPE"
+#define SHM_READY_MS    5000
+
+/* RSYNC_WIN32_SHMPIPE_DEBUG=1 says on stderr which transport was settled on.
+ * Not rprintf(): this file is linked into the C test helpers, which supply
+ * no logging symbols. */
+static int shm_disabled(void)
+{
+	const char *off = getenv("RSYNC_WIN32_NO_SHMPIPE");
+
+	return off && *off && *off != '0';
+}
+
+static void shm_debug(const char *what)
+{
+	const char *on = getenv(SHM_ENV "_DEBUG");
+
+	if (on && *on && *on != '0')
+		fprintf(stderr, "rsync: shmpipe: %s\n", what);
+}
+
+/*
+ * "to-child|from-child|us", the two rings as shmpipe_spec() gives them and
+ * an inheritable handle to this process.  The child needs the last one for
+ * the same reason a pipe needs no such thing: if we die without closing, it
+ * has to find out somehow, and a section never breaks.
+ */
+static char *shm_env_value(struct shmpipe *to_child, struct shmpipe *from_child)
+{
+	static char buf[384];
+	HANDLE self = NULL;
+
+	if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(),
+			     GetCurrentProcess(), &self, SYNCHRONIZE, TRUE, 0))
+		self = NULL;
+	snprintf(buf, sizeof buf, "%s|%s|%llu",
+		 shmpipe_spec(to_child), shmpipe_spec(from_child),
+		 (unsigned long long)(uintptr_t)self);
+	return buf;
+}
+
 pid_t win32_piped_child(char **command, int *f_in, int *f_out)
 {
 	HANDLE to_child_parent, to_child_child;
 	HANDLE from_child_parent, from_child_child;
 	STARTUPINFOA si;
 	PROCESS_INFORMATION pi;
+	struct shmpipe *shm_to = NULL, *shm_from = NULL;
 	char *cmdline;
 	int in_fd, out_fd;
 
@@ -403,6 +494,22 @@ pid_t win32_piped_child(char **command, int *f_in, int *f_out)
 	si.hStdOutput = from_child_child;
 	si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
 
+	/* Only for our own ssh.exe: anything else would inherit the handles,
+	 * ignore the variable, and cost us the handshake wait for nothing.
+	 * RSYNC_WIN32_NO_SHMPIPE=1 keeps the pipes, for measuring one against
+	 * the other and as a way out if a ring ever misbehaves. */
+	if (is_bundled_ssh(command[0]) && !shm_disabled()) {
+		if (shmpipe_create(&shm_to, SHM_RING_BYTES) < 0)
+			shm_to = NULL;
+		else if (shmpipe_create(&shm_from, SHM_RING_BYTES) < 0) {
+			shmpipe_free(shm_to);
+			shm_to = NULL;
+		}
+		if (shm_to)
+			SetEnvironmentVariableA(SHM_ENV,
+						shm_env_value(shm_to, shm_from));
+	}
+
 	/* Naming the image leaves cmdline, and so the child's argv, as given. */
 	if (!CreateProcessA(bundled_ssh(command[0]), cmdline, NULL, NULL, TRUE, 0,
 			    NULL, NULL, &si, &pi)) {
@@ -431,6 +538,9 @@ pid_t win32_piped_child(char **command, int *f_in, int *f_out)
 		}
 
 		free(cmdline);
+		SetEnvironmentVariableA(SHM_ENV, NULL);
+		shmpipe_free(shm_to);
+		shmpipe_free(shm_from);
 		CloseHandle(to_child_parent);
 		CloseHandle(to_child_child);
 		CloseHandle(from_child_parent);
@@ -440,6 +550,7 @@ pid_t win32_piped_child(char **command, int *f_in, int *f_out)
 	}
     started:
 	free(cmdline);
+	SetEnvironmentVariableA(SHM_ENV, NULL);
 
 	/* The child owns its ends now. */
 	CloseHandle(to_child_child);
@@ -454,6 +565,45 @@ pid_t win32_piped_child(char **command, int *f_in, int *f_out)
 		CloseHandle(pi.hProcess);
 		errno = EMFILE;
 		return -1;
+	}
+
+	/*
+	 * The handshake.  Our ssh marks the rings ready as its first act, so
+	 * this normally costs a couple of milliseconds; the process wait is
+	 * there so an ssh that dies immediately -- a bad host, a missing key --
+	 * does not cost the full timeout.  Saying go only after seeing ready
+	 * is what keeps both ends on the same transport.
+	 */
+	if (shm_to) {
+		DWORD waited = 0;
+		int ok = 0;
+
+		for (;;) {
+			if (shmpipe_wait_ready(shm_to, 0) == 0) {
+				ok = 1;
+				break;
+			}
+			if (waited >= SHM_READY_MS)
+				break;
+			if (WaitForSingleObject(pi.hProcess, 5) == WAIT_OBJECT_0) {
+				ok = shmpipe_wait_ready(shm_to, 0) == 0;
+				break;
+			}
+			waited += 5;
+		}
+		shm_debug(ok ? "child answered; using shared memory"
+			     : "no answer from the child; using pipes");
+		if (ok) {
+			shmpipe_mark_go(shm_to);
+			shmpipe_mark_go(shm_from);
+			shmpipe_set_peer(shm_to, pi.hProcess);
+			shmpipe_set_peer(shm_from, pi.hProcess);
+			win32_shm_attach(in_fd, shm_from, 0);
+			win32_shm_attach(out_fd, shm_to, 1);
+		} else {
+			shmpipe_free(shm_to);
+			shmpipe_free(shm_from);
+		}
 	}
 
 	remember_child((pid_t)pi.dwProcessId, pi.hProcess);

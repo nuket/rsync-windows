@@ -11,6 +11,7 @@
 
 #include "rsync.h"
 #include "win32/win32undef.h"
+#include "win32/win32shmpipe.h"
 #include <poll.h>	/* struct pollfd and nfds_t for win32_poll() below */
 
 /* Set RSYNC_WIN32_DEBUG=1 to trace the shim's fd operations to stderr. */
@@ -162,6 +163,30 @@ static int fd_is_pipe(int fd, HANDLE h)
 {
 	return fd_filetype(fd, h) == FILE_TYPE_PIPE;
 }
+
+/* ------------------------------------------------- shared-memory channels */
+
+/*
+ * The two fds that carry a transfer to and from the ssh child can be backed
+ * by a shared-memory ring instead of a kernel pipe (win32shmpipe.c), which
+ * is where most of the pipe hop's cost went: four copies per byte becomes
+ * two, and the system calls go away.  win32_piped_child() sets these up if
+ * the child is our own ssh.exe and it answers the handshake; everything
+ * below just asks whether this fd has one.
+ */
+static struct shmpipe *shm_rd[MAX_CRTFDS];
+static struct shmpipe *shm_wr[MAX_CRTFDS];
+
+void win32_shm_attach(int fd, struct shmpipe *sp, int for_write)
+{
+	if (fd < 0 || fd >= MAX_CRTFDS)
+		return;
+	if (for_write)
+		shm_wr[fd] = sp;
+	else
+		shm_rd[fd] = sp;
+}
+
 
 /*
  * The pumps' events are state, not wake-ups: "the ring holds bytes", "the
@@ -702,6 +727,10 @@ int win32_read(int fd, void *buf, unsigned int count)
 		return n;
 	}
 
+	/* A shared-memory channel replaces the pipe entirely for this fd. */
+	if (fd >= 0 && fd < MAX_CRTFDS && shm_rd[fd])
+		return shmpipe_read(shm_rd[fd], buf, count, fd_nonblock[fd]);
+
 	h = fd_handle(fd);
 	if (h == INVALID_HANDLE_VALUE) {
 		errno = EBADF;
@@ -752,6 +781,9 @@ int win32_write(int fd, const void *buf, unsigned int count)
 		return n;
 	}
 
+	if (fd >= 0 && fd < MAX_CRTFDS && shm_wr[fd])
+		return shmpipe_write(shm_wr[fd], buf, count, fd_nonblock[fd]);
+
 	h = fd_handle(fd);
 	if (h == INVALID_HANDLE_VALUE) {
 		errno = EBADF;
@@ -796,6 +828,20 @@ int win32_close(int fd)
 	}
 	wpump_stop(fd);
 	pump_stop(fd);
+	if (fd >= 0 && fd < MAX_CRTFDS) {
+		/* Closing our end of a ring means "no more bytes"; the far side
+		 * needs to hear that, since there is no kernel object whose last
+		 * handle going away would tell it. */
+		if (shm_wr[fd]) {
+			shmpipe_close_write(shm_wr[fd]);
+			shmpipe_free(shm_wr[fd]);
+			shm_wr[fd] = NULL;
+		}
+		if (shm_rd[fd]) {
+			shmpipe_free(shm_rd[fd]);
+			shm_rd[fd] = NULL;
+		}
+	}
 	if (fd >= 0 && fd < MAX_CRTFDS)
 		fd_nonblock[fd] = 0;
 	fd_ftype_forget(fd);
@@ -999,6 +1045,9 @@ static int crtfd_readable(int fd)
 	DWORD avail = 0;
 	struct pipe_pump *p = pump_for(fd, 0);
 
+	if (fd >= 0 && fd < MAX_CRTFDS && shm_rd[fd])
+		return shmpipe_avail(shm_rd[fd]) > 0 || shmpipe_at_eof(shm_rd[fd]);
+
 	if (p) {
 		int ready;
 		EnterCriticalSection(&p->lock);
@@ -1030,6 +1079,9 @@ static int crtfd_writable(int fd)
 	HANDLE h = fd_handle(fd);
 	struct pipe_wpump *p = wpump_for(fd, 0);
 
+	if (fd >= 0 && fd < MAX_CRTFDS && shm_wr[fd])
+		return shmpipe_room(shm_wr[fd]) > 0;
+
 	if (p) {
 		int ready;
 		EnterCriticalSection(&p->lock);
@@ -1039,6 +1091,45 @@ static int crtfd_writable(int fd)
 	}
 
 	return h != INVALID_HANDLE_VALUE;
+}
+
+/* Which of the fds waited on below are ready now, as two fd_sets. */
+static int evt_scan(const int *evt_fd, const int *evt_w, int n_evt,
+		    fd_set *out_r, fd_set *out_w)
+{
+	int j, count = 0;
+
+	FD_ZERO(out_r);
+	FD_ZERO(out_w);
+	for (j = 0; j < n_evt; j++) {
+		if (evt_w[j]) {
+			if (crtfd_writable(evt_fd[j])) {
+				FD_SET((SOCKET)evt_fd[j], out_w);
+				count++;
+			}
+		} else if (crtfd_readable(evt_fd[j])) {
+			FD_SET((SOCKET)evt_fd[j], out_r);
+			count++;
+		}
+	}
+	return count;
+}
+
+/* Tell the far side of every ring in the set whether we are about to wait. */
+static void shm_arm_set(const int *evt_fd, const int *evt_w, int n_evt, int on)
+{
+	int j;
+
+	for (j = 0; j < n_evt; j++) {
+		int fd = evt_fd[j];
+		struct shmpipe *sp;
+
+		if (fd < 0 || fd >= MAX_CRTFDS)
+			continue;
+		sp = evt_w[j] ? shm_wr[fd] : shm_rd[fd];
+		if (sp)
+			shmpipe_arm(sp, evt_w[j], on);
+	}
 }
 
 /* ------------------------------------------------------------- poll waits */
@@ -1293,9 +1384,20 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 		int    n_evt = 0, unpumped = 0, j;
 
 		for (j = 0; j < n_crt_r && !unpumped; j++) {
-			struct pipe_pump *p = pump_for(crt_r[j], 1);
+			struct pipe_pump *p;
 
-			if (!p || n_evt == MAXIMUM_WAIT_OBJECTS) {
+			if (n_evt == MAXIMUM_WAIT_OBJECTS) {
+				unpumped = 1;
+				break;
+			}
+			/* A ring has its own event and needs no pump at all. */
+			if (crt_r[j] < MAX_CRTFDS && shm_rd[crt_r[j]]) {
+				evts[n_evt] = shmpipe_data_event(shm_rd[crt_r[j]]);
+				evt_w[n_evt] = 0;
+				evt_fd[n_evt++] = crt_r[j];
+				continue;
+			}
+			if (!(p = pump_for(crt_r[j], 1))) {
 				unpumped = 1;
 				break;
 			}
@@ -1304,9 +1406,19 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 			evt_fd[n_evt++] = crt_r[j];
 		}
 		for (j = 0; j < n_crt_w && !unpumped; j++) {
-			struct pipe_wpump *p = wpump_for(crt_w[j], 1);
+			struct pipe_wpump *p;
 
-			if (!p || n_evt == MAXIMUM_WAIT_OBJECTS) {
+			if (n_evt == MAXIMUM_WAIT_OBJECTS) {
+				unpumped = 1;
+				break;
+			}
+			if (crt_w[j] < MAX_CRTFDS && shm_wr[crt_w[j]]) {
+				evts[n_evt] = shmpipe_room_event(shm_wr[crt_w[j]]);
+				evt_w[n_evt] = 1;
+				evt_fd[n_evt++] = crt_w[j];
+				continue;
+			}
+			if (!(p = wpump_for(crt_w[j], 1))) {
 				unpumped = 1;
 				break;
 			}
@@ -1321,27 +1433,20 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 			for (;;) {
 				fd_set out_r, out_w;
 				DWORD rc, ms;
-				int count = 0;
+				int count;
 
-				FD_ZERO(&out_r);
-				FD_ZERO(&out_w);
-				for (j = 0; j < n_evt; j++) {
-					if (evt_w[j]) {
-						if (crtfd_writable(evt_fd[j])) {
-							FD_SET((SOCKET)evt_fd[j], &out_w);
-							count++;
-						}
-					} else if (crtfd_readable(evt_fd[j])) {
-						FD_SET((SOCKET)evt_fd[j], &out_r);
-						count++;
-					}
-				}
+				count = evt_scan(evt_fd, evt_w, n_evt, &out_r, &out_w);
+				if (count)
+					goto ready;
+
+				/* A ring only signals its event while the far side has
+				 * said it is waiting, so say so -- and then look once
+				 * more, in case bytes landed in between. */
+				shm_arm_set(evt_fd, evt_w, n_evt, 1);
+				count = evt_scan(evt_fd, evt_w, n_evt, &out_r, &out_w);
 				if (count) {
-					TRACE("select -> %d (pump)\n", count);
-					if (rfds) *rfds = out_r;
-					if (wfds) *wfds = out_w;
-					if (efds) FD_ZERO(efds);
-					return count;
+					shm_arm_set(evt_fd, evt_w, n_evt, 0);
+					goto ready;
 				}
 
 				if (infinite)
@@ -1355,6 +1460,7 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 				}
 
 				rc = WaitForMultipleObjects((DWORD)n_evt, evts, FALSE, ms);
+				shm_arm_set(evt_fd, evt_w, n_evt, 0);
 				if (rc == WAIT_TIMEOUT) {
 					if (rfds) FD_ZERO(rfds);
 					if (wfds) FD_ZERO(wfds);
@@ -1365,6 +1471,13 @@ int win32_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 					errno = EIO;
 					return -1;
 				}
+				continue;
+			ready:
+				TRACE("select -> %d (pump)\n", count);
+				if (rfds) *rfds = out_r;
+				if (wfds) *wfds = out_w;
+				if (efds) FD_ZERO(efds);
+				return count;
 			}
 		}
 	}
