@@ -252,7 +252,7 @@ index 2f62fa8..327b213 100644
  	if (chroot_pathw != NULL &&
  		(resolved_target_chroot = _wfullpath(NULL, resolved_target_utf16, 0)) != NULL &&
 diff --git a/contrib/win32/win32compat/termio.c b/contrib/win32/win32compat/termio.c
-index 4d3c783..3eaee60 100644
+index 4d3c783..432f7ba 100644
 --- a/contrib/win32/win32compat/termio.c
 +++ b/contrib/win32/win32compat/termio.c
 @@ -47,6 +47,11 @@
@@ -267,7 +267,31 @@ index 4d3c783..3eaee60 100644
  
  extern int in_raw_mode;
  BOOL isFirstTime = TRUE;
-@@ -150,14 +155,23 @@ syncio_initiate_read(struct w32_io* pio)
+@@ -100,11 +105,22 @@ ReadThread(_In_ LPVOID lpParameter)
+ 
+ 			if (!ReadFile(WINHANDLE(pio), pio->read_details.buf,
+ 				pio->read_details.buf_size, &(pio->sync_read_status.transferred), NULL)) {
+-				debug4("ReadThread - ReadFile failed, error:%d, io:%p", GetLastError(), pio); 
++				debug4("ReadThread - ReadFile failed, error:%d, io:%p", GetLastError(), pio);
+ 				pio->sync_read_status.error = GetLastError();
+ 				goto done;
+ 			}
+ 
++			/* A char device that is not a console -- NUL, which is what
++			 * -n and "< NUL" give -- returns 0 bytes for ever.  Without
++			 * this it read as "nothing yet", and the main loop spun
++			 * creating a thread per pass to ask again: a sixth of a
++			 * 4 GB download's main thread (rsync-windows). */
++			if (!pio->sync_read_status.transferred) {
++				DWORD mode;
++				if (!GetConsoleMode(WINHANDLE(pio), &mode))
++					pio->sync_read_status.error = ERROR_HANDLE_EOF;
++			}
++
+ 			if (pio->sync_read_status.transferred) {
+ 				char *p = NULL;
+ 				if (p = strstr(pio->read_details.buf, "\r\n"))
+@@ -150,14 +166,23 @@ syncio_initiate_read(struct w32_io* pio)
  
  	debug5("syncio_initiate_read io:%p", pio);
  	if (pio->read_details.buf_size == 0) {
@@ -293,7 +317,7 @@ index 4d3c783..3eaee60 100644
  	read_thread = (HANDLE) _beginthreadex(NULL, 0, ReadThread, pio, 0, NULL);
  	if (read_thread == NULL) {
  		errno = errno_from_Win32LastError();
-@@ -236,6 +250,13 @@ syncio_initiate_write(struct w32_io* pio, DWORD num_bytes)
+@@ -236,6 +261,13 @@ syncio_initiate_write(struct w32_io* pio, DWORD num_bytes)
  {
  	HANDLE write_thread;
  	debug5("syncio_initiate_write initiate io:%p", pio);
@@ -307,7 +331,7 @@ index 4d3c783..3eaee60 100644
  	memset(&(pio->sync_write_status), 0, sizeof(pio->sync_write_status));
  	pio->sync_write_status.to_transfer = num_bytes;
  	write_thread = (HANDLE)_beginthreadex(NULL, 0, WriteThread, pio, 0, NULL);
-@@ -262,6 +283,11 @@ syncio_close(struct w32_io* pio)
+@@ -262,6 +294,11 @@ syncio_close(struct w32_io* pio)
  {
  	debug4("syncio_close - pio:%p", pio);
  

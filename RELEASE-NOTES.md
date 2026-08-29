@@ -97,6 +97,9 @@ What changed since v3.5.0-gf800ace2
     20 Gbit link the client went from ~340 MB/s sending and ~220 MB/s
     receiving to ~1.5 GB/s sending and ~1.26 GB/s receiving (rsync: ~1
     GB/s pushing, ~980 MB/s pulling).
+  - ssh.exe run with -n, or with its stdin from NUL, no longer spins a
+    thread per pass of its main loop asking NUL for input; that cost a
+    plain "ssh host command > file" a sixth of its time.
 
 What changed in v3.5.0-gf800ace2
 --------------------------------
