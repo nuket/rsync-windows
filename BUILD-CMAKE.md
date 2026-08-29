@@ -568,17 +568,20 @@ Two things that have already been chased down, so they need not be again:
   with this cipher" as it gets without building four ssh.exes), after
   cooling the CPU to ~60 °C each time:
 
-  | library | cipher alone | sustained, 2 min | lost to throttling |
+  | library | cipher alone | sustained, 2 min | change over the run |
   | --- | --- | --- | --- |
-  | ISA-L | 5347 MB/s | **1817 MB/s** | −0.4% |
-  | OpenSSL 3 | 5265 | 1811 | +0.1% |
-  | CNG | 3452 | 1622 | −12.6% |
-  | LibreSSL | 2247 | 1239 | −17.1% |
+  | ISA-L | 5347 MB/s | **1817 MB/s** | +0.4% |
+  | OpenSSL 3 | 5265 | 1811 | −0.1% |
+  | CNG | 3452 | 1622 | **−12.6%** |
+  | LibreSSL | 2247 | 1239 | **−16.9%** |
+
+  (last 30 s against first 30 s, so a negative number is throughput given
+  away to throttling as the run goes on.)
 
   ISA-L and OpenSSL sit on the link ceiling (1894 MB/s) for the whole run;
   CNG starts lower and sinks, LibreSSL worse. Reversing the order
   reproduced it from matched start temperatures (CNG 1618 / −13.1%, ISA-L
-  1809 / −0.7%), and the Linux end logged the same rates it received while
+  1809 / +0.7%), and the Linux end logged the same rates it received while
   never exceeding 7% CPU, so none of this is the far end. The mechanism is
   the obvious one: fewer cycles per byte is less package power, and on a
   15 W part that is the difference between holding a rate and decaying

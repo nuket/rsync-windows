@@ -17391,6 +17391,87 @@ completed (exit code 0)
 
 ❯ I didn't see a cyclical trend on the Linux side this time, so it could be
   an issue with rsync + ssh, we can check later.
+
+● That matches my analysis exactly — detrended, ISA-L and OpenSSL show no
+  meaningful periodicity (r≤0.10 and 0.26), and CNG/LibreSSL show only smooth
+  wander over 3–5 s plus a downward trend, not a fixed cycle. So the cycling you
+  saw is likely specific to rsync+ssh. Noted for later.
+
+● Chart 2 has a legend/annotation collision, and its clock panel needs an honest
+  caveat — ISA-L held a higher clock here partly because it started 7 °C
+  cooler. The reverse pass settles it: at the same clock (167%) ISA-L still
+  delivered 1809 vs CNG's 1618. Let me fix both.
+
+● Your hypothesis was right, and my earlier conclusion was wrong. I'd tested
+  only the regime where it can't show up.
+
+  The experiment
+
+  Encrypt 32 KB packets with each library and push the ciphertext over raw TCP
+  to the Linux box for 2 minutes, cooling the CPU to ~60 °C first — as close to
+  "ssh built with this cipher" as possible without building four ssh.exes. Both
+  ends logged.
+
+  ┌───────────┬──────────────┬─────────────────┬────────────────────┬───────┐
+  │  library  │ cipher alone │ sustained 2 min │ lost to throttling │  CPU  │
+  ├───────────┼──────────────┼─────────────────┼────────────────────┼───────┤
+  │ ISA-L     │ 5347 MB/s    │ 1817 MB/s       │ −0.4%              │ 15.9% │
+  ├───────────┼──────────────┼─────────────────┼────────────────────┼───────┤
+  │ OpenSSL 3 │ 5265         │ 1811            │ +0.1%              │ 18.5% │
+  ├───────────┼──────────────┼─────────────────┼────────────────────┼───────┤
+  │ CNG       │ 3452         │ 1622            │ −12.6%             │ 20%   │
+  ├───────────┼──────────────┼─────────────────┼────────────────────┼───────┤
+  │ LibreSSL  │ 2247         │ 1239            │ −17.1%             │ 21.6% │
+  └───────────┴──────────────┴─────────────────┴────────────────────┴───────┘
+
+  ISA-L and OpenSSL sit on the link ceiling (1894 MB/s) for the entire run. CNG
+  starts lower and sinks; LibreSSL worse. Reversed order reproduced it from
+  matched start temps (CNG 1618/−13.1%, ISA-L 1809/−0.7%).
+
+  Exactly your mechanism: fewer cycles per byte → less package power → less
+  throttling. The cleanest evidence is that ISA-L held 1809 MB/s at the same
+  167% clock where CNG managed 1618 — same cycles available, more bytes out of
+  them.
+
+  Why I got it wrong before
+
+  My aes128-vs-aes256 test ran ~2 seconds per transfer, through the rsync
+  pipeline. Two problems: throttling needs minutes to develop, and rsync is
+  capped at ~1000 MB/s by the pipe hop, far below where the cipher binds. Both
+  regimes are real — the useful question is which one you're in:
+
+  - rsync as it stands: cipher irrelevant, pipe hop is the limit.
+  - Sustained near line rate: cipher library is worth ~12% of sustained
+    throughput.
+
+  So ISA-L becomes worth it the moment the pipe hop is fixed, or for anything
+  already running near the wire for minutes.
+
+  Your other two questions
+
+  Power via WMI: no. The Energy Meter counter set exists but has zero instances
+  (no EMI hardware — that's tablets/SoCs). Dell exposes temperature and fan
+  only. BatteryStatus.DischargeRate gives whole-system mW but only on battery
+  (PowerOnline=True right now). CPU package power needs RAPL via a kernel
+  driver. I did add fan speed — it pinned at ~6000 rpm in all four runs.
+
+  Cycling: confirmed absent here, matching what you saw. Detrended
+  autocorrelation peaks at r ≤ 0.26 for ISA-L/OpenSSL; CNG and LibreSSL show
+  only smooth 3–5 s wander plus a downward trend, not a fixed period. The Linux
+  side tracked the sender within 1 MB/s at ≤7% CPU. So the cyclic behaviour is
+  in rsync+ssh, not the link, the controller, or the governor — worth chasing
+  separately.
+
+  Committed as 27e01cd3 with both charts (windows-perf-tb-cipher-libs,
+  windows-perf-tb-cipher-thermal), and I corrected the earlier "ISA-L buys
+  nothing" note rather than leaving it standing.
+
+✻ Cogitated for 25m 10s · done 11:39 PM
+
+❯ Ok in the windows-perf-tb-cipher-libs chart, the how much it throttles away
+  chart looks wrong, it should be negative percentages, that would be more
+  intuitive for the reader, it loses performance compared to the start of the
+  tests.
 ```
 
 # Moar Speed Pt. X! Shared Memory IPC?
