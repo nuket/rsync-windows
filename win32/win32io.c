@@ -129,6 +129,55 @@ static int handle_is_pipe(HANDLE h)
 	return h != INVALID_HANDLE_VALUE && GetFileType(h) == FILE_TYPE_PIPE;
 }
 
+/*
+ * GetFileType() is a system call (NtQueryVolumeInformationFile), and read(),
+ * write() and select() each ask what an fd is before doing anything with it:
+ * 3% of rsync's main thread during a bulk transfer.  An fd's type cannot
+ * change under us, so remember it, keyed by the handle so that an fd rebound
+ * to something else misses the entry rather than answering for the old one.
+ */
+static struct { HANDLE h; DWORD type; } fd_ftype[MAX_CRTFDS];
+
+static DWORD fd_filetype(int fd, HANDLE h)
+{
+	if (h == INVALID_HANDLE_VALUE)
+		return FILE_TYPE_UNKNOWN;
+	if (fd < 0 || fd >= MAX_CRTFDS)
+		return GetFileType(h);
+	if (fd_ftype[fd].h != h) {
+		fd_ftype[fd].type = GetFileType(h);
+		fd_ftype[fd].h = h;
+	}
+	return fd_ftype[fd].type;
+}
+
+/* An fd is going away or being rebound: drop what we remember of it. */
+static void fd_ftype_forget(int fd)
+{
+	if (fd >= 0 && fd < MAX_CRTFDS)
+		fd_ftype[fd].h = NULL;
+}
+
+static int fd_is_pipe(int fd, HANDLE h)
+{
+	return fd_filetype(fd, h) == FILE_TYPE_PIPE;
+}
+
+/*
+ * The pumps' events are state, not wake-ups: "the ring holds bytes", "the
+ * ring has room".  They are manual-reset, so a SetEvent on one already set
+ * is a system call that changes nothing -- and with one per 32KB write that
+ * came to 7% of rsync's main thread.  Mirror the state in the struct, under
+ * the lock that already guards the ring, and only call the kernel on a
+ * change.  A stop path may set an event without the lock: that leaves the
+ * mirror reading "clear" for an event that is set, which costs one redundant
+ * SetEvent later and never a missed wake-up.
+ */
+#define EVT_SET(p, evt, flag) \
+	do { if (!(p)->flag) { (p)->flag = 1; SetEvent((p)->evt); } } while (0)
+#define EVT_CLEAR(p, evt, flag) \
+	do { if ((p)->flag) { (p)->flag = 0; ResetEvent((p)->evt); } } while (0)
+
 /* ------------------------------------------------------------- pipe pumps */
 
 /*
@@ -165,6 +214,7 @@ struct pipe_pump {
 	size_t head, tail, len;  /* head: next byte out; tail: next byte in */
 	int    eof;
 	DWORD  err;
+	int    data_on, room_on; /* what the two events currently say (EVT_SET) */
 	volatile LONG stop;
 };
 
@@ -187,7 +237,7 @@ static unsigned __stdcall pump_thread(void *arg)
 		EnterCriticalSection(&p->lock);
 		space = PUMP_RING_SIZE - p->len;
 		if (!space)
-			ResetEvent(p->room_evt);
+			EVT_CLEAR(p, room_evt, room_on);
 		LeaveCriticalSection(&p->lock);
 
 		if (!space) {
@@ -205,7 +255,7 @@ static unsigned __stdcall pump_thread(void *arg)
 			EnterCriticalSection(&p->lock);
 			p->err = err;
 			p->eof = 1;
-			SetEvent(p->data_evt);   /* EOF is a readable event too */
+			EVT_SET(p, data_evt, data_on);   /* EOF is a readable event too */
 			LeaveCriticalSection(&p->lock);
 			break;
 		}
@@ -219,7 +269,7 @@ static unsigned __stdcall pump_thread(void *arg)
 			memcpy(p->ring, chunk + first, got - first);
 		p->tail = (p->tail + got) % PUMP_RING_SIZE;
 		p->len += got;
-		SetEvent(p->data_evt);
+		EVT_SET(p, data_evt, data_on);
 		LeaveCriticalSection(&p->lock);
 	}
 	return 0;
@@ -261,6 +311,7 @@ static struct pipe_pump *pump_for(int fd, int create)
 		free(p);
 		return NULL;
 	}
+	p->room_on = 1;   /* room_evt starts set; the mirror must agree */
 	InitializeCriticalSection(&p->lock);
 
 	/* The pump wants ReadFile to block, whatever O_NONBLOCK the fd carries;
@@ -344,8 +395,8 @@ static int pump_read(struct pipe_pump *p, int fd, void *buf, unsigned int count)
 			p->head = (p->head + n) % PUMP_RING_SIZE;
 			p->len -= n;
 			if (!p->len && !p->eof)
-				ResetEvent(p->data_evt);
-			SetEvent(p->room_evt);
+				EVT_CLEAR(p, data_evt, data_on);
+			EVT_SET(p, room_evt, room_on);
 		}
 		eof = p->eof;
 		err = p->err;
@@ -401,6 +452,7 @@ struct pipe_wpump {
 	char  *ring;
 	size_t head, tail, len;  /* head: next byte out; tail: next byte in */
 	DWORD  err;              /* first WriteFile failure; the ring is dropped */
+	int    data_on, room_on; /* what the two events currently say (EVT_SET) */
 	volatile LONG stop;      /* exit once the ring is empty */
 };
 
@@ -416,7 +468,7 @@ static unsigned __stdcall wpump_thread(void *arg)
 		EnterCriticalSection(&p->lock);
 		n = p->len < PUMP_CHUNK ? p->len : PUMP_CHUNK;
 		if (!n)
-			ResetEvent(p->data_evt);
+			EVT_CLEAR(p, data_evt, data_on);
 		else {
 			first = PUMP_RING_SIZE - p->head;
 			if (first > n)
@@ -460,12 +512,12 @@ static unsigned __stdcall wpump_thread(void *arg)
 			p->err = err;
 			p->len = 0;          /* nothing more will get through */
 			p->head = p->tail = 0;
-			ResetEvent(p->data_evt);
+			EVT_CLEAR(p, data_evt, data_on);
 		} else {
 			p->head = (p->head + n) % PUMP_RING_SIZE;
 			p->len -= n;
 		}
-		SetEvent(p->room_evt);   /* room, or an error to report */
+		EVT_SET(p, room_evt, room_on);   /* room, or an error to report */
 		LeaveCriticalSection(&p->lock);
 		if (err)
 			break;
@@ -524,6 +576,7 @@ static struct pipe_wpump *wpump_for(int fd, int create)
 		free(p);
 		return NULL;
 	}
+	p->room_on = 1;   /* room_evt starts set; the mirror must agree */
 	InitializeCriticalSection(&p->lock);
 
 	/* The pump wants WriteFile to block; O_NONBLOCK is honoured against
@@ -616,8 +669,8 @@ static int wpump_write(struct pipe_wpump *p, int fd, const void *buf, unsigned i
 			p->tail = (p->tail + n) % PUMP_RING_SIZE;
 			p->len += n;
 			if (p->len == PUMP_RING_SIZE)
-				ResetEvent(p->room_evt);
-			SetEvent(p->data_evt);
+				EVT_CLEAR(p, room_evt, room_on);
+			EVT_SET(p, data_evt, data_on);
 		}
 		LeaveCriticalSection(&p->lock);
 
@@ -655,7 +708,7 @@ int win32_read(int fd, void *buf, unsigned int count)
 		return -1;
 	}
 
-	if (!handle_is_pipe(h))
+	if (!fd_is_pipe(fd, h))
 		return _read(fd, buf, count);
 
 	/* Once a pump has taken the fd over the bytes are in its ring, not in
@@ -705,7 +758,7 @@ int win32_write(int fd, const void *buf, unsigned int count)
 		return -1;
 	}
 
-	if (!handle_is_pipe(h))
+	if (!fd_is_pipe(fd, h))
 		return _write(fd, buf, count);
 
 	/* A write pump owns the order of bytes on its pipe; go through it. */
@@ -745,6 +798,7 @@ int win32_close(int fd)
 	pump_stop(fd);
 	if (fd >= 0 && fd < MAX_CRTFDS)
 		fd_nonblock[fd] = 0;
+	fd_ftype_forget(fd);
 	return _close(fd);
 }
 
@@ -763,6 +817,7 @@ int win32_dup2(int oldfd, int newfd)
 		errno = ENOSYS;
 		return -1;
 	}
+	fd_ftype_forget(newfd);   /* newfd now refers to whatever oldfd is */
 	return _dup2(oldfd, newfd);
 }
 
@@ -955,7 +1010,7 @@ static int crtfd_readable(int fd)
 	if (h == INVALID_HANDLE_VALUE)
 		return 1;   /* report ready so the caller gets a real error */
 
-	switch (GetFileType(h)) {
+	switch (fd_filetype(fd, h)) {
 	case FILE_TYPE_PIPE:
 		if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL))
 			return 1;   /* broken pipe: readable, yields EOF */

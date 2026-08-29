@@ -103,7 +103,10 @@ What changed since v3.5.0-gf800ace2
   - The I/O threads sleep between batches instead of spinning: ssh.exe
     now uses about 1.3-1.8 cores during a transfer rather than 2.4-2.9,
     at the same speed, and on a slow cipher or link the difference is a
-    core and a half of nothing.
+    core and a half of nothing.  rsync.exe's own pipe threads stopped
+    signalling their state on every 32KB, and it stopped asking Windows
+    what an fd is on every read and write, which took another 8% off its
+    processor time during a transfer.
 
 What changed in v3.5.0-gf800ace2
 --------------------------------
