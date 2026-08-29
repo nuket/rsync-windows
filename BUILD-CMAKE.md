@@ -537,7 +537,10 @@ Two things that have already been chased down, so they need not be again:
   thread suspended in a system call is sampled in that call. A large
   `Nt*` share means blocked, not busy. Read it against the process's actual
   CPU time (`(Get-Process rsync).TotalProcessorTime`) before concluding
-  anything.
+  anything. In particular, `rsync.exe`'s main thread sitting at ~85% of a
+  core during a transfer does *not* make it the thing setting the pace:
+  it spends a quarter of that blocked on the pipe to `ssh.exe`, so time
+  taken off it need not turn into throughput, and twice now has not.
 * **The `msleep(20)` in `wait_process_with_flush()`** (upstream `main.c`)
   shows up as ~10% of the main thread's wall time on a fast link, and is
   *not* worth removing. It is the teardown poll, and the samples fall
@@ -548,6 +551,21 @@ Two things that have already been chased down, so they need not be again:
   genuinely exiting. (Windows rounds `Sleep(20)` up to the 15.6 ms timer
   tick, so it really sleeps ~31 ms; a high-resolution waitable timer fixes
   that and measured as nothing here, which is why there isn't one.)
+* **Reading the source file ahead on a thread of its own** was built and
+  measured, and is not worth having. `map_ptr()`'s `read()` is ~35% of the
+  sender's main-thread wall time with the file already in the page cache,
+  so moving the kernel's copy onto a reader thread looks obvious, and in a
+  microbenchmark it is: 3.1 GB/s to 4.8 GB/s, with 40-55% of the main
+  thread's processor time handed back. In rsync it bought **nothing** —
+  push and local-copy wall times unchanged inside the spread — while
+  costing about 1.8 s of extra processor time per 4 GB (a reader thread's
+  copy, plus the ring-to-caller copy that intercepting `read()` forces).
+  The microbenchmark had the main thread computing between reads with no
+  slack, where rsync's already blocks on the pipe to ssh: the read was
+  overlapping with a wait that existed anyway. The lesson generalises —
+  measure a change against the real pipeline, not against a loop built to
+  resemble it. Worth revisiting only for a source device slow enough that
+  reads genuinely block (this machine's NVMe is not).
 
 ## Testing
 

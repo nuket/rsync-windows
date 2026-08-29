@@ -16350,7 +16350,187 @@ completed (exit code 0)
 ● Reverted cleanly. Let me find a home in the docs for the finding so it isn't
   re-chased.
 
+● Found it, and the answer is that it's a non-issue. Commit 51a29ee1 is pushed,
+  CI green.
 
+  Where the NtDelayExecution comes from
+
+  I added a --callers mode to the sampler that scans the suspended thread's
+  stack for return addresses back into rsync.exe. It resolves unambiguously:
+
+  win32_usleep <- msleep <- wait_process_with_flush
+
+  That's upstream's main.c:206:
+
+  while ((waited_pid = wait_process(pid, &status, WNOHANG)) == 0) {
+          msleep(20);
+          io_flush(FULL_FLUSH);
+  }
+
+  — the teardown poll waiting for the ssh child to exit.
+
+  Why it doesn't matter
+
+  I then timestamped the samples, because "10% of the main thread" reads
+  alarming until you know when:
+
+  ┌────────────┬─────────────┬────────────┐
+  │            │ sleeps seen │ run window │
+  ├────────────┼─────────────┼────────────┤
+  │ push run 1 │ 2.71–2.91 s │ 2.96 s     │
+  ├────────────┼─────────────┼────────────┤
+  │ push run 2 │ 2.44–2.66 s │ 2.69 s     │
+  ├────────────┼─────────────┼────────────┤
+  │ pull       │ 3.32–3.51 s │ 3.54 s     │
+  └────────────┴─────────────┴────────────┘
+
+  Every sample is in the last ~0.2 s before exit. It is not in the data path at
+  all — it looks like a large percentage only because the transfers are short.
+
+  Two further checks in case the poll granularity was costing round trips
+  (Windows rounds Sleep(20) up to the 15.6 ms tick, so it really sleeps ~31 ms):
+
+  - I built a high-resolution waitable-timer version of win32_usleep: small-file
+    run 0.430 s → 0.422 s. Noise.
+  - Then the decisive one — a diagnostic clamp on every sleep:
+
+  ┌───────────────────────┬────────────────┐
+  │         clamp         │ small-file run │
+  ├───────────────────────┼────────────────┤
+  │ none (20 ms → ~31 ms) │ 0.397 s        │
+  ├───────────────────────┼────────────────┤
+  │ 5 ms                  │ 0.380 s        │
+  ├───────────────────────┼────────────────┤
+  │ 1 ms                  │ 0.384 s        │
+  ├───────────────────────┼────────────────┤
+  │ 100 µs                │ 0.385 s        │
+  └───────────────────────┴────────────────┘
+
+  Cutting the sleep by 200× moves the run by 12 ms, inside the run-to-run
+  spread. So the loop isn't waiting on its own timer — it's waiting for the ssh
+  child to genuinely exit. For reference, ssh host true alone is 0.208 s against
+  rsync's 0.404 s for a tiny file.
+
+  I reverted both experiments. The high-resolution sleep measured as nothing,
+  and I'm not adding a per-thread timer object to a shipping binary for an
+  unmeasurable gain. What I kept is the write-up in BUILD-CMAKE.md so this isn't
+  chased a third time — including the caveat that bit me early on: this sampler
+  measures wall time, so a big Nt* share means blocked, not busy.
+
+  PDBs and release builds
+
+  You were right to flag it. Releases were PDB-free, but only incidentally —
+  every staged file happens to be copied by name rather than by a wildcard over
+  a build directory. Now it's explicit:
+
+  - The build step passes --config Release rather than relying on the batch
+    file's default; that default isn't the place to decide what a release is
+    built as.
+  - Staging opens the zips it just made, plus dist/, and fails the run if a .pdb
+    is in either. I tested the guard both ways locally (rejects a zip
+    containing one, passes a clean one), and it runs on every push, not just
+    tags — it already passed on this commit.
+
+  Confirmed alongside: a Release build produces no .pdb in build-x64/build-x86
+  at all, and build-openssh.ps1 copies only ssh.exe, never ssh.pdb.
+
+  For profiling, BUILD-CMAKE.md now documents the separate build directory so it
+  can't collide with a release build:
+
+  windows-build-and-test.bat --arch x64 --config RelWithDebInfo --build-dir
+  build-rwdi --no-tests
+
+  State
+
+  Full suite 24/24 on x64 and x86 against the Thunderbolt box. Working tree
+  clean apart from your untracked PERF.txt and the chart PNG. Test data removed
+  on both machines (/tmp back to 16 MB), scratch build dir and comparison
+  binaries deleted.
+
+  The one remaining lead on rsync.exe is the 35% in NtReadFile — the source file
+  is read synchronously with no overlap against the rest of the sender loop.
+  That's upstream's map_ptr path rather than the port layer, so it's a larger
+  piece of work; I've left it and noted it. ufw on the Linux box is still
+  disabled.
+
+✻ Crunched for 18m 31s · done 6:37 PM
+
+※ recap: We've been speeding up the Windows rsync/ssh port; I traced the last
+  unexplained profile entry to an upstream teardown poll and confirmed it costs
+  nothing, then hardened releases against shipping PDBs. Next: overlapping
+  rsync's synchronous source-file reads, if you want it. (disable recaps in
+  /config)
+
+❯ Go after overlapping rsync's synchronous source-file reads, try to change
+  upstream codes as little as possible and keep as much in our translation
+  units as possible.
+
+● Let me look at how rsync actually reads the source file, since that determines
+  whether a sequential readahead can work.
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+● Reads are sequential 256 KB-ish windows via read(), which is our win32_read()
+  — so this can be done entirely in our own files. But whether to use a thread
+  or async I/O depends on where the time actually goes. Let me check the read
+  size and machine, then settle it with a benchmark rather than a guess.
+
+● Machine has 32 GB RAM and an NVMe SSD, so my 4 GB test file is fully cached —
+  meaning that NtReadFile time is the kernel's copy, not disk latency. That
+  determines the design, so let me measure the two costs directly before writing
+  anything into rsync.
+
+● Decisive, and it settles the design: on a warm file the reader thread cuts
+  main-thread CPU by 41% (1.30 s → 0.77 s) and wall time by a third, while
+  overlapped I/O is worse than plain — cached reads complete inline, so async
+  buys nothing. Let me confirm it holds at other work levels, then find the seek
+  path.
+
+● Confirmed across work levels (main-thread CPU 1.03→0.44 s at 3 passes,
+  1.30→0.64 s at 6). So: a reader thread, not async I/O. One wrinkle — lseek64
+  maps straight to the CRT, bypassing our shim, so I need to see the exact
+  read/seek paths.
+
+● Now I have what I need: read/write/open/close are all our shims, and lseek64
+  goes straight to the CRT — so I'll take the CRT's position as truth and give
+  the reader thread its own file object via ReOpenFile. One caution first: this
+  port emulates fork() with threads, so the engine must tolerate several fds.
+
+● Confirmed — on the receive side the generator and receiver are threads sharing
+  one fd table, so the engine needs to tolerate more than one fd. Writing it
+  now as its own translation unit.
+
+● Now wiring it in — four one-line hooks in our own files, and the build.
+
+● Builds clean. Adding an escape hatch (consistent with the port's other
+  backends) so I can A/B the same binary and users can turn it off.
+
+● Correct on both paths. Now the measurement that motivated this — a push over
+  the Thunderbolt link.
+
+● No wall-time gain, and total CPU rose by ~1.2 s — the reader thread's copy
+  plus the extra memcpy, bought for nothing. That suggests rsync's main thread
+  has slack (it also blocks on the pipe), so taking the read off it doesn't
+  raise throughput. Let me check the case where reads genuinely are the critical
+  path: a local copy.
+
+● PowerShell(Set-Location C:\Users\Claude\devsrc\rsync-windows;
+            $d="C:\Users\Claude\rsync-perf"; New-Item -ItemType Directory -Force
+            "$d\local" | Out-Null; foreach ($round i…)
+  ⎿  local copy readahead off wall 3.36 s = 1,218 MB/s  cpu 2.75 s = 82%
+     local copy readahead on  wall 3.29 s = 1,245 MB/s  cpu 4.72 s = 143%
+     local copy readahead off wall 2.96 s = 1,382 MB/s  cpu 2.91 s = 98%
+     local copy readahead on  wall 3.47 s = 1,180 MB/s  cpu 4.72 s = 136%
+  ⎿  (timeout 10m)
+
+● Same result locally: no wall-time gain, CPU up from ~2.8 s to ~4.7 s per 4 GB.
+  The microbenchmark overstated the win because it had the main thread doing
+  pure compute between reads; real rsync already blocks on the pipe, so the read
+  was overlapping with slack that existed anyway. This is a net loss, so I'm
+  reverting it.
+
+● Reverted and clean. Recording the negative result so it isn't retried, and
+  correcting my earlier over-claim about rsync.exe being "the ceiling".
 ```
 
 # Moar Speed Pt. 4! Windows Performance Analyzer (xperf.exe)
