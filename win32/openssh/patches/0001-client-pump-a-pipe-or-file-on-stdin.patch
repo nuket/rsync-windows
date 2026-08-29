@@ -257,10 +257,10 @@ index 2f62fa8..658622d 100644
  	if (chroot_pathw != NULL &&
  		(resolved_target_chroot = _wfullpath(NULL, resolved_target_utf16, 0)) != NULL &&
 diff --git a/contrib/win32/win32compat/termio.c b/contrib/win32/win32compat/termio.c
-index 4d3c783..953a65e 100644
+index 4d3c783..9526023 100644
 --- a/contrib/win32/win32compat/termio.c
 +++ b/contrib/win32/win32compat/termio.c
-@@ -49,6 +49,562 @@
+@@ -49,6 +49,608 @@
  #include "misc_internal.h"
  
  extern int in_raw_mode;
@@ -322,6 +322,7 @@ index 4d3c783..953a65e 100644
 +	DWORD  err;
 +	BOOL   waiting;           /* main thread wants bytes; wake it when there are */
 +	BOOL   apc_queued;        /* a wake-up is already on its way to main_thread */
++	BOOL   sleeping;          /* the pump is in its wait: only then is room_evt worth setting */
 +	volatile LONG stop;
 +	struct w32_io *pio;       /* NULL once the fd is gone and the thread outlived it */
 +};
@@ -336,6 +337,7 @@ index 4d3c783..953a65e 100644
 +	DWORD  err;               /* first WriteFile error; the pump is dead after it */
 +	BOOL   waiting;           /* main thread wants room; wake it when there is */
 +	BOOL   apc_queued;
++	BOOL   sleeping;          /* the pump is in its wait: only then is data_evt worth setting */
 +	volatile LONG stop;
 +	struct w32_io *pio;
 +};
@@ -379,6 +381,25 @@ index 4d3c783..953a65e 100644
 +	*queued = FALSE;
 +}
 +
++/* Spin briefly until *v moves off `stuck' (a full ring for the reader, an
++ * empty one for the writer).  ~20-50us: long enough to bridge the gap
++ * between packets in a bulk flow, in which the main thread would otherwise
++ * pay a SetEvent() per packet to wake a pump that had just gone to sleep,
++ * short enough to be nothing when the flow has stopped.  The read is
++ * unlocked and only a hint; callers re-check under the lock. */
++static BOOL
++sync_pump_spin(volatile DWORD *v, DWORD stuck)
++{
++	int i;
++
++	for (i = 0; i < 4000; i++) {
++		if (*v != stuck)
++			return TRUE;
++		YieldProcessor();
++	}
++	return *v != stuck;
++}
++
 +/* ---- the read pump --------------------------------------------------- */
 +
 +static unsigned __stdcall
@@ -396,8 +417,17 @@ index 4d3c783..953a65e 100644
 +		tail = (p->head + p->len) % SYNC_PUMP_RING_SIZE;
 +		LeaveCriticalSection(&p->lock);
 +		if (!space) {
++			if (sync_pump_spin(&p->len, SYNC_PUMP_RING_SIZE))
++				continue;
++			EnterCriticalSection(&p->lock);
++			if (p->len == SYNC_PUMP_RING_SIZE)
++				p->sleeping = TRUE;
++			LeaveCriticalSection(&p->lock);
++			if (!p->sleeping)
++				continue;
 +			/* timed, so a stop is noticed even if nobody reads */
 +			WaitForSingleObject(p->room_evt, 200);
++			p->sleeping = FALSE;
 +			continue;
 +		}
 +
@@ -553,17 +583,20 @@ index 4d3c783..953a65e 100644
 +		if (wait_for_any_event(NULL, 0, INFINITE) == -1)
 +			return -1;
 +	}
-+	was_full = p->len == SYNC_PUMP_RING_SIZE;
++	/* take under the lock, copy outside it, release under it: the pump
++	 * only appends past len, so [head, head+n) is ours meanwhile */
 +	n = (DWORD)min((size_t)p->len, len);
 +	first = min(n, SYNC_PUMP_RING_SIZE - p->head);
++	LeaveCriticalSection(&p->lock);
 +	memcpy(buf, p->ring + p->head, first);
 +	if (n > first)
 +		memcpy((char*)buf + first, p->ring, n - first);
++	EnterCriticalSection(&p->lock);
 +	p->head = (p->head + n) % SYNC_PUMP_RING_SIZE;
 +	p->len -= n;
++	was_full = p->sleeping;
 +	LeaveCriticalSection(&p->lock);
-+	/* the pump only waits for room when the ring is full, so that is the
-+	 * only time the event is worth a syscall */
++	/* only a pump in its wait needs the event */
 +	if (was_full)
 +		SetEvent(p->room_evt);
 +	return (int)n;
@@ -606,8 +639,17 @@ index 4d3c783..953a65e 100644
 +		if (empty) {
 +			if (p->stop)
 +				break;
++			if (sync_pump_spin(&p->len, 0))
++				continue;
++			EnterCriticalSection(&p->lock);
++			if (p->len == 0 && !p->stop)
++				p->sleeping = TRUE;   /* under the lock: an append that follows sets the event */
++			LeaveCriticalSection(&p->lock);
++			if (!p->sleeping)
++				continue;
 +			/* timed, so a stop is noticed even if nobody writes */
 +			WaitForSingleObject(p->data_evt, 200);
++			p->sleeping = FALSE;
 +			continue;
 +		}
 +
@@ -776,15 +818,19 @@ index 4d3c783..953a65e 100644
 +		if (wait_for_any_event(NULL, 0, INFINITE) == -1)
 +			return -1;
 +	}
-+	was_empty = p->len == 0;
++	/* reserve under the lock, copy outside it, publish under it: the
++	 * region past len is invisible to the pump until len says so */
 +	tail = (p->head + p->len) % SYNC_WPUMP_RING_SIZE;
++	LeaveCriticalSection(&p->lock);
 +	first = min(n, SYNC_WPUMP_RING_SIZE - tail);
 +	memcpy(p->ring + tail, buf, first);
 +	if (n > first)
 +		memcpy(p->ring, (const char*)buf + first, n - first);
++	EnterCriticalSection(&p->lock);
 +	p->len += n;
++	was_empty = p->sleeping;
 +	LeaveCriticalSection(&p->lock);
-+	/* the pump only waits for bytes when the ring is empty */
++	/* only a pump in its wait needs the event */
 +	if (was_empty)
 +		SetEvent(p->data_evt);
 +	return (int)n;
@@ -823,7 +869,7 @@ index 4d3c783..953a65e 100644
  BOOL isFirstTime = TRUE;
  
  /* APC that gets queued on main thread when a sync Read completes on worker thread */
-@@ -150,14 +706,29 @@ syncio_initiate_read(struct w32_io* pio)
+@@ -150,14 +752,29 @@ syncio_initiate_read(struct w32_io* pio)
  
  	debug5("syncio_initiate_read io:%p", pio);
  	if (pio->read_details.buf_size == 0) {
@@ -855,7 +901,7 @@ index 4d3c783..953a65e 100644
  	read_thread = (HANDLE) _beginthreadex(NULL, 0, ReadThread, pio, 0, NULL);
  	if (read_thread == NULL) {
  		errno = errno_from_Win32LastError();
-@@ -236,6 +807,13 @@ syncio_initiate_write(struct w32_io* pio, DWORD num_bytes)
+@@ -236,6 +853,13 @@ syncio_initiate_write(struct w32_io* pio, DWORD num_bytes)
  {
  	HANDLE write_thread;
  	debug5("syncio_initiate_write initiate io:%p", pio);
@@ -869,7 +915,7 @@ index 4d3c783..953a65e 100644
  	memset(&(pio->sync_write_status), 0, sizeof(pio->sync_write_status));
  	pio->sync_write_status.to_transfer = num_bytes;
  	write_thread = (HANDLE)_beginthreadex(NULL, 0, WriteThread, pio, 0, NULL);
-@@ -262,6 +840,17 @@ syncio_close(struct w32_io* pio)
+@@ -262,6 +886,17 @@ syncio_close(struct w32_io* pio)
  {
  	debug4("syncio_close - pio:%p", pio);
  
@@ -887,7 +933,7 @@ index 4d3c783..953a65e 100644
  	/*
  	* Wait for io write operation that is called by worker thread to terminate
  	* to avoid the write operation being terminated prematurely by CancelIoEx.
-@@ -277,6 +866,13 @@ syncio_close(struct w32_io* pio)
+@@ -277,6 +912,13 @@ syncio_close(struct w32_io* pio)
  		SleepEx(0, TRUE);
  	}
  

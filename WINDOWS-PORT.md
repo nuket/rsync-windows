@@ -14728,3 +14728,1190 @@ hours worth of Claude work sees a 15x - ~39x speed improvement.
 At this point rsync for Windows will saturate a 2.5Gbps link, as long as you're using 
 AES for encryption. The chacha20 algorithm is not hardware accelerated, so it is CPU bound,
 at least for a single core. It remains an exercise to multithread that.
+
+# Moar Speed Pt. 3! Thunderbolt, Go!
+
+```
+❯ Ok I've connected Thunderbolt Networking to a different Linux system. Same ssh keys
+  work for connecting. It is located at 169.254.238.153. Run tests on the link using raw
+  TCP, raw SSH, and finally rsync; and compare this to the default Windows ssh client,
+  it should still be bound by a lack of optimization. Find any new bottlenecks on this
+  super fast link, we may be CPU bound, but I'd like to push it as far as we can go
+  until we are I/O bound.
+
+● New link, new baseline. First: reach the box, learn what it is (CPU, RAM, /tmp type,
+  iperf3/python availability), and find the Thunderbolt adapter on this side with its
+  address and reported link speed.
+
+● PowerShell(Get-NetAdapter | Where-Object Status -eq 'Up' | Select Name,
+            InterfaceDescription, LinkSpeed, MacAddress | Format-Table -AutoSize;
+            Get-NetIPAddress -AddressFami…)
+  ⎿  Error: Exit code 143
+     Command timed out after 1m 0s
+
+     Name       InterfaceDescription                     LinkSpeed MacAddress
+     ----       --------------------                     --------- ----------
+     Ethernet   Intel(R) Ethernet Connection (4) I219-LM 1 Gbps    C8-F7-50-06-CC-71
+     Ethernet 2 VirtualBox Host-Only Ethernet Adapter    1 Gbps    0A-00-27-00-00-13
+     Ethernet 4 Thunderbolt(TM) Networking               20 Gbps   12-5C-4C-BB-25-8D
+
+● (summarized)
+  Confirmed a 20 Gbps Thunderbolt link to the 8-core 7840U box with tmpfs, iperf3, and
+  python3 available. Now I'll create 4 GB random test files on both ends, verify
+  connectivity from the Linux side, and set up a raw-TCP Python tool for multi-stream
+  testing.
+
+● (summarized)
+  Prep's done—4 GB test files ready on both ends, tcp.py staged, and SSH from Linux to
+  Windows confirmed working. Now running raw TCP tests with Python source/sink pairs in
+  both directions, testing single and 4-stream configurations.
+
+❯ Is it normal for the Thunderbolt link to be 20gbps instead of 40Gbps? Or is it half the
+  bandwidth in each direction?
+
+● (summarized)
+  The 20 Gbps figure is normal — it reflects the PCIe tunnel ceiling for Thunderbolt
+  networking, not the raw 40 Gbps link, and real-world throughput is typically
+  CPU/MTU-limited to 10-16 Gbps. The raw-TCP test result got lost to a tool error, so I'll
+  rerun it to check the link's actual ceiling.
+
+❯ I disabled the firewall for now. Go ahead with tests.
+
+● (summarized)
+  Found a clear asymmetry: Linux→Windows hits 1.27 GB/s, but Windows→Linux only reaches
+  418-569 MB/s — mirroring the USB NIC's weak transmit issue. I'll check the Thunderbolt
+  adapter's offload/MTU settings and sample the Windows sender's CPU usage during a 4 GB
+  transfer to see if it's CPU-bound.
+
+● (summarized)
+  Found the adapter has no offloads (checksum/LSO) and a 4084 MTU, meaning packets are
+  segmented and checksummed in software—likely explaining the CPU-bound transmit
+  bottleneck. Next I'll check what MTU/offload settings the driver and Linux end support,
+  then measure CPU usage during the Windows sender's transmit.
+
+● (summarized)
+  I've confirmed Linux is at MTU 1500 with checksumming off, causing extra software
+  overhead each direction and explaining the 3x speed asymmetry (jumbo frames on Windows
+  could fix this but that's a config change for you). Next I'll sample CPU usage on both
+  sides during a Windows→Linux transfer to identify which side is the bottleneck.
+
+● (summarized)
+  The bottleneck is on the Linux receive side — ksoftirqd/2 hits 81% while Windows only
+  uses ~12% across four cores, confirming jumbo frames would help here. Now moving to the
+  raw-SSH tests, starting with two small helpers (a stdin sink and file source) needed for
+  the Windows-sshd cases.
+
+● (summarized)
+  Helpers are set up. Now I'll run the raw-SSH tests sequentially through both Windows
+  clients (in-box System32 and the bundled one), sending from a file and receiving to NUL,
+  cycling through AES-128-GCM, AES-256-GCM, and chacha20, keeping each run separate so
+  they don't share the link.
+
+● (summarized)
+  Helpers are set up. Now I'll run the raw-SSH tests sequentially through both Windows
+  clients (in-box System32 and the bundled one), sending from a file and receiving to NUL,
+  cycling through AES-128-GCM, AES-256-GCM, and chacha20, keeping each run separate so
+  they don't share the link.
+
+❯ Ok before doing the ssh tests, we need to fix the raw transfer rates, how would I set
+  up jumbo frames on the link?
+
+● Both ends need it — TCP uses the smaller of the two, so raising only one side does
+  nothing.
+
+  Windows (elevated PowerShell; the adapter blips for a second or two, and the ssh session
+  over it drops):
+
+  Set-NetAdapterAdvancedProperty -Name "Ethernet 4" -DisplayName "Maximum transmission
+  unit" -DisplayValue "65332 Bytes"
+  Get-NetIPInterface -InterfaceAlias "Ethernet 4" -AddressFamily IPv4 | Select-Object
+  NlMtu   # expect 65332
+
+  Linux (the thunderbolt0 link; takes effect immediately, not persistent across reboots):
+
+  sudo ip link set dev thunderbolt0 mtu 65332
+  ip link show thunderbolt0        # expect "mtu 65332"
+
+  If NetworkManager manages that interface it may reset the MTU when the link bounces; to
+  make it stick:
+
+  nmcli -f NAME,DEVICE connection show          # find the profile on thunderbolt0
+  sudo nmcli connection modify "<that profile>" 802-3-ethernet.mtu 65332
+  sudo nmcli connection up "<that profile>"
+
+  Verify the path end-to-end with a don't-fragment ping just under the MTU (65332 − 28
+  bytes of IP/ICMP headers):
+
+  # from Linux
+  ping -M do -s 65304 -c 3 169.254.50.36
+  # from Windows
+  ping -f -l 65304 -n 3 169.254.238.153
+
+  If either reports "message too long" / "needs to be fragmented", one side didn't take
+  the setting.
+
+  Why this should move the raw numbers: the Linux receive path is the bottleneck in the
+  Windows→Linux direction — one RX queue, rx-checksumming: off [fixed], ksoftirqd at 81 %
+  of a core at 418 MB/s — and its cost is per packet. Going from 1500‑byte to 65 KB frames
+  cuts packets per gigabyte by ~40×, so that softirq load should collapse. Tell me when
+  both are set and I'll rerun the raw TCP round before touching ssh.
+
+✻ Crunched for 18s · done 4:53 PM
+
+● The driver property took (MTUSIZE = 65332 in the registry) but the running adapter still
+  reports MtuSize 4084, so the driver hasn't re-read it. Two things to try, in this
+  order:
+
+  1. Set the Linux side first. Thunderbolt networking negotiates the frame size with the
+     peer when the link "logs in", so the Windows driver may be clamping to what Linux
+     currently advertises:
+  sudo ip link set dev thunderbolt0 mtu 65332
+  2. Then restart the Windows adapter so it re-reads the property and re-negotiates
+     (elevated PowerShell; the link drops for a few seconds):
+  Restart-NetAdapter -Name "Ethernet 4"
+  Get-NetAdapter -Name "Ethernet 4" | Select-Object Status, MtuSize
+  Get-NetIPInterface -InterfaceAlias "Ethernet 4" -AddressFamily IPv4 | Select-Object NlMtu
+     If Restart-NetAdapter doesn't do it, Disable/Enable in Device Manager is the same
+     thing done harder.
+
+  If MtuSize is still 4084 after that, the last resort is setting the IP-layer MTU
+  directly — but that can't exceed what the adapter reports, so it only helps once the
+  adapter shows 65332:
+  netsh interface ipv4 set subinterface "Ethernet 4" mtu=65332 store=persistent
+
+  Tell me what MtuSize says after the restart and I'll verify the path with the
+  don't‑fragment pings and rerun raw TCP.
+
+✻ Churned for 26s · done 4:56 PM
+
+● Linux is at 65332 (its driver allows up to 65522); Windows is stuck at 4084 even after
+  the peer advertised the larger frame and an adapter restart. Yes — reboot Windows: the
+  Intel driver evidently reads MTUSIZE only when it loads.
+
+  Two things before you do:
+
+  - Until they match, don't move big data Linux→Windows. Linux will now send 65 KB
+    segments that the 4084‑byte Windows side drops; small replies (my ssh commands) still
+    get through, bulk transfers into Windows will stall. Windows→Linux is unaffected.
+  - This session lives on this machine, so the reboot ends it. When you're back, resume it
+    and just say "MTU set"; I'll re-verify both ends with the don't-fragment pings and
+    rerun the raw TCP round, then ssh and rsync.
+
+  After the reboot, check with:
+  Get-NetAdapter -Name "Ethernet 4" | Select-Object Status, MtuSize
+  If it still says 4084 with the registry value at 65332, the driver doesn't honour jumbo
+  on this controller despite listing it, and the fallback is to set Linux to 4084 too
+  (sudo ip link set dev thunderbolt0 mtu 4084) — that alone is 2.7× fewer packets than
+  1500 and worth having.
+
+✻ Baked for 27s · done 5:03 PM
+
+❯ Ok, it's still 4084 after a reboot. I checked the Thunderbolt Networking
+  driver version, it's 1.41.1379.0 from 2023, are you aware of anything newer,
+  I could fetch and install from the Intel website?
+
+● Fetch(url: "https://www.dell.com/support/home/en-us/drivers/driversdetails?dri
+       verid=tbb18", prompt: "Give the driver version, release date, file name,
+       list of supported systems (does it include Latitude 7490?), and the
+       fixes/enhancements listed.")
+  ⎿  Received 129.1KB (200 OK)
+# Intel Thunderbolt Controller Driver Details
+
+**Driver Version:** 1.41.1423.0, A21
+
+**Release Date:** September 26, 2025
+
+**File Name:**
+Intel-Thunderbolt-Controller-Driver_TBB18_WIN64_1.41.1423.0_A21_01.EXE
+
+**Supported Systems:**
+- Latitude 5430 Rugged
+- Latitude 7330 Rugged Extreme
+
+The Latitude 7490 is **not** listed as a compatible system.
+
+**Fixes and Enhancements:**
+The update addresses "the problem, bei dem nach der Installation des
+Thunderbolt-Treibers automatisch ein leerer Ordner erstellt wird" (an issue
+where an empty folder was automatically created following driver
+installation).
+
+                                                 05:13 PM claude-fable-5
+● Yes — there are two newer versions of that package, but I'd temper
+  expectations about what they'll do for the MTU.
+
+  What's newer than 1.41.1379.0 (July 2023)
+  - 1.41.1412.0 (March 2024)
+  - 1.41.1423.0 (WHQL, December 2024) — the current one. Intel doesn't publish a
+    generic Thunderbolt DCH package on its own download center (only per-NUC
+    pages), so it reaches machines through OEMs: Dell ships it as
+    Intel-Thunderbolt-Controller-Driver_TBB18_WIN64_1.41.1423.0_A21_01.EXE
+    (Sept 2025), but that page lists only the Rugged Latitudes, not your
+    Latitude 7490 — check the 7490's own Dell driver page for whether Dell has
+    pushed it there. Otherwise station-drivers carries the generic 1.41.1423
+    package (WHQL-signed, ~46 MB), which people routinely install on other
+    Intel-controller machines; your 7490's controller is an Alpine Ridge
+    (8086:15D9), which it covers.
+
+  Why I wouldn't bet on it fixing the MTU
+  The only fix noted between 1379 and 1423 is cosmetic (an empty folder created
+  at install). The networking part is TbtP2pNdisDrv.sys, Intel's peer-to-peer
+  NDIS driver, and its behaviour of listing 65332 while running at 4084 looks
+  like a negotiated/controller ceiling rather than a bug a point release fixed —
+  I found no report either way. So: worth a try because it's cheap and
+  reversible (keep the current Dell package handy to roll back), but plan for it
+  not to change anything.
+
+  If it doesn't: match Linux down to Windows rather than the other way — sudo ip
+  link set dev thunderbolt0 mtu 4084. That still cuts packets per gigabyte by
+  2.7× versus 1500, which is exactly the cost that was pinning Linux's
+  ksoftirqd, and it removes the current dangerous mismatch (Linux at 65332
+  sending frames Windows can't take). Then I'll rerun raw TCP and we go from
+  there.
+
+  Sources: station-drivers 1.41.1423, station-drivers 1.41.1420, Dell TBB18
+  driver details, Windows 11 Forum driver thread, Intel Thunderbolt 3/4 DCH
+  driver for NUC
+
+✻ Brewed for 2m 35s · done 5:13 PM
+
+❯ The Dell installer is not happy, but we should try extracting the files from
+  the Dell installer and install them by hand w/o the precondition check. This
+  is what the error log says: [1A20:1598][2026-08-28T17:19:06]i001: Burn
+  v3.11.2.4516, Windows v10.0 (Build 19045: Service Pack 0), path:
+  C:\Windows\Temp\{B6350438-54C3-479C-8584-086F28698809}\.cr\Thunderbolt(TM)
+  Software Installer.exe
+  [1A20:1598][2026-08-28T17:19:06]i000: Initializing string variable
+  'InstallTcc' to value 'yes'
+  [1A20:1598][2026-08-28T17:19:06]i009: Command Line: '"-burn.clean.room=C:\Pro
+  gramData\Dell\drivers\6e0fbd1e-501d-458c-ab11-c3b45166a7b5\Thunderbolt(TM)
+  Software Installer.exe" -burn.filehandle.attached=548
+  -burn.filehandle.self=536 /install /log C:\ProgramData\dell\drivers\6e0fbd1e-
+  501d-458c-ab11-c3b45166a7b5\DUPLogDir\DUPE2BE.tmp'
+  [1A20:1598][2026-08-28T17:19:06]i000: Setting string variable
+  'WixBundleOriginalSource' to value 'C:\ProgramData\Dell\drivers\6e0fbd1e-501d
+  -458c-ab11-c3b45166a7b5\Thunderbolt(TM) Software Installer.exe'
+  [1A20:1598][2026-08-28T17:19:06]i000: Setting string variable
+  'WixBundleOriginalSourceFolder' to value
+  'C:\ProgramData\Dell\drivers\6e0fbd1e-501d-458c-ab11-c3b45166a7b5\'
+  [1A20:1598][2026-08-28T17:19:06]i000: Setting string variable 'WixBundleLog'
+  to value 'C:\ProgramData\dell\drivers\6e0fbd1e-501d-458c-ab11-c3b45166a7b5\DU
+  PLogDir\DUPE2BE.tmp'
+  [1A20:1598][2026-08-28T17:19:06]i052: Condition 'VersionNT64 AND VersionNT >=
+  v10.0' evaluates to true.
+  [1A20:1598][2026-08-28T17:19:06]i000: Setting string variable 'WixBundleName'
+  to value 'Thunderbolt™ Software'
+  [1A20:1598][2026-08-28T17:19:06]i000: Setting string variable
+  'WixBundleManufacturer' to value 'Intel(R) Corporation'
+  [1A20:122C][2026-08-28T17:19:06]i000: Setting numeric variable
+  'WixStdBALanguageId' to value 1033
+  [1A20:122C][2026-08-28T17:19:06]i000: Setting version variable
+  'WixBundleFileVersion' to value '1.56.0.0'
+  [1A20:1598][2026-08-28T17:19:06]i100: Detect begin, 5 packages
+  [1A20:1598][2026-08-28T17:19:06]i101: Detected package:
+  InstallPreconditionsChecker.exe, state: Absent, cached: None
+  [1A20:1598][2026-08-28T17:19:06]i101: Detected package:
+  LegacyUninstaller.exe, state: Absent, cached: None
+  [1A20:1598][2026-08-28T17:19:06]i101: Detected package: dch_setup.msi, state:
+  Absent, cached: None
+  [1A20:1598][2026-08-28T17:19:06]i101: Detected package: TbtLegacyPlug.msi,
+  state: Absent, cached: None
+  [1A20:1598][2026-08-28T17:19:06]i101: Detected package:
+  PostInstallationCleaner.exe, state: Absent, cached:
+  ──── (40 lines hidden) ──────────────────────────────────────────────────────
+  o: C:\ProgramData\Package
+  Cache\{B5FA4424-EF3E-44E5-BAB7-3CCCF8FCB4F4}v1.56.0.0\dch_setup.msi.
+  [3BD0:2CD0][2026-08-28T17:19:19]i305: Verified acquired payload:
+  TbtLegacyPlug.msi at path: C:\ProgramData\Package
+  Cache\.unverified\TbtLegacyPlug.msi, moving to: C:\ProgramData\Package
+  Cache\{488D2737-A8BE-4F2A-8A9B-AEFF2DB8833F}v18.0.0.0\TbtLegacyPlug.msi.
+  [3BD0:2CD0][2026-08-28T17:19:19]i305: Verified acquired payload:
+  PostInstallationCleaner.exe at path: C:\ProgramData\Package
+  Cache\.unverified\PostInstallationCleaner.exe, moving to:
+  C:\ProgramData\Package
+  Cache\7C785FBD42D21672197E7943A5BDF9BD32782DD7\PostInstallationCleaner.exe.
+  [3BD0:1A1C][2026-08-28T17:19:19]i301: Applying execute package:
+  InstallPreconditionsChecker.exe, action: Install, path:
+  C:\ProgramData\Package Cache\4BA92C11CAEAD8DA6618427B2E1D9AD75C4515F8\Install
+  PreconditionsChecker.exe, arguments: '"C:\ProgramData\Package Cache\4BA92C11C
+  AEAD8DA6618427B2E1D9AD75C4515F8\InstallPreconditionsChecker.exe" 1.56.0.0'
+  [3BD0:1A1C][2026-08-28T17:19:21]e000: Error 0xffffffff: Process returned
+  error: 0xffffffff
+  [3BD0:1A1C][2026-08-28T17:19:21]e000: Error 0xffffffff: Failed to execute EXE
+  package.
+  [1A20:1598][2026-08-28T17:19:21]e000: Error 0xffffffff: Failed to configure
+  per-machine EXE package.
+  [1A20:1598][2026-08-28T17:19:21]i319: Applied execute package:
+  InstallPreconditionsChecker.exe, result: 0xffffffff, restart: None
+  [1A20:1598][2026-08-28T17:19:21]e000: Error 0xffffffff: Failed to execute EXE
+  package.
+  [3BD0:1A1C][2026-08-28T17:19:21]i351: Removing cached package:
+  InstallPreconditionsChecker.exe, from path: C:\ProgramData\Package
+  Cache\4BA92C11CAEAD8DA6618427B2E1D9AD75C4515F8\
+  [3BD0:1A1C][2026-08-28T17:19:21]i372: Session end, registration key:
+  SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{365068d6-42b3-4a92-8bb7-
+  058e16b2d1cd}, resume: None, restart: None, disable resume: No
+  [3BD0:1A1C][2026-08-28T17:19:21]i330: Removed bundle dependency provider:
+  {365068d6-42b3-4a92-8bb7-058e16b2d1cd}
+  [3BD0:1A1C][2026-08-28T17:19:21]i352: Removing cached bundle:
+  {365068d6-42b3-4a92-8bb7-058e16b2d1cd}, from path: C:\ProgramData\Package
+  Cache\{365068d6-42b3-4a92-8bb7-058e16b2d1cd}\
+  [3BD0:1A1C][2026-08-28T17:19:21]i371: Updating session, registration key:
+  SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{365068d6-42b3-4a92-8bb7-
+  058e16b2d1cd}, resume: None, restart initiated: No, disable resume: No
+  [1A20:1598][2026-08-28T17:19:21]i399: Apply complete, result: 0xffffffff,
+  restart: None, ba requested restart:  No
+
+
+● The precondition checker (InstallPreconditionsChecker.exe → 0xffffffff) is the
+  Dell/Intel system whitelist, not a real incompatibility. The Burn bundle
+  already cached its payloads (dch_setup.msi, TbtLegacyPlug.msi) before it
+  bailed, and only removed the checker — so the MSI with the drivers may still
+  be on disk. Checking that and the extracted DUP folder (read-only), plus what
+  extraction tools we have.
+
+● PowerShell("--- Package Cache:"; Get-ChildItem "C:\ProgramData\Package Cache"
+            -Recurse -Include *.msi,*.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -mat…)
+  ⎿  Error: Exit code 1
+     --- Package Cache:
+
+     FullName
+     --------
+
+     C:\ProgramData\Package
+     Cache\{488D2737-A8BE-4F2A-8A9B-AEFF2DB8833F}v18.0.0.0\T…
+     C:\ProgramData\Package
+     Cache\{B5FA4424-EF3E-44E5-BAB7-3CCCF8FCB4F4}v1.56.0.0\d…
+
+     --- Dell DUP folder:
+     --- tools:
+
+     … +5 lines (ctrl+o to expand)
+
+● The two MSIs survived in the Package Cache. Extracting dch_setup.msi with an
+  administrative install (unpacks files, installs nothing) into the scratchpad
+  and listing what driver INFs it carries.
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad\tbt
+            "; New-Item -ItemType Dir…)
+  ⎿  msi: C:\ProgramData\Package Cache\{B5FA4424-EF3E-44E5-BAB7-3CCCF8FCB4F
+     4}v1.56.0.0\dch_setup.msi (33009664 bytes)
+     msiexec exit: 0
+     … +19 lines (ctrl+o to expand)
+
+● (summarized)
+  I confirmed the full 1.41.1423.0 driver set is present, including
+  TbtP2pNdisDrv.inf/.sys. Now I'll verify the catalogs for signing, check the
+  INF's hardware ID coverage for this adapter and the 15D9 controller, and
+  compare its MTU option against the installed 1379 INF in the driver store.
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad\tbt
+            \dch\WindowsFolder\Intel\…)
+  ⎿  --- catalogs:
+     tbthostcontroller.cat, tbthostcontrollerextension.cat, tbthostcontroll
+     erhsacomponent.cat, tbthostcontrollertoastcomponent.cat, tbtp2pndisdrv
+     … +27 lines (ctrl+o to expand)
+
+✻ Jitterbugging… (1m 17s · ↓ 3.5k tokens · still thinking)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's
+     current work
+
+● (summarized)
+  Found it: the MTU table changed between driver versions (65332 vs 65330), and
+  the old value likely caused a 2-byte overflow that made the driver silently
+  fall back to 4084 — the new driver corrects this. I'll now do two quick
+  read-only checks: confirming the new INF matches this adapter's P2P ID and
+  identifying which INF claims the 15D9 controller.
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad\tbt
+            \dch\WindowsFolder\Intel\…)
+  ⎿  --- P2P id + 65330 label in new NDIS INF:
+     %TbtP2pNdisDrv_Desc%         = TbtP2pNdisDrv_ndi, {5CE5EA10-2048-49BE-
+     9464-C4BA0030122F}\P2P
+     … +8 lines (ctrl+o to expand)
+
+● PowerShell($src="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-dev
+            src-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad\tb
+            t\dch\WindowsFolder\Intel…)
+  ⎿  driver_files_list.txt, Place_Signed_driver_here.txt, TbtBusDrv.sys, Tb
+     tControlCenterToastLauncher.exe, TbtFilterDrv.dll, tbthostcontroller.c
+     at, TbtHostController.inf, tbthostcontrollerextension.cat, TbtHostCont
+     … +6 lines (ctrl+o to expand)
+
+✢ Jitterbugging… (1m 51s · ↓ 6.2k tokens · thinking)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's
+     current work
+
+● The 1.41.1423.0 driver files (with their WHQL catalogs) are unpacked at
+  C:\Users\Claude\tbt-1423, ready to install by hand — no precondition checker
+  involved. The networking INF matches this adapter's ID ({5CE5EA10…}\P2P), and
+  its MTU table is the interesting part: the new driver counts the MTU as
+  payload (65330, shown as "65344 Bytes"), where 1379 stored 65332 — two bytes
+  more than a maximum frame can carry, which is a very plausible reason 1379
+  silently fell back to 4084.
+
+  Install (elevated PowerShell):
+
+  # every INF in the folder; Windows installs whichever ranks better for present
+  devices
+  pnputil /add-driver C:\Users\Claude\tbt-1423\*.inf /install
+
+  # check the networking driver took
+  Get-NetAdapter -Name "Ethernet 4" | Select-Object Status, DriverVersionString, MtuSize
+
+  Then set the MTU (note the new display string) and re-negotiate:
+
+  Set-NetAdapterAdvancedProperty -Name "Ethernet 4" -DisplayName "Maximum transmission unit" -DisplayValue "65344 Bytes"
+  Restart-NetAdapter -Name "Ethernet 4"
+  Start-Sleep 10
+  Get-NetAdapter -Name "Ethernet 4" | Select-Object MtuSize      # hoping for 65330
+
+  Linux must match the new number — it's at 65332 now, 2 bytes too big for the
+  Windows side:
+
+  sudo ip link set dev thunderbolt0 mtu 65330
+
+  If the driver refuses to install by INF or the adapter still says 4084, the
+  fallback is unchanged: Linux to 4084 (sudo ip link set dev thunderbolt0 mtu
+  4084). Either way, tell me the MtuSize you end up with and I'll verify the
+  path with don't-fragment pings and rerun the raw TCP round.
+
+✻ Worked for 1m 56s · done 5:22 PM
+
+PS C:\Windows\system32> pnputil /add-driver C:\Users\Claude\tbt-1423\*.inf /install
+Microsoft PnP Utility
+
+Adding driver package:  TbtHostController.inf
+Driver package added successfully.
+Published Name:         oem99.inf
+Driver package added successfully.
+Published Name:         oem102.inf
+Driver package added successfully.
+Published Name:         oem101.inf
+Driver package added successfully.
+Published Name:         oem100.inf
+Driver package installed on device: {5CE5EA10-2048-49BE-9464-C4BA0030122F}\P2P\7&2cfeb5ac&0&01500
+Driver package installed on device: SWD\DRIVERENUM\{b4daa161-39a4-49ea-bc66-7b05a9ddbb16}#TbtToastComponent&7&2cfeb5ac&0
+Driver package installed on device: SWD\DRIVERENUM\ThunderboltHostControllerHSA&7&2cfeb5ac&0
+
+Adding driver package:  TbtHostControllerExtension.inf
+Driver package added successfully.
+Published Name:         oem103.inf
+
+Adding driver package:  TbtHostControllerHsaComponent.inf
+Driver package added successfully. (Already exists in the system)
+Published Name:         oem102.inf
+Driver package is up-to-date on device: SWD\DRIVERENUM\ThunderboltHostControllerHSA&7&2cfeb5ac&0
+
+Adding driver package:  TbtHostControllerToastComponent.inf
+Driver package added successfully. (Already exists in the system)
+Published Name:         oem101.inf
+Driver package is up-to-date on device: SWD\DRIVERENUM\{b4daa161-39a4-49ea-bc66-7b05a9ddbb16}#TbtToastComponent&7&2cfeb5ac&0
+
+Adding driver package:  TbtP2pNdisDrv.inf
+Driver package added successfully. (Already exists in the system)
+Published Name:         oem100.inf
+Driver package is up-to-date on device: {5CE5EA10-2048-49BE-9464-C4BA0030122F}\P2P\7&2cfeb5ac&0&01500
+
+Adding driver package:  TbtSlimHostController.inf
+Driver package added successfully.
+Published Name:         oem104.inf
+
+Adding driver package:  ThunderboltBR.inf
+Driver package added successfully.
+Published Name:         oem105.inf
+
+Total driver packages:  7
+Added driver packages:  4
+
+PS C:\Windows\system32> Get-NetAdapter -Name "Ethernet 4" | Select-Object Status, DriverVersionString, MtuSize
+
+Status DriverVersionString MtuSize
+------ ------------------- -------
+Up     1.41.1423.0            4070
+
+PS C:\Windows\system32> Set-NetAdapterAdvancedProperty -Name "Ethernet 4" -DisplayName "Maximum transmission unit" -DisplayValue "65344 Bytes"
+PS C:\Windows\system32> Restart-NetAdapter -Name "Ethernet 4"
+PS C:\Windows\system32> Start-Sleep 10
+PS C:\Windows\system32> Get-NetAdapter -Name "Ethernet 4" | Select-Object MtuSize
+
+MtuSize
+-------
+  65330
+
+❯ It worked! Check for yourself, then retry the raw TCP round.
+
+● (summarized)
+  Jumbo frames boosted throughput significantly: Windows→Linux hit 418→1468 MB/s
+  single-stream (1934 MB/s with four streams), while Linux→Windows plateaued at
+  1360 MB/s regardless of streams, indicating that direction is now limited by
+  Windows' receive path. Next, I'll run the raw-SSH benchmark suite sequentially
+  across both Windows SSH clients, testing AES-128-GCM, AES-256-GCM, and
+  chacha20 in both directions.
+
+● (summarized)
+  Confirmed: System32's client stays capped at 18 MB/s, while the bundled client
+  hits ~340-350 MB/s against a 1468 raw link speed, showing ssh.exe itself is
+  the bottleneck (and oddly the bundled client receives slower than System32:
+  223 vs 279). Next I'll run a combined 4 GB transfer test with per-thread CPU
+  sampling of ssh.exe here and a simultaneous top snapshot of sshd on Linux to
+  pinpoint where the time is spent.
+
+● (summarized)
+  I've confirmed the client's main ssh.exe thread is the bottleneck—heavy kernel
+  time from unoffloaded TCP checksum/copy work, while Linux sshd sits idle.
+  Next I'll calibrate that kernel cost with a raw Python sender, test Windows
+  sshd as the endpoint in both directions, and check if ssh.exe has a PDB for
+  function-level profiling.
+
+● (summarized)
+  The raw sender's kernel time is minimal, confirming the client's 5.5s overhead
+  comes from per-packet Win32 compat layer processing (~131k SSH packets), not
+  TCP itself; meanwhile the Windows-sshd tests failed entirely, likely due to a
+  quoting issue hidden by suppressed stderr. I'll debug that with stderr visible
+  while also checking for an ssh.pdb to profile the client by function.
+
+● (summarized)
+  The "0 MB/s" earlier was actually an integer overflow bug in my math, not a
+  real failure — actual speeds were ~750 and ~560 MB/s. I'll rerun the
+  sshd-endpoint test with corrected math and byte counts, and separately check
+  for a PDB for the bundled client.
+
+● (summarized)
+  Windows' native sshd outperforms the bundled client (762 MB/s in, 561 MB/s out
+  with AES-GCM). Now running the full rsync battery — Linux and
+  Windows-initiated push/pull with both the bundled and System32 clients — plus
+  checking for a PDB to enable function-level profiling.
+
+● (summarized)
+  Rsync from Linux hits 655 MB/s pull / 650 MB/s push, well above the 2.5GbE
+  ceiling. Windows-initiated tests failed due to an alias collision with R, so
+  I'll rename and rerun those while also checking the PDB for client profiling.
+
+❯ Did we do a build with RelWithDebInfo or not?
+
+● (summarized)
+  No PDB is available since the installed ssh.exe came from the CI zip, so I'll
+  rebuild the client locally for symbols. First, I'll capture a CPU sample of
+  the slower Windows-initiated pull and review our termio patch for anything
+  affecting the receive path.
+
+● (summarized)
+  Found that ssh.exe, not rsync.exe, is the real bottleneck—139% CPU with 7.0s
+  kernel time per 4GB, pointing to the compat layer's I/O loop overhead. Next
+  I'll review the two client patches, kick off a background rebuild with symbols
+  for profiling, and add PDB support to the sampler.
+
+  Read 1 file (ctrl+o to expand)
+
+● (summarized)
+  Found that syncio_initiate_write spawns a new thread for every write
+  (mirroring the read-side bug already fixed), which explains the 7s kernel
+  overhead from ~131k threads during a 4GB pull. Next I'll check the build
+  outcome and PDB location, examine how fileio_write drives these sync writes to
+  design a write pump, and locate the PDB.
+
+● (summarized)
+  I'll implement the writer thread mirroring the read pump design, but first
+  need to review termio.c's close path/header, the socket layer's send/recv
+  structure, and extend the sampler to read the PDB.
+
+● (summarized)
+  I'm gathering the final pieces before writing the write pump: the socket
+  layer's send/recv structure, an open slot in struct w32_io for a second pump,
+  and PDB symbol support in the sampler.
+
+● (summarized)
+  I'll add a new 0004 patch on top of the read pump, then work on teaching the
+  sampler to resolve addresses via the PDB (dbghelp) while snapshotting termio.c
+  for a clean diff later — doing both in parallel since they're independent.
+
+● (summarized)
+  Both paths show crypto at ~15%, memcpy at ~5%, and ~70% of the main thread
+  stuck in ntdll syscalls—so I need to identify which syscalls are the
+  bottleneck. I'll extend the sampler to resolve ntdll/kernelbase addresses via
+  their export tables and re-profile both directions.
+
+● (summarized)
+  The profile confirms thread-per-write behavior, but also reveals a second
+  inefficiency: about 30% of thread time is spent on named pipe/file creation,
+  closing, and I/O cancellation per loop iteration. I'll now locate the exact
+  call sites for the pipe/file creation, the cancel logic, and the select/wait
+  implementation.
+
+● (summarized)
+  I'll trace who calls pipe() at fileio.c:216, identify what CancelIo at
+  fileio.c:1111 belongs to, and determine whether the per-iteration caller lives
+  in the compat select/wait path or OpenSSH's own loop.
+
+● (summarized)
+  Found that bsd-pselect.c's ppoll→pselect compat path creates a notify_pipe,
+  likely explaining the per-iteration named-pipe creation. I'll now review that
+  file alongside w32_select and the two fileio.c sites (CancelIo and
+  CreateFileW+wait), which appear independent.
+
+● (summarized)
+  Found it: the pselect compatibility shim creates a notify pipe on every call,
+  which is cheap on Linux but costly (~100µs) on Windows due to named-pipe/ACL
+  overhead, multiplied by 131k iterations. I'll check signal.c, w32_select, and
+  the CancelIo site to see if a native Windows pselect without the pipe is
+  feasible.
+
+● (summarized)
+  Confirmed that Windows delivers signals via the alertable wait (APC +
+  pending_signals) before returning, so pselect works fine without the notify
+  pipe. Next, I'll check how the compat headers map select/fd_set/sigprocmask,
+  whether config.h.vs defines HAVE_PSELECT, the w32_select implementation, and
+  the CancelIo call site.
+
+● (summarized)
+  All snapshots are in place. Now applying the independent edits together: the
+  write pump and shared per-fd context in termio.c, native pselect in w32fd.c
+  with its declaration in inc/sys/select.h, and HAVE_PSELECT in config.h.vs.
+
+● (summarized)
+  Build is clean, aside from a pre-existing C4047 warning in clientloop.c. Now
+  profiling the new client's raw send/receive, then installing it alongside
+  rsync.exe to run push/pull tests with hash checks sequentially over the same
+  link.
+
+● (summarized)
+  Send throughput jumped to ~810 MB/s (from 341) after removing the notify-pipe
+  overhead. Receive numbers look unchanged only because the sampler wrote to
+  NUL, which takes a slower console path — I'll add a --stdout <file> option so
+  the receive test properly exercises the pump path.
+
+● Re-profiling the receive path with stdout on a real file, then (same command,
+  sequentially) installing the new client beside rsync.exe and running the rsync
+  push and pull with hash checks.
+
+● (summarized)
+  Receive-to-file and rsync pull both improved substantially, but rsync push
+  lags at 257 MB/s versus 810 MB/s for a raw file send, suggesting a bottleneck
+  specific to stdin piping. I'll profile the installed ssh.exe alongside rsync's
+  own CPU usage during a push to pinpoint the cause.
+
+❯ Pause.
+
+● Paused. Nothing is running — the last profile finished and no transfer or
+  build is in flight.
+
+  Where things stand, so you can pick up whenever:
+
+  - Done and measured (new client, not yet committed): raw send 341 → ~810 MB/s
+    (native pselect, no notify pipe per call); raw receive 223 → 573 MB/s and
+    rsync pull 320 → 592 MB/s (write pump). Hashes all correct.
+  - Open: rsync push through the new client sits at ~257 MB/s, and the profile
+    just showed why — ssh.exe's main thread spends 66 % in NtDelayExecution,
+    i.e. sleeping in SleepEx, while rsync.exe is only at 18 %. With a pipe on
+    stdin the client is waiting on its read pump's wake-ups rather than working;
+    that's the next thing to fix (the wake path in the stdin pump when the
+    producer is a pipe, versus the file case that runs at 810).
+  - State of the tree: the submodule working tree carries the edits (termio.c
+    write pump + ctx, w32fd.c/select.h pselect, config.h.vs HAVE_PSELECT), the
+    patch set in win32/openssh/patches is regenerated (0001 extended, 0003
+    extended, new 0004), and the new ssh.exe is installed in C:\Tools\rsync with
+    the previous one kept as ssh.exe.prev. Nothing committed yet. Test files:
+    C:\Users\Claude\rsync-perf (≈13 GB incl. in\) and /tmp/tb on the Linux box
+    (≈8 GB in its tmpfs); the Linux firewall is still disabled, as you left it.
+
+✻ Sautéed for 10s · done 6:02 PM
+
+❯ On the Linux side, something causes non-cache memory use to explode, I think
+  it's the Thunderbolt transfers, looks like too much data in tmpfs. Tell me if
+  I'm wrong. Clean up after yourself more regularly. I'll shut down some VMs
+  on the Linux side too.
+
+● Confirmed and cleaned up. Your diagnosis was correct — it wasn't cache, it was
+  my test files: tmpfs pages are real, non-evictable memory (they only get out
+  of RAM by going to swap/zram), and I had 22 GB of them sitting in /tmp/tb —
+  the 4 GB source plus five pushed/pulled copies I never deleted between runs.
+  The box was at ~1 GB available; it's at 40 GB available now, with /tmp back to
+  16 MB used.
+
+  On this side, the 12 GB of copies in rsync-perf\in, recv.bin and the 1 GB
+  slice are gone too; what remains is the 4 GB big.bin on the NVMe (disk, not
+  memory) plus the two tiny helper scripts, and tcp.py on the Linux side. When
+  testing resumes I'll create the Linux test file only for the run that needs it
+  and delete every output as soon as its hash is checked, rather than
+  accumulating them. Sorry for the churn — you shouldn't have had to notice it.
+
+  Still paused otherwise; the open item when you want to continue is the rsync
+  push path (the client sleeping in SleepEx instead of sending when its stdin is
+  a pipe).
+
+✻ Worked for 50s · done 6:06 PM
+
+❯ Ok I turned off the VMs. Let's go, continue with your work.
+
+● (summarized)
+  The client itself is fast on a pipe (~750 MB/s), so the push slowdown is on
+  rsync's side. I'll profile the Windows rsync sender during a push using the
+  RelWithDebInfo build, then delete the pushed file right after the hash check.
+
+● (summarized)
+  The earlier 257 MB/s reading was caused by the receiver swapping under low
+  memory, not an actual bottleneck — this push hit ~730 MB/s. Now re-measuring
+  the installed binaries in both directions with memory freed up, deleting
+  outputs after each hash check.
+
+● (summarized)
+  Windows-initiated transfers now outperform Linux-initiated ones (push 701–703
+  MB/s, pull 605–676 MB/s, hashes verified), with the client's main thread still
+  the bottleneck (~35% crypto, ~30% socket sends, ~10% copies). I'll try one
+  more optimization: testing AES-CTR with UMAC instead of GCM in case LibreSSL's
+  GHASH is slow.
+
+● (summarized)
+  AES-128-GCM remains the best-performing cipher (764 vs 721-725 for
+  alternatives), confirming the client is at its practical single-thread ceiling
+  with no useful cipher lever left. Next I'll build the x86 client with the
+  same patches and run the port's full suite in the background while locating
+  the doc passages describing the client patches.
+
+● Here's the whole Thunderbolt investigation, start to finish.
+
+  Link first: jumbo frames were mandatory
+
+  ┌────────────────────────────────┬───────────────┬───────────────────┐
+  │     Raw TCP (Python, 4 GB)     │ MTU 1500/4084 │     MTU 65330     │
+  ├────────────────────────────────┼───────────────┼───────────────────┤
+  │ Windows → Linux, 1 stream      │ 418 MB/s      │ 1468 MB/s         │
+  ├────────────────────────────────┼───────────────┼───────────────────┤
+  │ Windows → Linux, 4 streams     │ 569           │ 1934 (~15.5 Gbit) │
+  ├────────────────────────────────┼───────────────┼───────────────────┤
+  │ Linux → Windows, 1 / 4 streams │ 1270 / 1024   │ 1360 / 1350       │
+  └────────────────────────────────┴───────────────┴───────────────────┘
+
+  At 1500 the Linux end's single RX queue with software checksums (ksoftirqd at
+  81 %) capped everything into it. The Windows driver ignored the 65332 setting
+  until 1.41.1423 — its INF's MTU table changed from 65332 to 65330 (payload vs.
+  frame accounting), which is why 1379 silently fell back to 4084.
+  Linux→Windows is now flat at ~1.36 GB/s regardless of stream count: the
+  Windows receive path is that direction's ceiling.
+
+  ssh and rsync, before → after today's client fixes
+
+  ┌────────────────────────────────┬───────────┬──────────────┬───────────┐
+  │       4 GB, AES‑128‑GCM        │ System32  │  bundled,    │ bundled,  │
+  │                                │    ssh    │    before    │    now    │
+  ├────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ raw ssh send W→L               │ 18 MB/s   │ 341          │ 764       │
+  ├────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ raw ssh receive L→W (to a      │ 279       │ 223          │ 573       │
+  │ file)                          │           │              │           │
+  ├────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ rsync push (Windows-initiated) │ 16        │ 326          │ 703       │
+  ├────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ rsync pull (Windows-initiated) │ 392       │ 320          │ 676       │
+  ├────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ rsync via Windows' own sshd    │ —         │ 655 pull /   │ same      │
+  │ (Linux-initiated)              │           │ 650 push     │           │
+  └────────────────────────────────┴───────────┴──────────────┴───────────┘
+
+  The System32 client is exactly where you predicted: still 3 KB-per-read bound
+  at 16–18 MB/s sending.
+
+  What the profiles found in the bundled client (main thread, by function)
+
+  1. Thread per write to stdout (syncio_initiate_write + the join) — a third of
+     the thread on downloads. Fixed with a write pump mirroring the stdin one
+     (patch 0001 now has both).
+  2. A named pipe per loop iteration — upstream's portable pselect() fallback
+     creates a notify pipe on every call when signal handlers exist; on Windows
+     that's NtCreateNamedPipeFile/ZwCreateFile/ZwClose/NtCancelIoFile per
+     packet, ~30 % of the thread both ways. The port's signals arrive by APC
+     into an alertable wait, so the race it guards doesn't exist; patch 0004
+     supplies a native pselect, 0003 sets HAVE_PSELECT. This alone took sends
+     from 341 to ~800.
+  3. Cipher check: AES‑128‑GCM is the fastest here (aes256‑gcm 721,
+     aes128‑ctr+umac‑64 725, chacha20 213, hmac‑sha2 221) — no lever there.
+
+  What's left is the client's single thread doing AES‑GCM (~35 %) plus socket
+  sends (~30 %) — the practical ceiling of a single-threaded OpenSSH at ~750
+  MB/s on this laptop, against a 1.4 GB/s link. Going past it means either
+  parallel crypto in the client (a large change) or multiple streams; the NVMe
+  isn't the limit yet.
+
+  State
+
+  - Committed as fa2b317c and pushed (patches + docs + release notes); CI is
+    being watched in the background, not tagged. 24/24 tests on x64 and x86 with
+    the new clients in the loop; every transfer hash-verified.
+  - New ssh.exe is installed in C:\Tools\rsync (previous kept as ssh.exe.prev).
+  - All test data is gone from both machines (/tmp back to 16 MB; Linux at 56 GB
+    available). The Linux firewall is still off, as you left it; ufw enable
+    when you're done.
+  - I left windows-perf-thunderbolt-networking.png and WINDOWS-PORT.md
+    untouched.
+
+✻ Churned for 9m 25s · done 6:16 PM · 1 shell still running
+
+● CI for fa2b317c is green: run 33189100894 built both architectures with the
+  new client patches in a clean environment and passed its tests. Nothing else
+  is pending on my side — the branch is ready to tag whenever you want a release
+  with the faster client (v3.5.0-gfa2b317c), and the firewall on the Linux box
+  is the one thing left for you to re-enable.
+
+✻ Churned for 11s · done 6:21 PM
+
+❯ Can we go faster? What would that entail? Could we cleanly implement this to
+  have a single thread vs multithread version? Is there any pipelining that
+  could be used to split the work off to different cores?
+
+● Yes, there's headroom — the link does 1.4 GB/s raw and the NVMe can absorb
+  ~1.5 GB/s, and we're at ~0.7. But the profile says exactly where it is, and
+  it's all on one thread: with the pipe/thread waste gone, the client's main
+  thread is ≈35 % AES‑GCM, ≈30 % socket send (Winsock copies + TCP, no offloads
+  on this NIC), ≈10 % memcpy, the rest framing and waits. That thread is the
+  ceiling, so "faster" means moving work off it. Three tiers, in order of cost:
+
+  1. Socket pumps in the compat layer (cheap, clean, ~+30 %).
+  Same pattern as the stdin/stdout pumps: the main thread encrypts into a ring,
+  a sender thread does the WSASends; on receive, a thread keeps WSARecv running
+  into a ring the main thread decrypts from. That overlaps the ~30 % of kernel
+  send time with the crypto instead of serialising them. It's entirely in
+  socketio.c, invisible to OpenSSH proper, and trivially switchable (a
+  single-thread path is simply "no pump"). Expect ~750 → ~950–1000 MB/s.
+  Copy-elimination (there are five memcpy passes per byte today) is a
+  similar-sized, similar-risk cleanup in the same files, worth another ~10 %.
+
+  2. Pipelined crypto (the real multicore step, moderate effort, must be done
+  carefully).
+  This is the only way to get crypto off the main thread, and it is possible
+  because the ciphers that matter are packet-independent: for AES‑GCM each
+  packet's IV is a counter, for chacha20‑poly1305 the per-packet key comes from
+  the sequence number — so packet N doesn't depend on packet N‑1's ciphertext.
+  Design: in packet.c's send path, instead of encrypting inline, hand (seqnr,
+  plaintext) to a small pool of workers with their own cipher contexts seeded
+  from the same key; a reorder stage writes ciphertext into the output buffer in
+  sequence. Receive mirrors it (GCM lengths are unencrypted AAD; chacha lengths
+  use a separate key, decrypted sequentially and cheaply). Rekeying drains the
+  pipeline; CTR+HMAC modes keep a running keystream and simply stay on the
+  sequential path. Done behind an option (-o PacketWorkers=N, default 1 =
+  today's code path untouched) it's cleanly single- or multi-threaded, but it
+  touches OpenSSH core, needs a per-packet correctness testbed against the Linux
+  sshd/OpenSSL, and won't be upstreamable to Microsoft as-is. Estimate: several
+  days, and the payoff is only ~1.0 → ~1.3 GB/s because the send path then
+  becomes the limit — i.e., you'd land at the link.
+
+  3. What none of this fixes. The Linux‑initiated path goes through Microsoft's
+  sshd on this machine (650 MB/s) and it has the same thread-per-write and pipe
+  habits; we could ship a patched sshd.exe too, but installing a replacement
+  service is a much bigger step than dropping an ssh.exe beside rsync.
+
+  And the zero-code answer: two rsync streams saturate the link today. Two
+  Windows-initiated pushes of different halves of the tree run at 700 each, and
+  the NIC still had ~35 % left at four streams. For a ~90 GB job that's ~65 s vs
+  ~130 s — the same gain tier 2 would buy after days of work.
+
+  My recommendation: do tier 1 (the socket pumps and one copy removal) — it's
+  the same kind of change we've been making, low risk, and likely gets you to ~1
+  GB/s per stream; treat tier 2 as a separate project only if a single stream
+  at line rate matters more than a wrapper that runs two. Say which and I'll
+  start.
+
+✻ Sautéed for 51s · done 6:23 PM
+
+❯ Do tier 1.
+
+● Starting tier 1. Before writing the socket pumps I need the exact shape of
+  socketio.c's state machine: the receive completion path, the send completion,
+  shutdown/close, and the on_select/is_io_available hooks that w32_select uses —
+  plus whether the socket is ever put in non-blocking mode. Reading all of that
+  at once.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● (summarized)
+  socketio.c leaves internal.context unused for connected sockets, so the pumps
+  can go there. Next I'll locate where main_thread is declared so the socket
+  pumps can wake the main loop the same way the stdin pump does.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● (summarized)
+  I have the context I need, so now I'll implement the changes in one batch:
+  snapshot socketio.c for the diff, add ring-buffer-based send/receive pumps
+  that each cut a copy step, and route
+  send/recv/shutdown/close/is_io_available/on_select through them for connected
+  sockets.
+
+● (summarized)
+  Build passed cleanly, and I'm now creating a 4 GB test file to measure the new
+  client's raw send/receive performance, deleting outputs immediately after
+  checking them.
+
+● (summarized)
+  Send throughput improved from 764 to ~1020 MB/s and receive-to-file from 573
+  to ~930 MB/s, with the main thread now spending its time on real crypto/memcpy
+  work rather than overhead. I'll install this client, run rsync push and pull
+  with hash checks, profile the pull to confirm the stdin issue is unrelated to
+  the data path, and clean up after each run.
+
+● (summarized)
+  Verified the local source hash matches both pushes exactly, with no corruption
+  at 740–896 MB/s. Now running the full test suite and x86 client build in
+  parallel while updating docs for patch 0002.
+
+● Suite is 24/24 on both architectures with the socket-pump client. Committing
+  and pushing, then watching CI.
+
+● Tier 1 is done, tested, committed (e517f056) and pushed; CI is being watched
+  in the background.
+
+  What changed (patch 0002, socketio.c) — a connected socket now has a thread
+  each way:
+  - send() copies into a 4 MB ring and returns; a thread send()s straight from
+    the ring. The old 1 MB internal send buffer and its copy are gone.
+  - recv() copies out of a ring that a thread recv()s straight into; the old 70
+    KB receive buffer and its copy are gone.
+  - Readiness for select() is "ring has bytes / ring has room", signalled
+    through the same APC-into-alertable-wait mechanism as the pipe pumps. Rings
+    drain before shutdown(SD_SEND), on close, and at exit. Listening/connecting
+    sockets keep the overlapped paths.
+
+  Numbers (4 GB, AES‑128‑GCM, Thunderbolt, MTU 65330)
+
+  ┌────────────────────────┬──────────────┬───────────────────────┬─────────┐
+  │                        │  start of    │  after pipe/pselect   │   now   │
+  │                        │    today     │         fixes         │         │
+  ├────────────────────────┼──────────────┼───────────────────────┼─────────┤
+  │ raw ssh send           │ 341 MB/s     │ 764                   │ ~1020   │
+  ├────────────────────────┼──────────────┼───────────────────────┼─────────┤
+  │ raw ssh receive (to a  │ 223          │ 573                   │ ~930    │
+  │ file)                  │              │                       │         │
+  ├────────────────────────┼──────────────┼───────────────────────┼─────────┤
+  │ rsync push             │ 326          │ 703                   │ 740–896 │
+  ├────────────────────────┼──────────────┼───────────────────────┼─────────┤
+  │ rsync pull             │ 320          │ 676                   │ 763–853 │
+  └────────────────────────┴──────────────┴───────────────────────┴─────────┘
+
+  Every rsync transfer was hash-checked against its source (the one scare was my
+  comparing against a stale hash after the source file had been regenerated —
+  the data was fine). The main thread's profile is now ≈50 % AES‑GCM, ≈20 %
+  memcpy, ≈15 % waiting for the pumps — i.e. the single crypto thread against a
+  1.4 GB/s link, which is the tier‑2 boundary I described.
+
+  Validation: 24/24 tests on x64 and x86 with the new client in the loop; x86
+  client rebuilt with the same patches. Docs/release notes updated. The new
+  ssh.exe is installed in C:\Tools\rsync.
+
+  Cleanup: all test data is gone from both machines (/tmp at 16 MB; rsync-perf
+  removed). The Linux firewall is still disabled from earlier — worth ufw enable
+  now that the raw‑TCP tests are done, since nothing further needs the extra
+  ports.
+
+  Not tagged. If you want a release with today's client work, v3.5.0-ge517f056
+  is the tag once CI confirms.
+
+✻ Baked for 10m 0s · done 6:41 PM · 1 shell still running
+
+❯ Ok is there anything else you can do in a single thread / single core
+  configuration to speed things up, any things overlooked, and more avoidable
+  memcpy or other optimization?
+
+● Good question — the profile still says ≈50 % crypto, ≈20 % memcpy, ≈15 %
+  waiting, so there are three places to look, and two of them I can quantify
+  before recommending anything. Three independent measurements: how fast this
+  machine's libcrypto.dll actually runs AES‑128‑GCM versus Windows CNG (a
+  possible alternative backend), and whether the Linux sshd is now the limit on
+  pulls.
+
+● (summarized)
+  libcrypto hits 1.63 GB/s at SSH's 32 KB packet size (2.17 GB/s at 1 MB), which
+  roughly caps a single crypto thread near our current numbers. Next I'll
+  benchmark Windows CNG via .NET's AesGcm to see if switching backends would
+  help.
+
+● (summarized)
+  CNG shows a real but bounded gain (2.2 GB/s at 32 KB, +35%; 3.3 GB/s at 1 MB),
+  translating to roughly +15% overall since crypto is half the thread. Before
+  laying out options, I'll check whether Linux sshd is now the bottleneck on
+  pulls by creating a 4 GB test file, capturing a top snapshot during transfer,
+  then cleaning up both files.
+
+● Yes — three things, and I've now measured enough to rank them honestly. Today
+  the client's main thread is ≈50 % AES‑GCM, ≈20 % memcpy, ≈15 % idle waits, the
+  rest framing; the Linux sshd sits at 62 % during a pull, so the Windows side
+  is still the ceiling in both directions.
+
+  1. Copies — ~+8–10 %, low risk. Each byte sent crosses the main thread five
+  times: pump ring → read_details.buf → app buffer → channel sshbuf → packet
+  sshbuf → socket ring. Two of those are the compat layer's own doing and can
+  go: the read pump can deliver straight from its ring into the caller's buffer
+  instead of via the 256 KB staging buffer, and fileio_write can hand the
+  caller's data straight to the write pump instead of copying it into
+  write_details.buf first. Same on receive. That's ~2 of the memcpy passes, in
+  files we already patch.
+
+  2. Buffer zeroing — ~+5 %, small change but touches core. sshbuf_reset
+  explicit_bzeros the whole allocation on every reset (memset + sshbuf_reset ≈ 6
+  % of the thread); a few MB of output buffer gets wiped per packet cycle.
+  Zeroing only the bytes in use is equivalent for secrecy — everything beyond
+  size was already zeroed by the previous reset or is fresh, never-written
+  allocation — but it's an upstream-security-relevant line in sshbuf.c, so it
+  would be a small, well-argued patch 0005, not a compat-layer change.
+
+  3. The cipher — ~+15 %, moderate effort. This is the biggest and the one I
+  measured: System32\libcrypto.dll does AES‑128‑GCM at 1.63 GB/s at SSH's 32 KB
+  packet size (2.17 at 1 MB — the per-packet setup costs 25 %), while Windows
+  CNG does 2.2 GB/s at 32 KB (3.3 at 1 MB). The gap says LibreSSL's build lacks
+  the stitched AES‑NI/PCLMUL GCM path. A Windows-only AES‑GCM backend in
+  OpenSSH's cipher.c on BCrypt would raise the crypto half of the thread by ~35
+  %. It's ~200 lines, must reproduce OpenSSH's GCM framing exactly (fixed IV +
+  per-packet invocation counter, the length field as AAD), and needs interop
+  tests against the Linux side. chacha20 would stay on LibreSSL.
+
+  What I looked for and don't think is there: the 32 KB packet size is
+  protocol-fixed (that 25 % per-packet GCM overhead is unavoidable); the idle 15
+  % is mostly pacing against the other end and the kernel, not a bug; rsync
+  itself is at ~20 % of a core and not in the picture; and Windows' sshd
+  (Linux-initiated, 650 MB/s) is Microsoft's binary, out of reach without
+  shipping our own.
+
+  Stacked, 1 + 2 + 3 should take a single thread from ~1.0 GB/s to roughly 1.3 —
+  i.e. up against the 1.4 GB/s link — with no multithreaded crypto at all. My
+  order would be 1, then 2, then 3, so the cheap wins land first and the cipher
+  backend is judged against a cleaner baseline. Say "go" for all three, or pick.
+
+✻ Sautéed for 2m 58s · done 6:47 PM
+
+● Background command "Watch the CI run for the pushed commit (background)"
+completed (exit code 0)
+
+  Read 1 file (ctrl+o to expand)
+
+● CI for e517f056 (the socket pumps) is green: run 33191102044. Nothing else
+  pending on my side — the three single-thread options above are ready whenever
+  you pick.
+
+✻ Baked for 14s · done 6:49 PM
+
+❯ Do 1 first, then ask again about the others.
+
+● Starting on the copies. First the exact shape of the read and select paths in
+  fileio.c that route sync fds, so the pumped fds can be diverted before any
+  staging copy happens — reading fileio_read and finding fileio_on_select/the
+  NONSOCK_SYNC_FD dispatch points.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● (summarized)
+  Now I'll dig into the w32_write chunking loop, the pump block and branch edits
+  in termio.c, and the five fileio.c hooks—all independently.
+
+  Read 1 file (ctrl+o to expand)
+
+● (summarized)
+  I'll make the pump write all-or-nothing per call (only copying when the ring
+  has room for the full chunk), define "writable" as ≥100 KB free, and harden
+  the wrapper against short writes. Now writing the new pump block and hooks.
+
+● (summarized)
+  Receive throughput improved but send didn't; profiling shows the cost comes
+  from excessive NtSetEvent calls per read and repeated GetFileType checks. I'll
+  fix both by signaling the pump only when the ring is full/empty and caching
+  the file type, applying the same event trimming to the socket pumps across six
+  edits.
+
+❯ Pause
+
+● Paused. Nothing is running.
+
+  Where option 1 stands:
+
+  - Done and tested, not committed. read()/write() on a pumped pipe/file now
+    copy straight between the caller's buffer and the pump ring (no staging
+    buffer), the pumps are signalled only when a ring was full/empty (no
+    per-call SetEvent), the file-type check is cached (no GetFileType syscall
+    per call), and the write wrapper is hardened against short writes. Raw ssh:
+    ~1050 MB/s send, ~1070 MB/s receive (from ~1020/~930); rsync push 862–864
+    MB/s, pull 837 MB/s, all hash-checked. x86 client rebuilt; full suite 24/24
+    on both architectures with the new clients.
+  - Tree state: submodule working tree carries the edits (termio.c, fileio.c,
+    socketio.c); patches 0001 and 0002 regenerated; docs (BUILD-CMAKE, README,
+    RELEASE-NOTES, workflow) updated; nothing committed yet. The new ssh.exe is
+    installed in C:\Tools\rsync.
+  - Cleanup: test data is gone from both machines.
+
+  When you resume, the next step is one commit + push for this, then options 2
+  (buffer zeroing) and 3 (CNG cipher backend) are still on the table as
+  discussed.
+
+✻ Baked for 11m 46s · done 7:04 PM
+
+❯ Continue, do the commit and push, then do options 2 and 3, then check whether
+  32KB is packet size is protocol-fixed
+
+● Committing and pushing the copy-elimination work first, and in parallel
+  reading the two code areas the next options touch: sshbuf_reset and cipher.c's
+  AES‑GCM path.
+
+● (summarized)
+  I found that sshbuf_reset shrinks the buffer every call via recallocarray,
+  causing costly allocator churn and full zeroing per packet — a safer fix is to
+  keep the allocation and zero only up to the high-water mark of bytes written.
+  I'll look at the struct and sshbuf_reserve for that, plus check the GCM path
+  in cipher.c and the channel packet-size constants for the remaining items.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+❯ Also: if you mean that we can use CNG in place of libressl, and eliminate the
+  libressl compile altogether, that would be awesome, though we really would
+  need to test this a bit better, so maybe we want both paths to be available
+  with CNG preferred initially since it is faster. But would this make rsync +
+  ssh only compatible with Windows 10 and 11?
+
+● (summarized)
+  Clarifying: CNG would only replace the AES-GCM bulk cipher, not LibreSSL,
+  which stays for RSA/ECDSA keys, key exchange, and other crypto needs — both
+  paths would be compiled in with CNG preferred and a LibreSSL fallback option.
+  Now checking three points: the sshbuf_reserve growth logic, the GCM code in
+  cipher.c, and the channel packet-size constants.
+
+  Read 1 file (ctrl+o to expand)
+
+● Applying the sshbuf change (high-water mark instead of shrink-and-zero) and
+  fetching the cipher and packet-size code in parallel.
+
+● (summarized)
+  I'll add the CNG backend inline in cipher.c since bcrypt.lib is already
+  linked, examining the cipher context struct, IV handling, and packet-size
+  constants next. In parallel, I'll rebuild and measure patch 0005's sshbuf
+  change.
+
+● Order matters here: the sshbuf build and measurement must run before I touch
+  cipher.c, so this response does that plus the packet-size lookup; the CNG
+  edits follow.
+
+● (summarized)
+  Send throughput is now ~1080 MB/s after removing the memset; receive is still
+  bottlenecked at 4.2s by unavoidable buffer wipes plus NtSetEvent signaling
+  overhead (6–8%) and lock contention (~8%). Next I'll implement fixes—signal
+  only when the pump sleeps, and copy outside the lock—alongside the independent
+  packet-size constant and CNG backend edits.
+
+● (summarized)
+  Found that packet size is negotiated per-channel (capped by peer's max, 32 KB
+  for pushes to Linux sshd, but pulls could advertise up to 256 KB) — worth
+  testing later given the 25% gap seen in GCM benchmarks. Next: implementing the
+  CNG backend changes in cipher.c and refining the pump logic (signal only
+  sleeping pumps, copy outside the lock).
+
+● (summarized)
+  Regenerating the patches with the new CNG cipher addition, then building and
+  benchmarking raw send/receive both with CNG (default) and libcrypto backend
+  for comparison.
+
+● (summarized)
+  CNG boosts throughput ~20% both ways (send 4.0→3.3s, receive 3.9→3.4s) while
+  keeping libcrypto working via the env switch, but NtSetEvent overhead grew to
+  11% since the pump now drains too fast and sleeps constantly. I'll fix this by
+  adding a brief spin before sleep in each of the four pump threads so it stays
+  awake during bulk flow.
+```

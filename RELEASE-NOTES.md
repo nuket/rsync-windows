@@ -69,10 +69,10 @@ longer take many times longer than a full copy.
   - The ssh.exe in the zip is Microsoft's own Win32-OpenSSH client with its
     I/O fixed.  The one Windows ships reads 3 KB at a time and holds any
     transfer *from* a Windows machine at about 17 MB/s; this one reaches the
-    wire on Ethernet, and about 1 GB/s each way over 20 Gbit Thunderbolt
-    networking (rsync ~860 MB/s pushing, ~840 MB/s pulling; a laptop core
-    running AES-GCM is the limit there).  Same ~/.ssh, same ssh-agent, same
-    known_hosts.
+    wire on Ethernet, and ~1.4 GB/s sending / ~1.26 GB/s receiving over
+    20 Gbit Thunderbolt networking (rsync ~1 GB/s pushing, ~980 MB/s
+    pulling; a laptop core running AES-GCM is the limit there).  Same
+    ~/.ssh, same ssh-agent, same known_hosts.
 
   - On Thunderbolt networking set the MTU to the maximum on both ends
     (65330 on Windows with Intel driver 1.41.1423, `ip link set dev
@@ -87,10 +87,13 @@ What changed since v3.5.0-gf800ace2
     named pipe for every pass through its main loop (OpenSSH's portable
     pselect() fallback did that), its socket sends and receives run on
     their own threads, overlapping the crypto instead of following it, and
-    two staging copies per byte are gone.  None of it shows on Ethernet;
-    on a 20 Gbit link the client went from ~340 MB/s sending and ~220 MB/s
-    receiving to ~1 GB/s each way (rsync: ~860 MB/s pushing, ~840 MB/s
-    pulling).
+    two staging copies per byte are gone.  A packet buffer that was freed
+    and reallocated for every packet is kept, and AES-GCM runs through
+    Windows CNG (BCrypt) instead of LibreSSL's EVP, which is 35% faster on
+    the same core; set SSH_AESGCM_BACKEND=libcrypto to get the old path.
+    None of it shows on Ethernet; on a 20 Gbit link the client went from
+    ~340 MB/s sending and ~220 MB/s receiving to ~1.4 GB/s sending and
+    ~1.26 GB/s receiving (rsync: ~1 GB/s pushing, ~980 MB/s pulling).
 
 What changed in v3.5.0-gf800ace2
 --------------------------------

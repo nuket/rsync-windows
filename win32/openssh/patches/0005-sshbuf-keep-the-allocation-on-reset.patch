@@ -1,0 +1,51 @@
+diff --git a/sshbuf.c b/sshbuf.c
+index 1b714e5..42f8451 100644
+--- a/sshbuf.c
++++ b/sshbuf.c
+@@ -46,6 +46,7 @@ struct sshbuf {
+ 	size_t size;		/* Last byte is buf->d + buf->size - 1 */
+ 	size_t max_size;	/* Maximum size of buffer */
+ 	size_t alloc;		/* Total bytes allocated to buf->d */
++	size_t hwm;		/* Bytes of buf->d written since the last reset */
+ 	int readonly;		/* Refers to external, const data */
+ 	u_int refcount;		/* Tracks self and number of child buffers */
+ 	struct sshbuf *parent;	/* If child, pointer to parent */
+@@ -205,14 +206,21 @@ sshbuf_reset(struct sshbuf *buf)
+ 	if (sshbuf_check_sanity(buf) != 0)
+ 		return;
+ 	buf->off = buf->size = 0;
+-	if (buf->alloc != SSHBUF_SIZE_INIT) {
+-		if ((d = recallocarray(buf->d, buf->alloc, SSHBUF_SIZE_INIT,
+-		    1)) != NULL) {
+-			buf->cd = buf->d = d;
+-			buf->alloc = SSHBUF_SIZE_INIT;
+-		}
+-	}
+-	explicit_bzero(buf->d, buf->alloc);
++	/*
++	 * Keep the allocation and wipe only what was written since the last
++	 * reset.  The packet layer resets its buffers once per packet, and
++	 * shrinking to SSHBUF_SIZE_INIT here -- recallocarray() zeroing and
++	 * copying the old block, then the buffer regrowing through the same
++	 * for the next packet -- was 6-8% of a bulk transfer on a 20Gbit link.
++	 * Bytes beyond hwm hold nothing of ours: sshbuf_reserve() is the only
++	 * way data enters, it raises hwm as it goes, and a moved allocation
++	 * comes from recallocarray(), which zeroes what it leaves behind.
++	 */
++	(void)d;
++	if (buf->hwm > buf->alloc)
++		buf->hwm = buf->alloc;
++	explicit_bzero(buf->d, buf->hwm);
++	buf->hwm = 0;
+ }
+ 
+ size_t
+@@ -383,6 +391,8 @@ sshbuf_reserve(struct sshbuf *buf, size_t len, u_char **dpp)
+ 
+ 	dp = buf->d + buf->size;
+ 	buf->size += len;
++	if (buf->size > buf->hwm)
++		buf->hwm = buf->size;
+ 	if (dpp != NULL)
+ 		*dpp = dp;
+ 	return 0;

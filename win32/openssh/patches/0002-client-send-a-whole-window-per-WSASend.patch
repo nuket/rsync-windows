@@ -1,5 +1,5 @@
 diff --git a/contrib/win32/win32compat/socketio.c b/contrib/win32/win32compat/socketio.c
-index c4eceae..7d6b019 100644
+index c4eceae..331e3cc 100644
 --- a/contrib/win32/win32compat/socketio.c
 +++ b/contrib/win32/win32compat/socketio.c
 @@ -34,12 +34,19 @@
@@ -23,7 +23,7 @@ index c4eceae..7d6b019 100644
  #define INTERNAL_RECV_BUFFER_SIZE 70*1024 //70KB
  #define errno_from_WSALastError() errno_from_WSAError(WSAGetLastError())
  
-@@ -83,6 +90,487 @@ errno_from_WSAError(int wsaerrno)
+@@ -83,6 +90,544 @@ errno_from_WSAError(int wsaerrno)
  	}
  }
  
@@ -65,6 +65,7 @@ index c4eceae..7d6b019 100644
 +	int    err;               /* first WSA error; the pump is dead after it */
 +	BOOL   waiting;           /* main thread wants room; wake it when there is */
 +	BOOL   apc_queued;
++	BOOL   sleeping;          /* the pump is in its wait: only then is data_evt worth setting */
 +	volatile LONG stop;
 +};
 +
@@ -80,6 +81,7 @@ index c4eceae..7d6b019 100644
 +	BOOL   err_reported;
 +	BOOL   waiting;           /* main thread wants bytes; wake it when there are */
 +	BOOL   apc_queued;
++	BOOL   sleeping;          /* the pump is in its wait: only then is room_evt worth setting */
 +	volatile LONG stop;
 +};
 +
@@ -115,6 +117,24 @@ index c4eceae..7d6b019 100644
 +	return pio->internal.state == SOCK_READY;
 +}
 +
++/* Spin briefly until *v moves off `stuck' (an empty ring for a sender, a
++ * full one for a receiver).  ~20-50us on this hardware: long enough to
++ * bridge the gap between packets in a bulk flow, short enough to be
++ * nothing when the flow has really stopped.  The read is unlocked and
++ * only a hint; callers re-check under the lock. */
++static BOOL
++sock_pump_spin(volatile DWORD *v, DWORD stuck)
++{
++	int i;
++
++	for (i = 0; i < 4000; i++) {
++		if (*v != stuck)
++			return TRUE;
++		YieldProcessor();
++	}
++	return *v != stuck;
++}
++
 +/* ---- send ------------------------------------------------------------ */
 +
 +static unsigned __stdcall
@@ -129,10 +149,28 @@ index c4eceae..7d6b019 100644
 +
 +		EnterCriticalSection(&p->lock);
 +		if (p->len == 0) {
-+			LeaveCriticalSection(&p->lock);
-+			if (p->stop)
++			if (p->stop) {
++				LeaveCriticalSection(&p->lock);
 +				break;
++			}
++			LeaveCriticalSection(&p->lock);
++			/* In a bulk flow the next append is microseconds away, and
++			 * a sleep would cost the main thread a SetEvent() per
++			 * packet (11% of it, measured).  Spin a little first; the
++			 * unlocked peek at len is only a hint, the lock decides. */
++			if (sock_pump_spin(&p->len, 0))
++				continue;
++			EnterCriticalSection(&p->lock);
++			if (p->len) {
++				LeaveCriticalSection(&p->lock);
++				continue;
++			}
++			/* say so under the lock, so an append that follows sees
++			 * a pump about to wait and sets the event */
++			p->sleeping = TRUE;
++			LeaveCriticalSection(&p->lock);
 +			WaitForSingleObject(p->data_evt, 200);
++			p->sleeping = FALSE;
 +			continue;
 +		}
 +		head = p->head;
@@ -300,16 +338,20 @@ index c4eceae..7d6b019 100644
 +		if (wait_for_any_event(NULL, 0, INFINITE) == -1)
 +			return -1;
 +	}
-+	was_empty = p->len == 0;
++	/* reserve under the lock, copy outside it, publish under it: the
++	 * region past len is invisible to the pump until len says so */
 +	n = (DWORD)min((size_t)space, len);
 +	tail = (p->head + p->len) % SOCK_PUMP_RING_SIZE;
++	LeaveCriticalSection(&p->lock);
 +	first = min(n, SOCK_PUMP_RING_SIZE - tail);
 +	memcpy(p->ring + tail, buf, first);
 +	if (n > first)
 +		memcpy(p->ring, (const char*)buf + first, n - first);
++	EnterCriticalSection(&p->lock);
 +	p->len += n;
++	was_empty = p->sleeping;
 +	LeaveCriticalSection(&p->lock);
-+	/* the pump only waits for bytes when the ring is empty */
++	/* only a pump in its wait needs the event */
 +	if (was_empty)
 +		SetEvent(p->data_evt);
 +	return (int)n;
@@ -332,7 +374,18 @@ index c4eceae..7d6b019 100644
 +		tail = (p->head + p->len) % SOCK_PUMP_RING_SIZE;
 +		LeaveCriticalSection(&p->lock);
 +		if (!space) {
++			/* full: the main thread is usually a few microseconds
++			 * from taking some -- spin before sleeping */
++			if (sock_pump_spin(&p->len, SOCK_PUMP_RING_SIZE))
++				continue;
++			EnterCriticalSection(&p->lock);
++			if (p->len == SOCK_PUMP_RING_SIZE)
++				p->sleeping = TRUE;
++			LeaveCriticalSection(&p->lock);
++			if (!p->sleeping)
++				continue;
 +			WaitForSingleObject(p->room_evt, 200);
++			p->sleeping = FALSE;
 +			continue;
 +		}
 +		take = min(space, SOCK_PUMP_CHUNK);
@@ -463,16 +516,20 @@ index c4eceae..7d6b019 100644
 +		if (wait_for_any_event(NULL, 0, INFINITE) == -1)
 +			return -1;
 +	}
-+	was_full = p->len == SOCK_PUMP_RING_SIZE;
++	/* take under the lock, copy outside it, release under it: the pump
++	 * only appends past len, so [head, head+n) is ours meanwhile */
 +	n = (DWORD)min((size_t)p->len, len);
 +	first = min(n, SOCK_PUMP_RING_SIZE - p->head);
++	LeaveCriticalSection(&p->lock);
 +	memcpy(buf, p->ring + p->head, first);
 +	if (n > first)
 +		memcpy((char*)buf + first, p->ring, n - first);
++	EnterCriticalSection(&p->lock);
 +	p->head = (p->head + n) % SOCK_PUMP_RING_SIZE;
 +	p->len -= n;
++	was_full = p->sleeping;
 +	LeaveCriticalSection(&p->lock);
-+	/* the pump only waits for room when the ring is full */
++	/* only a pump in its wait needs the event */
 +	if (was_full)
 +		SetEvent(p->room_evt);
 +	return (int)n;
@@ -511,7 +568,7 @@ index c4eceae..7d6b019 100644
  /* called before any other calls to socketio_ functions */
  int
  socketio_initialize()
-@@ -378,6 +866,9 @@ socketio_recv(struct w32_io* pio, void *buf, size_t len, int flags)
+@@ -378,6 +923,9 @@ socketio_recv(struct w32_io* pio, void *buf, size_t len, int flags)
  		return -1;
  	}
  
@@ -521,7 +578,7 @@ index c4eceae..7d6b019 100644
  	/* TODO - ensure socket is in accepted or connected state */
  	/* /io is initiated and pending */
  	if (pio->read_details.pending) {
-@@ -533,6 +1024,9 @@ socketio_send(struct w32_io* pio, const void *buf, size_t len, int flags)
+@@ -533,6 +1081,9 @@ socketio_send(struct w32_io* pio, const void *buf, size_t len, int flags)
  		return -1;
  	}
  
@@ -531,7 +588,7 @@ index c4eceae..7d6b019 100644
  	/* TODO - ensure socket is in accepted or connected state */
  	/* if io is already pending */
  	if (pio->write_details.pending) {
-@@ -623,6 +1117,12 @@ socketio_send(struct w32_io* pio, const void *buf, size_t len, int flags)
+@@ -623,6 +1174,12 @@ socketio_send(struct w32_io* pio, const void *buf, size_t len, int flags)
  int
  socketio_shutdown(struct w32_io* pio, int how)
  {
@@ -544,7 +601,7 @@ index c4eceae..7d6b019 100644
  	SET_ERRNO_ON_ERROR(shutdown(pio->sock, how));
  }
  
-@@ -631,7 +1131,21 @@ int
+@@ -631,7 +1188,21 @@ int
  socketio_close(struct w32_io* pio)
  {
  	debug4("close - io:%p", pio);
@@ -567,7 +624,7 @@ index c4eceae..7d6b019 100644
  	/* wait for pending io to abort */
  	SleepEx(0, TRUE);
  	if ((pio->internal.state == SOCK_READY) &&
-@@ -929,6 +1443,8 @@ socketio_is_io_available(struct w32_io* pio, BOOL rd)
+@@ -929,6 +1500,8 @@ socketio_is_io_available(struct w32_io* pio, BOOL rd)
  		}
  
  		return FALSE;
@@ -576,7 +633,7 @@ index c4eceae..7d6b019 100644
  	} else if (rd) {
  		if (pio->read_details.remaining || pio->read_details.error)
  			return TRUE;
-@@ -961,11 +1477,11 @@ socketio_on_select(struct w32_io* pio, BOOL rd)
+@@ -961,11 +1534,11 @@ socketio_on_select(struct w32_io* pio, BOOL rd)
  				return;
  			}
  	} else if(sock_state == SOCK_READY) {

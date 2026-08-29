@@ -7,8 +7,9 @@
     Windows ships reads a pipe on its stdin 3KB at a time with a thread per
     read -- which held a push from a Windows machine at about 17MB/s however
     fast the link was (WINDOWS-PORT.md, "Moar Speed!") -- and, once the link
-    is fast enough to show it, creates a thread for every write to stdout and
-    a named pipe for every pass through its main loop.  This script builds
+    is fast enough to show it, creates a thread for every write to stdout,
+    a named pipe for every pass through its main loop, and runs AES-GCM
+    slower than the OS's own CNG does.  This script builds
     the same client, Microsoft's Win32-OpenSSH, from the pinned copy in the
     openssh/ submodule with the patches in win32/openssh/patches applied
     (see BUILD-CMAKE.md for what each one does), and leaves ssh.exe in the
