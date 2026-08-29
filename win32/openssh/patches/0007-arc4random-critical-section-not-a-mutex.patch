@@ -1,0 +1,49 @@
+diff --git a/openbsd-compat/arc4random_win.h b/openbsd-compat/arc4random_win.h
+index deec8a1..54ac375 100644
+--- a/openbsd-compat/arc4random_win.h
++++ b/openbsd-compat/arc4random_win.h
+@@ -25,23 +25,31 @@
+ 
+ #include <windows.h>
+ 
+-static volatile HANDLE arc4random_mtx = NULL;
+-
+ /*
+- * Initialize the mutex on the first lock attempt. On collision, each thread
+- * will attempt to allocate a mutex and compare-and-swap it into place as the
+- * global mutex. On failure to swap in the global mutex, the mutex is closed.
++ * A critical section, initialised once.  This used to be a kernel Mutex,
++ * which costs a WaitForSingleObject and a ReleaseMutex -- two system calls --
++ * per arc4random call, and the packet layer calls arc4random_buf() for the
++ * padding of every packet it sends: on a 20 Gbit link that was a tenth of
++ * the sending thread.  An uncontended critical section is a few user-mode
++ * instructions.
+  */
++static INIT_ONCE arc4random_once = INIT_ONCE_STATIC_INIT;
++static CRITICAL_SECTION arc4random_cs;
++
++static BOOL CALLBACK
++_arc4_lock_init(PINIT_ONCE once, PVOID param, PVOID *context)
++{
++	(void)once; (void)param; (void)context;
++	InitializeCriticalSection(&arc4random_cs);
++	return TRUE;
++}
++
+ #define _ARC4_LOCK() { \
+-	if (!arc4random_mtx) { \
+-		HANDLE p = CreateMutex(NULL, FALSE, NULL); \
+-		if (InterlockedCompareExchangePointer((void **)&arc4random_mtx, (void *)p, NULL)) \
+-			CloseHandle(p); \
+-	} \
+-	WaitForSingleObject(arc4random_mtx, INFINITE); \
+-} \
++	InitOnceExecuteOnce(&arc4random_once, _arc4_lock_init, NULL, NULL); \
++	EnterCriticalSection(&arc4random_cs); \
++}
+ 
+-#define _ARC4_UNLOCK() ReleaseMutex(arc4random_mtx)
++#define _ARC4_UNLOCK() LeaveCriticalSection(&arc4random_cs)
+ 
+ static inline void
+ _getentropy_fail(void)

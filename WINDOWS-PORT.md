@@ -15914,4 +15914,138 @@ completed (exit code 0)
   11% since the pump now drains too fast and sleeps constantly. I'll fix this by
   adding a brief spin before sleep in each of the four pump threads so it stays
   awake during bulk flow.
+
+● Commit caca7c5e is pushed; now the packet-size experiment — a client that
+  advertises 128 KB packets on its session channel, measured on a pull.
+
+● All done — commit caca7c5e is pushed and CI is green (run 33223220496).
+
+  What went in
+
+  - 0006 — AES-GCM through CNG (BCryptEncrypt/Decrypt, GCM mode). Only the bulk
+    cipher moves; KEX, signatures, other ciphers stay in libcrypto.dll.
+    SSH_AESGCM_BACKEND=libcrypto forces the old path. Measured on the same core:
+    2.2 GB/s vs 1.6 GB/s.
+  - 0005 — sshbuf_reset() keeps its allocation, zeroes only to a high-water mark
+    (was: shrink to 256 B, zero all, regrow next packet).
+  - 0001/0002 — pumps spin before sleeping, and the main thread signals only a
+    sleeping pump. NtSetEvent (11% after the CNG change) is gone from the
+    profile.
+  - Docs: BUILD-CMAKE patch table (0005/0006 rows, 0002 spin), README,
+    RELEASE-NOTES, workflow release body, build-openssh.ps1 header.
+
+  Numbers (4 GB, aes128-gcm, Thunderbolt, hash-checked)
+
+  ┌────────────────────┬─────────────┬──────────────────────────────────────┐
+  │                    │ before this │                 now                  │
+  │                    │    commit   │                                      │
+  ├────────────────────┼─────────────┼──────────────────────────────────────┤
+  │ raw ssh send       │             │ ~1400 MB/s (wall-clock incl.         │
+  │ (transfer phase)   │ ~1080 MB/s  │ connect: ~1200; libcrypto path       │
+  │                    │             │ ~1090)                               │
+  ├────────────────────┼─────────────┼──────────────────────────────────────┤
+  │ raw ssh receive to │ ~1070       │ ~1260                                │
+  │  file              │             │                                      │
+  ├────────────────────┼─────────────┼──────────────────────────────────────┤
+  │ rsync push         │ 862         │ 997 MB/s                             │
+  ├────────────────────┼─────────────┼──────────────────────────────────────┤
+  │ rsync pull         │ 837         │ 982 MB/s                             │
+  └────────────────────┴─────────────┴──────────────────────────────────────┘
+
+  Five back-to-back sends stayed within 3.31–3.44 s with the CPU at 186–189%
+  performance, so no thermal drift. Full suite passed on x64 and x86 against the
+  Thunderbolt box (24 tests each, ssh transfers included).
+
+  Is 32 KB packet size protocol-fixed?
+
+  No — it's negotiated per channel. Each side advertises its own maximum in
+  CHANNEL_OPEN (CHAN_SES_PACKET_DEFAULT = 32 KB in both OpenSSH and Microsoft's
+  port; ssh.c:2263), and a sender caps every data packet at the peer's value.
+  The only hard limit is PACKET_MAX_SIZE (256 KB) on the reader side.
+
+  I tried it: an experiment build with SSH_PACKETMAX_KB raising the client's
+  advertised size on pulls. Receive times went the wrong way — 32 KB: 3.6–3.7 s,
+  64 KB: 4.1–4.4 s, 128 KB: 4.5 s; 256 KB fails outright (packet + framing
+  exceeds PACKET_MAX_SIZE). The Linux sshd still reads its child's pipe 32 KB at
+  a time, so bigger packets only add coalescing and burstier crypto/copies.
+  Reverted, not committed. Pushes are capped by the Linux sshd's 32 KB
+  regardless.
+
+  Cleanup / reminders
+
+  - C:\Users\Claude\rsync-perf deleted; Linux /tmp is back to 16 MB used.
+  - PERF.txt and windows-perf-thunderbolt-networking.png are still untracked, as
+    before. No tag was made this time.
+  - ufw on the Thunderbolt box is still disabled — re-enable it when you're done
+    testing.
+
+✻ Baked for 12m 12s · done 2:26 AM
+
+❯ Ok excellent, is there anything else you can do to optimize this? Let's leave
+  multithreading out of it.
+
+● Profile of the current build, main thread only (the pump threads are otherwise
+  idle/spinning, i.e. never the limit):
+
+  ┌───────────────────────────────────────────────────────┬────────┬─────────┐
+  │                                                       │  send  │ receive │
+  ├───────────────────────────────────────────────────────┼────────┼─────────┤
+  │ AES-GCM in CNG                                        │ 42–48% │ 47–54%  │
+  ├───────────────────────────────────────────────────────┼────────┼─────────┤
+  │ memcpy                                                │ 22–26% │ 20–26%  │
+  ├───────────────────────────────────────────────────────┼────────┼─────────┤
+  │ waiting for the peer (SleepEx in select)              │ 8%     │ 8–15%   │
+  ├───────────────────────────────────────────────────────┼────────┼─────────┤
+  │ arc4random's kernel mutex (NtReleaseMutant +          │ ~10%   │ —       │
+  │ contended CS)                                         │        │         │
+  ├───────────────────────────────────────────────────────┼────────┼─────────┤
+  │ sshbuf_reset zeroing, CNG per-call lookup, misc       │ ~5%    │ ~5%     │
+  └───────────────────────────────────────────────────────┴────────┴─────────┘
+
+  Two experiments on the way to this, both negative: a larger window on pulls (8
+  MB: same/slower, 32 MB: 4.7 s vs 3.4 s, and the idle share rises — the
+  burstier sender starves us), and the packet size you already saw. The 2 MB /
+  32 KB defaults are the right ones. Also: the 16% NtCreateThreadEx in an
+  earlier receive profile was an artifact of the sampler inheriting a NUL-device
+  stdin, which still takes the thread-per-read path; with a pipe or -n it's
+  gone, so rsync never sees it.
+
+  What's left, single-threaded, in order of payoff per effort:
+
+  1. arc4random lock → critical section (openbsd-compat/arc4random_win.h).
+     OpenSSH fills every packet's padding with arc4random_buf(), and the Windows
+     port guards that with a kernel Mutex — a syscall pair per packet. It's
+     ~10% of the send thread; a CRITICAL_SECTION (or an SRW lock) makes it a few
+     instructions. Tiny patch, no behavioural change. Expect send ~1400 → ~1500
+     MB/s, rsync push up a few percent.
+  2. Zero-copy handoff to the pumps (~7% each way). Each byte is still copied
+     three times per direction: pump ring → channel sshbuf → packet sshbuf →
+     socket ring on send, and the mirror on receive. The socket-ring copy could
+     go by swapping the packet output buffer's storage with the pump instead of
+     copying into it, but that means a hook in packet.c, i.e. a patch to core
+     OpenSSH rather than the compat layer. The channel→packet copy
+     (sshpkt_put_stringb) is deeper still. Worth doing only if you want the last
+     10–15%.
+  3. sshbuf_reset zeroing (2–3%): patch 0005 still explicit_bzeros the used part
+     of the packet buffers — 32 KB per packet. Skipping it for the two
+     packet-state buffers is trivial but is a deliberate hygiene step upstream;
+     I'd leave it.
+  4. Console/NUL stdin thread-per-read: doesn't affect rsync, but a plain ssh
+     host cmd > file without -n pays 16% for it. Routing char devices to the
+     pump would fix it; low priority for this port.
+
+  What isn't on the table: the cipher itself. CNG AES-GCM runs at ~2.2 GB/s on
+  this i5-8350U (no VAES), so with everything else removed the single-core
+  ceiling is about 2.2 GB/s, and we're at ~1.4. The 8–15% "waiting for the peer"
+  is flow control against Linux sshd and not ours to fix.
+
+  Recommendation: do #1 now (half an hour including tests), skip #3/#4, and
+  decide on #2 only if you want to chase the 1.5 → 1.7 GB/s range. Say the word
+  and I'll do #1.
+
+✻ Crunched for 4m 7s · done 2:36 AM
+
+❯ Go for 1, then ask again. Also: for changes to openssh, do we have clean
+  patches, or does it make sense to put this into our own specific translation
+  units?
 ```

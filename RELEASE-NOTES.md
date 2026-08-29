@@ -91,7 +91,8 @@ What changed since v3.5.0-gf800ace2
     and reallocated for every packet is kept, and AES-GCM runs through
     Windows CNG (BCrypt) instead of LibreSSL's EVP, which is 35% faster on
     the same core; set SSH_AESGCM_BACKEND=libcrypto to get the old path.
-    None of it shows on Ethernet; on a 20 Gbit link the client went from
+    The random padding drawn for every packet no longer takes a kernel
+    mutex to do it.  None of it shows on Ethernet; on a 20 Gbit link the client went from
     ~340 MB/s sending and ~220 MB/s receiving to ~1.4 GB/s sending and
     ~1.26 GB/s receiving (rsync: ~1 GB/s pushing, ~980 MB/s pulling).
 

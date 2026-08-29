@@ -135,6 +135,7 @@ the patches in `win32/openssh/patches/`, which is where the fixes live:
 | `0004` | A native `pselect()`. Without one, OpenSSH's portable fallback creates a *notify pipe on every call* to close a signal race that this port's alertable waits do not have — and on Windows `pipe()` is a named pipe, an open and two closes, per packet. This alone took the client from ~340 to ~800 MB/s on a 20 Gbit link. |
 | `0005` | `sshbuf_reset()` keeps its allocation and zeroes only what was used since the last reset (a high-water mark), instead of shrinking to 256 bytes, zeroing the whole buffer and growing it again on the next packet. Two `realloc`s and a needless `memset` per packet gone; ~6% on a 20 Gbit link. |
 | `0006` | AES-GCM through Windows CNG (`BCryptEncrypt`/`BCryptDecrypt` with `BCRYPT_CHAIN_MODE_GCM`) instead of LibreSSL's EVP: 2.2 GB/s against 1.6 GB/s at 32 KB on the same core. Only the bulk cipher moves; key exchange, signatures, the other ciphers and MACs stay in `libcrypto.dll`. `SSH_AESGCM_BACKEND=libcrypto` in the environment forces the old path. With `0005`, and the pumps no longer signalling per packet, the client sends at ~1400 MB/s and receives at ~1260 MB/s (rsync ~1000 MB/s pushing, ~980 MB/s pulling). |
+| `0007` | `arc4random()` locks a critical section instead of a kernel Mutex. The packet layer draws random padding for every packet it sends, and the Mutex cost two system calls per draw — a tenth of the sending thread on a 20 Gbit link. |
 
 To build it:
 
