@@ -15,7 +15,7 @@ index 3cc5020..830bf90 100644
  
  
 diff --git a/contrib/win32/win32compat/w32fd.c b/contrib/win32/win32compat/w32fd.c
-index b4c4368..6797314 100644
+index b4c4368..b972c71 100644
 --- a/contrib/win32/win32compat/w32fd.c
 +++ b/contrib/win32/win32compat/w32fd.c
 @@ -40,6 +40,7 @@
@@ -26,7 +26,24 @@ index b4c4368..6797314 100644
  
  #include "w32fd.h"
  #include "signal_internal.h"
-@@ -728,6 +729,48 @@ w32_fcntl(int fd, int cmd, ... /* arg */)
+@@ -202,6 +203,16 @@ fd_table_clear(int index)
+ 	FD_CLR(index, &(fd_table.occupied));
+ }
+ 
++/* the w32_io behind a fd, for the socket pump's zero-copy send
++ * (rsync-windows, win32/openssh/win32sendbuf.c); NULL if none */
++struct w32_io*
++w32_io_from_fd(int fd)
++{
++	if (fd < 0 || fd > MAX_FDS - 1)
++		return NULL;
++	return fd_table.w32_ios[fd];
++}
++
+ void 
+ init_prog_paths()
+ {
+@@ -728,6 +739,48 @@ w32_fcntl(int fd, int cmd, ... /* arg */)
  	return ret;
  }
  

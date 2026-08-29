@@ -38,9 +38,10 @@ for every write to stdout, a named pipe created for every pass through the
 main loop by OpenSSH's portable `pselect()` fallback, and socket sends and
 receives done on the crypto thread rather than beside it — plus two staging
 copies per byte removed, a buffer that was freed and reallocated per packet
-kept, a kernel mutex taken for every packet's random padding replaced, and
+kept, a kernel mutex taken for every packet's random padding replaced, the
+encrypted packet handed to the socket thread rather than copied to it, and
 AES-GCM run through Windows CNG rather than LibreSSL's EVP, which
-together took it from ~340MB/s sending and ~220MB/s receiving to ~1.4GB/s
+together took it from ~340MB/s sending and ~220MB/s receiving to ~1.5GB/s
 sending and ~1.26GB/s receiving over 20Gbit Thunderbolt networking
 (rsync: ~1GB/s pushing, ~980MB/s pulling). `rsync.exe`
 prefers it whenever it sits in the same directory. It uses the

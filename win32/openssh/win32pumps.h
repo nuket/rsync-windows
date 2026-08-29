@@ -48,4 +48,20 @@ void sockio_pump_shutdown(struct w32_io *pio, int how);
  * socket was never pumped, in which case the caller closes it. */
 BOOL sockio_pump_close(struct w32_io *pio);
 
+/* ---- zero-copy send (win32sendbuf.c) --------------------------------- */
+
+/* The w32_io behind a fd (w32fd.c); NULL if there is none. */
+struct w32_io *w32_io_from_fd(int fd);
+/* TRUE if a buffer of len bytes is worth handing over whole and there is
+ * room for it in the queue: the caller then swaps the buffer's storage
+ * for a spare and passes the storage to sockio_pump_send_owned(). */
+BOOL sockio_pump_handoff_ok(struct w32_io *pio, size_t len);
+/* A spare block of at least min_alloc bytes from the pump's free list, or
+ * NULL; *alloc gets its size.  Return an unused one with sockio_pump_spare_back(). */
+char *sockio_pump_spare(struct w32_io *pio, size_t min_alloc, size_t *alloc);
+void sockio_pump_spare_back(struct w32_io *pio, char *d, size_t alloc);
+/* Queue a malloc()ed block for sending: len bytes at d+off, alloc bytes
+ * in all.  The pump owns d from here and frees or recycles it. */
+void sockio_pump_send_owned(struct w32_io *pio, char *d, size_t off, size_t len, size_t alloc);
+
 #endif /* WIN32PUMPS_H */

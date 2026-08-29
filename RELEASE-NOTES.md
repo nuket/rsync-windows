@@ -69,7 +69,7 @@ longer take many times longer than a full copy.
   - The ssh.exe in the zip is Microsoft's own Win32-OpenSSH client with its
     I/O fixed.  The one Windows ships reads 3 KB at a time and holds any
     transfer *from* a Windows machine at about 17 MB/s; this one reaches the
-    wire on Ethernet, and ~1.4 GB/s sending / ~1.26 GB/s receiving over
+    wire on Ethernet, and ~1.5 GB/s sending / ~1.26 GB/s receiving over
     20 Gbit Thunderbolt networking (rsync ~1 GB/s pushing, ~980 MB/s
     pulling; a laptop core running AES-GCM is the limit there).  Same
     ~/.ssh, same ssh-agent, same known_hosts.
@@ -92,9 +92,11 @@ What changed since v3.5.0-gf800ace2
     Windows CNG (BCrypt) instead of LibreSSL's EVP, which is 35% faster on
     the same core; set SSH_AESGCM_BACKEND=libcrypto to get the old path.
     The random padding drawn for every packet no longer takes a kernel
-    mutex to do it.  None of it shows on Ethernet; on a 20 Gbit link the client went from
-    ~340 MB/s sending and ~220 MB/s receiving to ~1.4 GB/s sending and
-    ~1.26 GB/s receiving (rsync: ~1 GB/s pushing, ~980 MB/s pulling).
+    mutex to do it, and each encrypted packet is handed to the socket
+    thread rather than copied to it.  None of it shows on Ethernet; on a
+    20 Gbit link the client went from ~340 MB/s sending and ~220 MB/s
+    receiving to ~1.5 GB/s sending and ~1.26 GB/s receiving (rsync: ~1
+    GB/s pushing, ~980 MB/s pulling).
 
 What changed in v3.5.0-gf800ace2
 --------------------------------

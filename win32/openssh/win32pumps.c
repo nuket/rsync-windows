@@ -687,13 +687,38 @@ syncio_pump_close(struct w32_io *pio)
 #define SOCK_PUMP_CHUNK     (1024 * 1024)
 #define SOCK_PUMP_FLUSH_MS  10000
 
+/*
+ * The send side is a queue of blocks rather than a ring, so that the
+ * packet layer can hand over its output buffer's storage whole instead of
+ * copying it (win32sendbuf.c): a block is malloc()ed memory the pump owns,
+ * sends from, and then keeps on a short free list for the packet layer to
+ * take back in exchange for its next full buffer.  Copied sends -- small
+ * packets, and anything not from the packet layer -- go into blocks of
+ * their own and coalesce into the tail block while it has room.  The byte
+ * limit and "writable" are as for the ring; SOCK_WQUEUE_CAP bounds the
+ * count.
+ */
+#define SOCK_WQUEUE_CAP     256          /* blocks queued at once */
+#define SOCK_WFREE_CAP      32           /* blocks kept for reuse */
+#define SOCK_WCOPY_BLOCK    (256 * 1024) /* a block for copied sends */
+#define SOCK_HANDOFF_MIN    (8 * 1024)   /* below this a copy beats swapping an allocation */
+
+struct sock_wblock {
+	char  *d;
+	size_t off, len, alloc;   /* len bytes at d+off; alloc bytes in all */
+	BOOL   pinned;            /* the main thread is copying into it: not done even at len 0 */
+};
+
 struct sock_wpump {
 	SOCKET s;
 	HANDLE thread;
-	HANDLE data_evt;          /* auto-reset: the ring has bytes */
+	HANDLE data_evt;          /* auto-reset: the queue has bytes */
 	CRITICAL_SECTION lock;
-	char  *ring;
-	DWORD  head, len;
+	struct sock_wblock q[SOCK_WQUEUE_CAP];
+	DWORD  qhead, qn;         /* blocks in flight, in order */
+	struct sock_wblock freel[SOCK_WFREE_CAP];
+	DWORD  nfree;
+	DWORD  len;               /* bytes queued, over all blocks */
 	int    err;               /* first WSA error; the pump is dead after it */
 	BOOL   waiting;           /* main thread wants room; wake it when there is */
 	BOOL   apc_queued;
@@ -742,13 +767,39 @@ sockio_pump_wanted(struct w32_io *pio)
 
 /* ---- send ------------------------------------------------------------ */
 
+/* under the lock: a finished block goes to the free list, or away */
+static void
+sock_wblock_recycle(struct sock_wpump *p, char *d, size_t alloc)
+{
+	if (p->nfree < SOCK_WFREE_CAP) {
+		p->freel[p->nfree].d = d;
+		p->freel[p->nfree].alloc = alloc;
+		p->nfree++;
+	} else
+		free(d);
+}
+
+/* under the lock: the pump is dead, nothing queued will go */
+static void
+sock_wpump_drop_all(struct sock_wpump *p)
+{
+	while (p->qn) {
+		free(p->q[p->qhead].d);
+		p->qhead = (p->qhead + 1) % SOCK_WQUEUE_CAP;
+		p->qn--;
+	}
+	p->len = 0;
+}
+
 static unsigned __stdcall
 SockWpumpThread(_In_ LPVOID lpParameter)
 {
 	struct sock_wpump *p = (struct sock_wpump *)lpParameter;
 
 	for (;;) {
-		DWORD head, take;
+		struct sock_wblock *b;
+		char *d;
+		size_t off, take;
 		BOOL wake = FALSE;
 		int sent;
 
@@ -774,22 +825,39 @@ SockWpumpThread(_In_ LPVOID lpParameter)
 			p->sleeping = FALSE;
 			continue;
 		}
-		head = p->head;
-		take = min(p->len, SOCK_PUMP_CHUNK);
-		take = min(take, SOCK_PUMP_RING_SIZE - head);
+		b = &p->q[p->qhead];
+		if (b->len == 0) {
+			/* a pinned block still being filled at the head, with
+			 * published bytes behind it: cannot happen with one
+			 * producer, which fills the tail; but never send from
+			 * an empty block */
+			LeaveCriticalSection(&p->lock);
+			SwitchToThread();
+			continue;
+		}
+		d = b->d;
+		off = b->off;
+		take = min(b->len, SOCK_PUMP_CHUNK);
 		LeaveCriticalSection(&p->lock);
 
-		/* the region [head, head+take) is ours until we advance head:
-		 * the main thread only ever appends at the tail */
-		sent = send(p->s, p->ring + head, (int)take, 0);
+		/* [off, off+take) of the head block is ours until we advance
+		 * it: the main thread only appends past len, and only pops
+		 * nothing -- popping is ours */
+		sent = send(p->s, d + off, (int)take, 0);
 
 		EnterCriticalSection(&p->lock);
 		if (sent == SOCKET_ERROR) {
 			p->err = WSAGetLastError();
-			p->len = 0;
+			sock_wpump_drop_all(p);
 		} else {
-			p->head = (p->head + sent) % SOCK_PUMP_RING_SIZE;
+			b->off += sent;
+			b->len -= sent;
 			p->len -= sent;
+			if (b->len == 0 && !b->pinned) {
+				sock_wblock_recycle(p, b->d, b->alloc);
+				p->qhead = (p->qhead + 1) % SOCK_WQUEUE_CAP;
+				p->qn--;
+			}
 		}
 		if (p->waiting && !p->apc_queued) {
 			p->waiting = FALSE;
@@ -848,7 +916,9 @@ sock_wpump_stop(struct sock_wpump *p, BOOL socket_closed)
 	CloseHandle(p->thread);
 	CloseHandle(p->data_evt);
 	DeleteCriticalSection(&p->lock);
-	free(p->ring);
+	sock_wpump_drop_all(p);
+	while (p->nfree)
+		free(p->freel[--p->nfree].d);
 	free(p);
 }
 
@@ -870,8 +940,6 @@ sock_wpump_start(struct w32_io *pio)
 		return NULL;
 	}
 	if (!(p = calloc(1, sizeof *p)))
-		goto fail;
-	if (!(p->ring = malloc(SOCK_PUMP_RING_SIZE)))
 		goto fail;
 	if (!(p->data_evt = CreateEventW(NULL, FALSE, FALSE, NULL)))
 		goto fail;
@@ -896,27 +964,50 @@ fail:
 	if (p) {
 		if (p->data_evt)
 			CloseHandle(p->data_evt);
-		free(p->ring);
 		free(p);
 	}
 	return NULL;
 }
 
-int
-sockio_pump_send(struct w32_io *pio, const void *buf, size_t len)
+/* under the lock: the smallest free block of at least min_alloc bytes */
+static BOOL
+sock_wpump_take_free(struct sock_wpump *p, size_t min_alloc, char **d, size_t *alloc)
 {
-	struct sock_pumps *c = sock_pumps_get(pio);
-	struct sock_wpump *p = c ? c->wr : NULL;
-	DWORD space, n, tail, first;
-	BOOL was_empty;
+	DWORD i, best = SOCK_WFREE_CAP;
 
-	if (!c) {
-		errno = ENOMEM;
-		return -1;
-	}
-	if (!p && !(p = sock_wpump_start(pio)))
-		return -1;
+	for (i = 0; i < p->nfree; i++)
+		if (p->freel[i].alloc >= min_alloc &&
+		    (best == SOCK_WFREE_CAP || p->freel[i].alloc < p->freel[best].alloc))
+			best = i;
+	if (best == SOCK_WFREE_CAP)
+		return FALSE;
+	*d = p->freel[best].d;
+	*alloc = p->freel[best].alloc;
+	p->freel[best] = p->freel[--p->nfree];
+	return TRUE;
+}
 
+/* under the lock: wait-free append of an empty (or given) block at the tail */
+static struct sock_wblock *
+sock_wpump_push(struct sock_wpump *p, char *d, size_t off, size_t len, size_t alloc)
+{
+	struct sock_wblock *b = &p->q[(p->qhead + p->qn) % SOCK_WQUEUE_CAP];
+
+	b->d = d;
+	b->off = off;
+	b->len = len;
+	b->alloc = alloc;
+	b->pinned = FALSE;
+	p->qn++;
+	p->len += (DWORD)len;
+	return b;
+}
+
+/* Wait (or say EAGAIN) until the queue can take more.  Returns with the
+ * lock held and the room in bytes, or -1 with errno and the lock released. */
+static int
+sock_wpump_room(struct w32_io *pio, struct sock_wpump *p, DWORD *space)
+{
 	for (;;) {
 		EnterCriticalSection(&p->lock);
 		if (p->err) {
@@ -926,9 +1017,9 @@ sockio_pump_send(struct w32_io *pio, const void *buf, size_t len)
 			debug3("send - pump ERROR:%d, io:%p", err, pio);
 			return -1;
 		}
-		space = SOCK_PUMP_RING_SIZE - p->len;
-		if (space)
-			break;
+		*space = p->len < SOCK_PUMP_RING_SIZE ? SOCK_PUMP_RING_SIZE - p->len : 0;
+		if (*space && p->qn < SOCK_WQUEUE_CAP)
+			return 0;
 		/* full: block on room, or say so */
 		p->waiting = TRUE;
 		LeaveCriticalSection(&p->lock);
@@ -939,16 +1030,58 @@ sockio_pump_send(struct w32_io *pio, const void *buf, size_t len)
 		if (wait_for_any_event(NULL, 0, INFINITE) == -1)
 			return -1;
 	}
-	/* reserve under the lock, copy outside it, publish under it: the
-	 * region past len is invisible to the pump until len says so */
+}
+
+/* send() by copying: into the tail block while it has room, else a block
+ * of its own.  The block is pinned while the copy runs outside the lock,
+ * so the pump cannot retire it underneath; len says when the bytes are
+ * there. */
+int
+sockio_pump_send(struct w32_io *pio, const void *buf, size_t len)
+{
+	struct sock_pumps *c = sock_pumps_get(pio);
+	struct sock_wpump *p = c ? c->wr : NULL;
+	struct sock_wblock *b = NULL;
+	DWORD space, n;
+	char *dst, *d;
+	size_t alloc;
+	BOOL was_empty;
+
+	if (!c) {
+		errno = ENOMEM;
+		return -1;
+	}
+	if (!p && !(p = sock_wpump_start(pio)))
+		return -1;
+	if (sock_wpump_room(pio, p, &space) != 0)
+		return -1;
+	/* holding the lock */
 	n = (DWORD)min((size_t)space, len);
-	tail = (p->head + p->len) % SOCK_PUMP_RING_SIZE;
+	if (p->qn) {
+		b = &p->q[(p->qhead + p->qn - 1) % SOCK_WQUEUE_CAP];
+		if (b->alloc - (b->off + b->len) < n)
+			b = NULL;
+	}
+	if (b == NULL) {
+		if (!sock_wpump_take_free(p, n, &d, &alloc)) {
+			alloc = max(n, SOCK_WCOPY_BLOCK);
+			if ((d = malloc(alloc)) == NULL) {
+				LeaveCriticalSection(&p->lock);
+				errno = ENOMEM;
+				return -1;
+			}
+		}
+		b = sock_wpump_push(p, d, 0, 0, alloc);
+	}
+	b->pinned = TRUE;
+	dst = b->d + b->off + b->len;
 	LeaveCriticalSection(&p->lock);
-	first = min(n, SOCK_PUMP_RING_SIZE - tail);
-	memcpy(p->ring + tail, buf, first);
-	if (n > first)
-		memcpy(p->ring, (const char *)buf + first, n - first);
+
+	memcpy(dst, buf, n);
+
 	EnterCriticalSection(&p->lock);
+	b->len += n;
+	b->pinned = FALSE;
 	p->len += n;
 	was_empty = p->sleeping;
 	LeaveCriticalSection(&p->lock);
@@ -956,6 +1089,74 @@ sockio_pump_send(struct w32_io *pio, const void *buf, size_t len)
 	if (was_empty)
 		SetEvent(p->data_evt);
 	return (int)n;
+}
+
+/* ---- zero-copy send: the packet layer's buffer, whole ----------------- */
+
+BOOL
+sockio_pump_handoff_ok(struct w32_io *pio, size_t len)
+{
+	struct sock_pumps *c = sock_pumps_get(pio);
+	struct sock_wpump *p = c ? c->wr : NULL;
+	BOOL ok;
+
+	if (len < SOCK_HANDOFF_MIN || len > SOCK_PUMP_RING_SIZE)
+		return FALSE;
+	if (!p && !(p = sock_wpump_start(pio)))
+		return FALSE;
+	EnterCriticalSection(&p->lock);
+	ok = !p->err && p->len + len <= SOCK_PUMP_RING_SIZE && p->qn < SOCK_WQUEUE_CAP;
+	LeaveCriticalSection(&p->lock);
+	return ok;
+}
+
+char *
+sockio_pump_spare(struct w32_io *pio, size_t min_alloc, size_t *alloc)
+{
+	struct sock_pumps *c = (struct sock_pumps *)pio->internal.context;
+	struct sock_wpump *p = c ? c->wr : NULL;
+	char *d = NULL;
+
+	*alloc = 0;
+	if (!p)
+		return NULL;
+	EnterCriticalSection(&p->lock);
+	if (!sock_wpump_take_free(p, min_alloc, &d, alloc))
+		d = NULL;
+	LeaveCriticalSection(&p->lock);
+	return d;
+}
+
+void
+sockio_pump_spare_back(struct w32_io *pio, char *d, size_t alloc)
+{
+	struct sock_pumps *c = (struct sock_pumps *)pio->internal.context;
+	struct sock_wpump *p = c ? c->wr : NULL;
+
+	if (!p) {
+		free(d);
+		return;
+	}
+	EnterCriticalSection(&p->lock);
+	sock_wblock_recycle(p, d, alloc);
+	LeaveCriticalSection(&p->lock);
+}
+
+/* The caller checked sockio_pump_handoff_ok() and nothing else appends
+ * meanwhile (one producer), so this cannot fail. */
+void
+sockio_pump_send_owned(struct w32_io *pio, char *d, size_t off, size_t len, size_t alloc)
+{
+	struct sock_pumps *c = (struct sock_pumps *)pio->internal.context;
+	struct sock_wpump *p = c->wr;
+	BOOL was_empty;
+
+	EnterCriticalSection(&p->lock);
+	sock_wpump_push(p, d, off, len, alloc);
+	was_empty = p->sleeping;
+	LeaveCriticalSection(&p->lock);
+	if (was_empty)
+		SetEvent(p->data_evt);
 }
 
 /* ---- recv ------------------------------------------------------------ */
@@ -1158,7 +1359,7 @@ sockio_pump_available(struct w32_io *pio, BOOL rd)
 		if (!p)
 			return TRUE;   /* nothing queued yet: the first send() will not block */
 		EnterCriticalSection(&p->lock);
-		ready = p->err || p->len < SOCK_PUMP_RING_SIZE;
+		ready = p->err || (p->len < SOCK_PUMP_RING_SIZE && p->qn < SOCK_WQUEUE_CAP);
 		if (!ready)
 			p->waiting = TRUE;
 		LeaveCriticalSection(&p->lock);

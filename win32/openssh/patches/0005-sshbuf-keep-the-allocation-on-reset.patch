@@ -1,5 +1,5 @@
 diff --git a/sshbuf.c b/sshbuf.c
-index 1b714e5..42f8451 100644
+index 1b714e5..d4e7cc9 100644
 --- a/sshbuf.c
 +++ b/sshbuf.c
 @@ -46,6 +46,7 @@ struct sshbuf {
@@ -49,3 +49,68 @@ index 1b714e5..42f8451 100644
  	if (dpp != NULL)
  		*dpp = dp;
  	return 0;
+@@ -408,6 +418,45 @@ sshbuf_consume(struct sshbuf *buf, size_t len)
+ 	return 0;
+ }
+ 
++/*
++ * rsync-windows: hand the buffer's storage to a caller that will use it
++ * asynchronously (the socket pump sends it as it stands), taking *dp of
++ * *allocp bytes in exchange, or a fresh allocation of the same size when
++ * *dp is NULL.  The buffer looks unchanged from its own point of view --
++ * off and size stay, so the caller consumes what it took as it would
++ * after a write() -- but bytes below size in the new storage are not the
++ * old ones.  On return *dp, *allocp and *offp describe the storage given
++ * up and where its data starts.
++ */
++int
++sshbuf_swap_storage(struct sshbuf *buf, u_char **dp, size_t *allocp,
++    size_t *offp)
++{
++	u_char *nd = *dp;
++	size_t nalloc = *allocp;
++	int r;
++
++	if ((r = sshbuf_check_sanity(buf)) != 0)
++		return r;
++	if (buf->readonly || buf->refcount > 1 || buf->parent != NULL)
++		return SSH_ERR_BUFFER_READ_ONLY;
++	if (nd != NULL && (nalloc < buf->size || nalloc > buf->max_size))
++		return SSH_ERR_INVALID_ARGUMENT;
++	if (nd == NULL) {
++		nalloc = buf->alloc;
++		if ((nd = malloc(nalloc)) == NULL)
++			return SSH_ERR_ALLOC_FAIL;
++	}
++	*dp = buf->d;
++	*allocp = buf->alloc;
++	*offp = buf->off;
++	buf->d = nd;
++	buf->cd = nd;
++	buf->alloc = nalloc;
++	buf->hwm = buf->size;	/* the new storage is unknown up to there */
++	return 0;
++}
++
+ int
+ sshbuf_consume_end(struct sshbuf *buf, size_t len)
+ {
+diff --git a/sshbuf.h b/sshbuf.h
+index 6ba2c9b..ee04379 100644
+--- a/sshbuf.h
++++ b/sshbuf.h
+@@ -136,6 +136,14 @@ int	sshbuf_reserve(struct sshbuf *buf, size_t len, u_char **dpp);
+  */
+ int	sshbuf_consume(struct sshbuf *buf, size_t len);
+ 
++/*
++ * rsync-windows: hand the buffer's storage to a caller that sends it
++ * asynchronously, taking *dp (*allocp bytes; NULL for a fresh allocation)
++ * in exchange.  See sshbuf.c.
++ */
++int	sshbuf_swap_storage(struct sshbuf *buf, u_char **dp, size_t *allocp,
++    size_t *offp);
++
+ /*
+  * Consume len bytes from the end of buf
+  * Returns 0 on success, or a negative SSH_ERR_* error code on failure.

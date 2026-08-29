@@ -1,0 +1,29 @@
+diff --git a/packet.c b/packet.c
+index 75268ba..356152b 100644
+--- a/packet.c
++++ b/packet.c
+@@ -96,6 +96,9 @@
+ #include "packet.h"
+ #include "ssherr.h"
+ #include "sshbuf.h"
++#ifdef WINDOWS
++#include "win32sendbuf.h"
++#endif
+ 
+ #ifdef PACKET_DEBUG
+ #define DBG(x) x
+@@ -2112,8 +2115,14 @@ ssh_packet_write_poll(struct ssh *ssh)
+ 	int r;
+ 
+ 	if (len > 0) {
++#ifdef WINDOWS
++		/* the socket pump takes the buffer's storage instead of a copy
++		 * (rsync-windows, win32/openssh/win32sendbuf.c) */
++		len = w32_write_sshbuf(state->connection_out, state->output);
++#else
+ 		len = write(state->connection_out,
+ 		    sshbuf_ptr(state->output), len);
++#endif
+ 		if (len == -1) {
+ 			if (errno == EINTR || errno == EAGAIN ||
+ 			    errno == EWOULDBLOCK)
