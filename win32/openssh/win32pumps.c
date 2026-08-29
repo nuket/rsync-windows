@@ -62,24 +62,53 @@ PumpWakeAPC(_In_ ULONG_PTR dwParam)
 	*queued = FALSE;
 }
 
-/* Spin briefly until *v moves off `stuck' (a full ring for a reader, an
- * empty one for a writer).  ~20-50us: long enough to bridge the gap
- * between packets in a bulk flow, in which the main thread would otherwise
- * pay a SetEvent() per packet to wake a pump that had just gone to sleep
- * (11% of it, measured), short enough to be nothing when the flow has
- * stopped.  The read is unlocked and only a hint; callers re-check under
- * the lock. */
-static BOOL
-pump_spin(volatile DWORD *v, DWORD stuck)
-{
-	int i;
+/*
+ * Waking a pump costs the main thread a SetEvent(), ~2us, and done per
+ * packet that was 11% of it at 1.4GB/s.  Spinning in the pump instead
+ * (an earlier version) kept that off the main thread but burned a core
+ * per pump whenever the flow was slower than the spin -- 2.7 cores for
+ * ssh.exe with chacha20.  So a pump that finds nothing to do sleeps at
+ * once, and is woken in batches: a writer when PUMP_WAKE_BYTES have
+ * piled up, a reader when a chunk's worth of room has opened, and every
+ * writer with anything queued whenever the main thread is about to wait
+ * for something (pumps_flush_before_wait(), called from the port's one
+ * alertable wait), so nothing is held back once the main thread has
+ * nothing more to add.  One wake per four packets, and no latency added:
+ * the flush happens before the main thread would have gone idle.
+ */
+#define PUMP_WAKE_BYTES (128 * 1024)
 
-	for (i = 0; i < 4000; i++) {
-		if (*v != stuck)
-			return TRUE;
-		YieldProcessor();
+/*
+ * A pump woken from its event tends to be scheduled on the processor that
+ * woke it -- the main thread's -- and then runs its send() or WriteFile()
+ * there while the main thread waits its turn: 15% off a bulk send.  So
+ * each pump gets an ideal processor of its own, stepping two logical
+ * processors at a time from the main thread's so that on a machine with
+ * SMT it lands on another core rather than the main thread's sibling.
+ * A hint only; the scheduler still moves threads as it sees fit.
+ */
+static void
+pump_place_thread(HANDLE thread)
+{
+	static DWORD ncpu, main_ideal = MAXIMUM_PROCESSORS, next;
+	DWORD ideal;
+
+	if (ncpu == 0) {
+		SYSTEM_INFO si;
+		GetSystemInfo(&si);
+		ncpu = si.dwNumberOfProcessors;
+		/* MAXIMUM_PROCESSORS as the new value just reports the current one */
+		main_ideal = SetThreadIdealProcessor(main_thread, MAXIMUM_PROCESSORS);
+		if (main_ideal >= ncpu)
+			main_ideal = GetCurrentProcessorNumber() % ncpu;
 	}
-	return *v != stuck;
+	if (ncpu < 2)
+		return;
+	next++;
+	ideal = (main_ideal + (ncpu >= 4 && ncpu % 2 == 0 ? 2 * next : next)) % ncpu;
+	if (ideal == main_ideal)
+		ideal = (ideal + 1) % ncpu;
+	SetThreadIdealProcessor(thread, ideal);
 }
 
 /* socketio.c keeps its own copy of this mapping private */
@@ -206,16 +235,10 @@ SyncPumpThread(_In_ LPVOID lpParameter)
 		EnterCriticalSection(&p->lock);
 		space = SYNC_PUMP_RING_SIZE - p->len;
 		tail = (p->head + p->len) % SYNC_PUMP_RING_SIZE;
+		if (!space)
+			p->sleeping = TRUE;   /* under the lock: a read that follows sees it */
 		LeaveCriticalSection(&p->lock);
 		if (!space) {
-			if (pump_spin(&p->len, SYNC_PUMP_RING_SIZE))
-				continue;
-			EnterCriticalSection(&p->lock);
-			if (p->len == SYNC_PUMP_RING_SIZE)
-				p->sleeping = TRUE;
-			LeaveCriticalSection(&p->lock);
-			if (!p->sleeping)
-				continue;
 			/* timed, so a stop is noticed even if nobody reads */
 			WaitForSingleObject(p->room_evt, 200);
 			p->sleeping = FALSE;
@@ -279,6 +302,7 @@ sync_pump_start(struct w32_io *pio)
 		DeleteCriticalSection(&p->lock);
 		goto fail;
 	}
+	pump_place_thread(p->thread);
 	sync_ctx_get(pio)->rd = p;
 	debug4("sync pump started for io:%p", pio);
 	return p;
@@ -385,9 +409,9 @@ syncio_pump_read(struct w32_io *pio, void *buf, size_t len)
 	EnterCriticalSection(&p->lock);
 	p->head = (p->head + n) % SYNC_PUMP_RING_SIZE;
 	p->len -= n;
-	was_full = p->sleeping;
+	/* a sleeping pump is woken once a chunk's worth of room is there */
+	was_full = p->sleeping && SYNC_PUMP_RING_SIZE - p->len >= SYNC_PUMP_CHUNK;
 	LeaveCriticalSection(&p->lock);
-	/* only a pump in its wait needs the event */
 	if (was_full)
 		SetEvent(p->room_evt);
 	return (int)n;
@@ -425,19 +449,13 @@ SyncWpumpThread(_In_ LPVOID lpParameter)
 		head = p->head;
 		take = min(p->len, SYNC_WPUMP_CHUNK);
 		take = min(take, SYNC_WPUMP_RING_SIZE - head);
+		if (empty && !p->stop)
+			p->sleeping = TRUE;   /* under the lock: an append that follows sees it */
 		LeaveCriticalSection(&p->lock);
 
 		if (empty) {
 			if (p->stop)
 				break;
-			if (pump_spin(&p->len, 0))
-				continue;
-			EnterCriticalSection(&p->lock);
-			if (p->len == 0 && !p->stop)
-				p->sleeping = TRUE;   /* under the lock: an append that follows sets the event */
-			LeaveCriticalSection(&p->lock);
-			if (!p->sleeping)
-				continue;
 			/* timed, so a stop is noticed even if nobody writes */
 			WaitForSingleObject(p->data_evt, 200);
 			p->sleeping = FALSE;
@@ -546,6 +564,7 @@ sync_wpump_start(struct w32_io *pio)
 		DeleteCriticalSection(&p->lock);
 		goto fail;
 	}
+	pump_place_thread(p->thread);
 	if (!sync_wpump_atexit_set) {
 		atexit(sync_wpump_exit);
 		sync_wpump_atexit_set = TRUE;
@@ -619,9 +638,10 @@ syncio_pump_write(struct w32_io *pio, const void *buf, size_t len)
 		memcpy(p->ring, (const char *)buf + first, n - first);
 	EnterCriticalSection(&p->lock);
 	p->len += n;
-	was_empty = p->sleeping;
+	/* a sleeping pump is woken in batches; the flush before a wait
+	 * catches the rest */
+	was_empty = p->sleeping && p->len >= PUMP_WAKE_BYTES;
 	LeaveCriticalSection(&p->lock);
-	/* only a pump in its wait needs the event */
 	if (was_empty)
 		SetEvent(p->data_evt);
 	return (int)n;
@@ -809,16 +829,8 @@ SockWpumpThread(_In_ LPVOID lpParameter)
 				LeaveCriticalSection(&p->lock);
 				break;
 			}
-			LeaveCriticalSection(&p->lock);
-			if (pump_spin(&p->len, 0))
-				continue;
-			EnterCriticalSection(&p->lock);
-			if (p->len) {
-				LeaveCriticalSection(&p->lock);
-				continue;
-			}
 			/* say so under the lock, so an append that follows sees
-			 * a pump about to wait and sets the event */
+			 * a pump about to wait */
 			p->sleeping = TRUE;
 			LeaveCriticalSection(&p->lock);
 			WaitForSingleObject(p->data_evt, 200);
@@ -950,6 +962,7 @@ sock_wpump_start(struct w32_io *pio)
 		DeleteCriticalSection(&p->lock);
 		goto fail;
 	}
+	pump_place_thread(p->thread);
 	if (!sock_atexit_set) {
 		atexit(sock_wpump_exit);
 		sock_atexit_set = TRUE;
@@ -1083,9 +1096,8 @@ sockio_pump_send(struct w32_io *pio, const void *buf, size_t len)
 	b->len += n;
 	b->pinned = FALSE;
 	p->len += n;
-	was_empty = p->sleeping;
+	was_empty = p->sleeping && p->len >= PUMP_WAKE_BYTES;
 	LeaveCriticalSection(&p->lock);
-	/* only a pump in its wait needs the event */
 	if (was_empty)
 		SetEvent(p->data_evt);
 	return (int)n;
@@ -1153,10 +1165,38 @@ sockio_pump_send_owned(struct w32_io *pio, char *d, size_t off, size_t len, size
 
 	EnterCriticalSection(&p->lock);
 	sock_wpump_push(p, d, off, len, alloc);
-	was_empty = p->sleeping;
+	was_empty = p->sleeping && p->len >= PUMP_WAKE_BYTES;
 	LeaveCriticalSection(&p->lock);
 	if (was_empty)
 		SetEvent(p->data_evt);
+}
+
+/* The main thread is about to wait for something: every writer with
+ * anything queued goes now, whatever the batch size.  Called from the
+ * port's alertable wait (signal.c, patch 0009). */
+void
+pumps_flush_before_wait(void)
+{
+	int i;
+
+	for (i = 0; i < num_live_sync_wpumps; i++) {
+		struct sync_wpump *p = live_sync_wpumps[i];
+		BOOL wake;
+		EnterCriticalSection(&p->lock);
+		wake = p->sleeping && p->len;
+		LeaveCriticalSection(&p->lock);
+		if (wake)
+			SetEvent(p->data_evt);
+	}
+	for (i = 0; i < num_live_sock_wpumps; i++) {
+		struct sock_wpump *p = live_sock_wpumps[i];
+		BOOL wake;
+		EnterCriticalSection(&p->lock);
+		wake = p->sleeping && p->len;
+		LeaveCriticalSection(&p->lock);
+		if (wake)
+			SetEvent(p->data_evt);
+	}
 }
 
 /* ---- recv ------------------------------------------------------------ */
@@ -1174,18 +1214,10 @@ SockRpumpThread(_In_ LPVOID lpParameter)
 		EnterCriticalSection(&p->lock);
 		space = SOCK_PUMP_RING_SIZE - p->len;
 		tail = (p->head + p->len) % SOCK_PUMP_RING_SIZE;
+		if (!space)
+			p->sleeping = TRUE;   /* under the lock: a recv that follows sees it */
 		LeaveCriticalSection(&p->lock);
 		if (!space) {
-			/* full: the main thread is usually a few microseconds
-			 * from taking some -- spin before sleeping */
-			if (pump_spin(&p->len, SOCK_PUMP_RING_SIZE))
-				continue;
-			EnterCriticalSection(&p->lock);
-			if (p->len == SOCK_PUMP_RING_SIZE)
-				p->sleeping = TRUE;
-			LeaveCriticalSection(&p->lock);
-			if (!p->sleeping)
-				continue;
 			WaitForSingleObject(p->room_evt, 200);
 			p->sleeping = FALSE;
 			continue;
@@ -1262,6 +1294,7 @@ sock_rpump_start(struct w32_io *pio)
 		DeleteCriticalSection(&p->lock);
 		goto fail;
 	}
+	pump_place_thread(p->thread);
 	c->rd = p;
 	debug4("sock read pump started for io:%p", pio);
 	return p;
@@ -1329,9 +1362,9 @@ sockio_pump_recv(struct w32_io *pio, void *buf, size_t len)
 	EnterCriticalSection(&p->lock);
 	p->head = (p->head + n) % SOCK_PUMP_RING_SIZE;
 	p->len -= n;
-	was_full = p->sleeping;
+	/* a sleeping pump is woken once a chunk's worth of room is there */
+	was_full = p->sleeping && SOCK_PUMP_RING_SIZE - p->len >= SOCK_PUMP_CHUNK;
 	LeaveCriticalSection(&p->lock);
-	/* only a pump in its wait needs the event */
 	if (was_full)
 		SetEvent(p->room_evt);
 	return (int)n;

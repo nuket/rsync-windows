@@ -1,0 +1,24 @@
+diff --git a/contrib/win32/win32compat/signal.c b/contrib/win32/win32compat/signal.c
+index 24560ec..a14b2a1 100644
+--- a/contrib/win32/win32compat/signal.c
++++ b/contrib/win32/win32compat/signal.c
+@@ -264,6 +264,8 @@ sw_process_pending_signals()
+  *  if milli_seconds is 0, this function returns 0, its called with 0
+  *  to execute any scheduled APCs
+ */
++void pumps_flush_before_wait(void);   /* rsync-windows, win32/openssh/win32pumps.c */
++
+ int
+ wait_for_any_event(HANDLE* events, int num_events, DWORD milli_seconds)
+ {
+@@ -272,6 +274,10 @@ wait_for_any_event(HANDLE* events, int num_events, DWORD milli_seconds)
+ 	DWORD num_all_events = num_events + live_children;
+ 	errno_t r = 0;
+ 
++	/* about to wait: whatever the writer pumps hold goes out first */
++	if (milli_seconds)
++		pumps_flush_before_wait();
++
+ 	if (num_all_events > MAXIMUM_WAIT_OBJECTS_ENHANCED) {
+ 		debug3("wait_for_any_event() - ERROR max events reached");
+ 		errno = ENOTSUP;

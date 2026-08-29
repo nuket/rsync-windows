@@ -48,6 +48,10 @@ void sockio_pump_shutdown(struct w32_io *pio, int how);
  * socket was never pumped, in which case the caller closes it. */
 BOOL sockio_pump_close(struct w32_io *pio);
 
+/* The main thread is about to wait: wake every writer that has bytes
+ * queued.  Writers are otherwise woken in batches (win32pumps.c). */
+void pumps_flush_before_wait(void);
+
 /* ---- zero-copy send (win32sendbuf.c) --------------------------------- */
 
 /* The w32_io behind a fd (w32fd.c); NULL if there is none. */

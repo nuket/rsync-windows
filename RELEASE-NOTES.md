@@ -100,6 +100,10 @@ What changed since v3.5.0-gf800ace2
   - ssh.exe run with -n, or with its stdin from NUL, no longer spins a
     thread per pass of its main loop asking NUL for input; that cost a
     plain "ssh host command > file" a sixth of its time.
+  - The I/O threads sleep between batches instead of spinning: ssh.exe
+    now uses about 1.3-1.8 cores during a transfer rather than 2.4-2.9,
+    at the same speed, and on a slow cipher or link the difference is a
+    core and a half of nothing.
 
 What changed in v3.5.0-gf800ace2
 --------------------------------
