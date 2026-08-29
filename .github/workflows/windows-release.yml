@@ -59,7 +59,12 @@ jobs:
       # --arch both: x64 into build-x64\, x86 into build-x86\, each configured,
       # built and run through the test suite separately.  The ssh transfer
       # tests skip on their own without RSYNC_WIN_TEST_HOST.
-      run: windows-build-and-test.bat --clean
+      #
+      # --config Release is the default, and is given anyway: a release must
+      # never go out built as RelWithDebInfo (which is what to build locally
+      # for profiling -- see BUILD-CMAKE.md), and the default is not the place
+      # to decide that.  The staging step below refuses to ship a .pdb.
+      run: windows-build-and-test.bat --clean --config Release
 
     - name: Build ssh.exe, x64 and x86
       shell: pwsh
@@ -195,6 +200,25 @@ jobs:
         Copy-Item build-x64\NOTICE-ssh.txt dist\
         Copy-Item BUILD-CMAKE.md dist\
         Copy-Item RELEASE-NOTES.md dist\RELEASE-NOTES.txt
+
+        # Debug information is for the build machine, not for the release:
+        # a .pdb names every source path and function of the build that made
+        # it.  Nothing above copies one -- every staged file is named, none
+        # comes from a wildcard over a build directory -- so this is a guard
+        # against a later edit that does, and it covers the zips themselves
+        # rather than trusting the copy list.
+        $bad = @()
+        foreach ($z in Get-ChildItem dist\*.zip) {
+          $names = [IO.Compression.ZipFile]::OpenRead($z.FullName)
+          try   { $bad += $names.Entries | Where-Object { $_.Name -like '*.pdb' } | ForEach-Object { "$($z.Name): $($_.FullName)" } }
+          finally { $names.Dispose() }
+        }
+        $bad += Get-ChildItem dist -Recurse -Filter *.pdb | ForEach-Object { "dist: $($_.Name)" }
+        if ($bad) {
+          Write-Error "debug symbols in the release: $($bad -join ', ')"
+          exit 1
+        }
+        Write-Host "no .pdb in the zips or in dist"
         "VER=$ver" >>$Env:GITHUB_ENV
         "SSH_VER=$((& build-x64\ssh.exe -V 2>&1) -join '')" >>$Env:GITHUB_ENV
 

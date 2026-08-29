@@ -16105,4 +16105,261 @@ completed (exit code 0)
   the last stretch. Reminder: ufw on the Linux box is still off.
 
 ✻ Cogitated for 11m 0s · done 2:57 AM
+
+❯ Do 1, then do 2 modifying as little in the core as possible and keeping
+  specific things in our own code, then 4. Commit each one at a time, if it
+  works and the tests pass. Then look for any other single-threaded fixes, I'm
+  going to sleep now, if there's anything else that makes sense to you to do,
+  go for it.
+
+● Restoring Microsoft's three files to pristine and re-hooking them into the new
+  translation units.
+
+● Refactor verified (speeds equal, suite green on both arches) — committing step
+  1 and watching CI.
+
+● Zero-copy send path written; regenerating patches, building, and A/B-timing it
+  against the installed client.
+
+● Handoff is never slower and is faster where it matters (raw send 2.9 s vs
+  3.1–3.5 s; memcpy share 25% → 11%); the run-to-run swings are the Linux tmpfs,
+  not the client. Committing step 2.
+
+● (summarized)
+  I found that ssh.exe burns 2.7 cores under a slow cipher because the pump
+  threads' spin-before-sleep loop is way too long (~200 µs instead of 20–50 µs,
+  since each pause costs ~140 cycles here). I'll measure this properly and fix
+  the spin to be time-bounded and adaptive.
+
+● Replacing the pump spin with batched wake-ups plus a flush-before-wait hook;
+  building and measuring CPU and throughput.
+
+● (summarized)
+  Batching lowered ssh.exe CPU usage but cost ~15% on fast sends, likely due to
+  the woken pump preempting the main thread's core. I'll try pinning the pumps'
+  ideal processors away from the main thread's to fix this.
+
+● (summarized)
+  Commit eacfa8d2 is in with CI passing. Next I'll check if rsync.exe is now the
+  transfer bottleneck, verify connection latency is unaffected by the flush
+  hook, and review the receive-side write path for a symmetric zero-copy.
+
+● All four items are done and committed, CI green on each. Now profiling
+  rsync.exe itself — it sits at ~95% of a core during transfers, so it may now
+  be the limit rather than ssh.exe.
+
+● rsync.exe's own main thread shows two costs worth chasing: NtDelayExecution (a
+  Sleep() in the loop, 14%) and NtQueryVolumeInformationFile (a GetFileType()
+  per I/O, 6%). Looking for both.
+
+● rsync.exe's main thread is now plausibly the limit (96% of a core at 1032 MB/s
+  vs 1400 raw). Two costs there: a GetFileType() syscall per readiness check,
+  and sleeps in the poll backoff. Reading that code.
+
+● The sampler is wall-clock, so those are stalls, not CPU. io.c:278 has an
+  msleep(20) — checking whether it's in the transfer path.
+
+  Read 2 files (ctrl+o to expand)
+
+● io.c:278 is end-of-transfer only, not the hot path. One focused experiment to
+  settle whether rsync.exe is now the limit: push the same file cold vs. already
+  in the page cache.
+
+● Confirmed: disk reads at 2313 MB/s, so it isn't I/O. With the file warm, rsync
+  push is 1075–1092 MB/s against raw ssh 1282–1341 — so rsync.exe's own thread
+  is now the ceiling. Getting a symbolised profile so the finding is actionable.
+
+● Now the profile is actionable. rsync.exe's own main thread pays NtSetEvent
+  7.1% (its pumps are signalled on every write) and GetFileType 2.9% — the same
+  two costs I just removed from ssh.exe, in the port's own win32/win32io.c.
+  Reading that code.
+
+● Both costs are in win32/win32io.c: the events are manual-reset state flags but
+  SetEvent is called on every write even when already set, and GetFileType runs
+  per read. Checking the close path so a per-fd type cache can be invalidated
+  safely.
+
+● Now the mirrors must match the events' initial state (room_evt is created
+  set), plus the cache invalidation and the call sites.
+
+● Builds clean. Now a precise A/B: build the previous win32io.c as Release, keep
+  it, then rebuild with the change and compare like for like.
+
+● Push wall-time is within noise, as expected when the thread is partly blocked.
+  The win should show as CPU, so measuring that and a pull.
+
+● PowerShell(Set-Location C:\Users\Claude\devsrc\rsync-windows;
+            $sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devsr
+            c-rsync-windows\66c00488-88a8-48c3-be31-6…)
+  ⎿  push before  wall 3.98 s = 1,029 MB/s  rsync.exe cpu 3.47 s = 87% of a
+      core
+     push after   wall 3.92 s = 1,044 MB/s  rsync.exe cpu 4.33 s = 110% of
+     … +13 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● More CPU, not less — a sign the mirror is going stale somewhere and leaving an
+  event set when it should be clear, making select() spin. Finding every site
+  that touches these events.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Found it: wpump_thread does a raw SetEvent(p->room_evt) on every drain, so the
+  mirror goes stale and the full-ring ResetEvent is then skipped — leaving
+  select() spinning on a full ring. Fixing both sites.
+
+● Correct now: rsync.exe CPU 87–91% → 77–83% of a core, hashes OK, wall time
+  unchanged (ssh.exe is the co-limit). Confirming in the profile, then the full
+  suite.
+
+● Both NtSetEvent and NtQueryVolumeInformationFile are gone from the profile.
+  Running the full suite on both architectures.
+
+● Suite passes on both. Committing, and tidying the scratch build directory.
+
+● All done — five commits, each built, measured, suite-tested and pushed with CI
+  green.
+
+  What went in, in order
+
+  1. Own translation units (61701a8a). The pumps and CNG backend were ~900 lines
+  of our code living inside diffs of Microsoft's files. They're now
+  win32/openssh/win32pumps.{c,h} and win32cnggcm.{c,h}, compiled in by a
+  Directory.Build.targets (a .targets, not .props, so the include dirs resolve
+  both ways). The patches are now hooks only: 0001 949→321 lines, 0002 652→81,
+  0006 236→97. No behaviour change — same speeds, suite green.
+
+  2. Zero-copy send (fc99ad80), with as little in core as you asked. The socket
+  pump's send side became a queue of blocks; win32sendbuf.c swaps the packet
+  layer's output buffer storage into it and takes back a block the pump has
+  finished with. Core changes are one line in packet.c (patch 0008),
+  sshbuf_swap_storage() added to patch 0005, and w32_io_from_fd() in 0004.
+  SSH_SENDBUF_COPY forces the old path. Raw send 3.1–3.5 s → 2.9–3.0 s for 4 GB;
+  memcpy 25% → 11% of the main thread, AES-GCM now 70% of it. 4 GB hashed
+  identical on the far side.
+
+  3. NUL stdin (9e566df0). NUL returns 0 bytes for ever, and Microsoft's read
+  thread treated that as "nothing yet" — so -n or < NUL started a thread per
+  pass of the main loop. Now a 0-byte read from a handle GetConsoleMode()
+  rejects is EOF. Consoles untouched. That 16% is gone.
+
+  (Your item 3, the sshbuf_reset zeroing, I left alone as agreed — it's upstream
+  hygiene for 2–3%.)
+
+  Then, on my own judgement
+
+  4. The pumps stop spinning (eacfa8d2) — this one corrected my own earlier
+  work. The spin-before-sleep I added in caca7c5e was tuned by guess: 4000 pause
+  instructions is ~200 µs here, not the 20–50 I claimed, and a pump paid it
+  every time its flow paused. ssh.exe was using 2.4–2.9 cores for a transfer
+  regardless of cipher (chacha20: 2.9 cores for 260 MB/s). Pumps now sleep at
+  once and are woken in batches — a writer at 128 KB, a reader at a chunk of
+  room, and everything with bytes queued flushed whenever the main thread is
+  about to wait (pumps_flush_before_wait() from the port's one alertable wait,
+  patch 0009), so no latency is added. Each pump also gets an ideal processor
+  away from the main thread's, worth 15%. Same throughput, CPU 2.45 → 1.76 cores
+  (aes-gcm), 2.9 → 1.25 (chacha20).
+
+  5. rsync.exe's own win32 layer (8e1bd987). Its pumps were re-signalling
+  manual-reset state events on every 32 KB write (7% of the main thread), and
+  GetFileType() ran on every read, write and select (3%). Both fixed. rsync.exe
+  CPU 87–91% → 77–83% of a core, wall time unchanged. Worth noting: my first
+  version of this made CPU worse (110%) — a stale event mirror left select()
+  spinning on a full ring; the A/B measurement caught it and the fix is in.
+
+  The finding worth your attention
+
+  ssh.exe is no longer the limit for an rsync transfer — rsync.exe is. With the
+  source file warm in cache, raw ssh sends 4 GB at 1282–1341 MB/s while rsync
+  pushes the same file at 1075–1092. The source reads at 2313 MB/s standalone,
+  so it isn't disk. rsync.exe's main thread wall-time now splits: NtReadFile 35%
+  (synchronous 32 KB source reads with no overlap), waiting on the pipe 24%,
+  memcpy 12%, NtDelayExecution 11% — whose source I could not identify (it is
+  not the msleep(20) in whine_about_eof, which is end-of-transfer only) — and
+  XXH3 7%. The two untried leads are overlapping the file read with the sender
+  loop, and finding that sleep. Both are rsync core rather than the ssh client,
+  so I stopped there rather than operate on it unattended. I've saved this to
+  memory so it isn't re-derived next time.
+
+  Housekeeping
+
+  - C:\Users\Claude\rsync-perf and the scratch build-rwdi-x64 are deleted; Linux
+    /tmp is back to 16 MB.
+  - One leftover I couldn't remove: /tmp/rsync-win-test-batch (308 KB) is owned
+    by max from before the login switch, and /tmp is sticky so claude can't
+    delete it — it needs you as max, or a reboot.
+  - C:\Tools\rsync\ssh.exe is the new client; rsync.exe there is still the
+    released 3.5.0-gf800ace2 — I never installed a new one.
+  - Profiling note: the Release build ships no PDB, so use --config
+    RelWithDebInfo --build-dir build-rwdi or symbols come back as ?.
+  - ufw on the Thunderbolt box is still disabled.
+
+✻ Cooked for 21m 48s · done 7:16 AM
+
+❯ Find that NtDelayExecution in rsync.exe, make sure you build it with
+  RelWithDebInfo if you're building a release build to test, the GitHub
+  releases shouldn't release with debug PDBs though.
+
+● Right — I'll extend the sampler to walk back up the stack so this is answered
+  from evidence rather than inference, then check the release workflow for PDBs.
+
+● Adding a stack-scan mode to the sampler so I can see which rsync function is
+  behind the sleep.
+
+● Now rebuilding RelWithDebInfo and profiling a push with the stack scan.
+
+● Found it: win32_usleep ← msleep ← wait_process_with_flush. Let me look at that
+  function.
+
+● That's wait_process_with_flush, which polls with a 20 ms sleep. I need to know
+  whether those sleeps are teardown or spread through the transfer — adding
+  timestamps to the report.
+
+● Definitive: the sleeps occur only in the last ~0.2 s of each run (push
+  2.44–2.91 s of 2.96 s; pull 3.32–3.51 s of 3.54 s) — it's the teardown poll in
+  wait_process_with_flush, not the data path. Now checking the release
+  packaging for PDBs and the sleep primitive.
+
+● The staged files are copied by explicit name, so no .pdb can be swept into a
+  zip today. Let me see the build step and release upload to make that guarantee
+  explicit rather than incidental.
+
+● The releases are already PDB-free by construction, but only incidentally.
+  Making it explicit and guarded.
+
+● The guard works (rejects a zip containing a .pdb, passes a clean one). Now
+  quantifying what the teardown actually costs, to decide whether it's worth
+  touching.
+
+● ssh host true is 0.208 s; rsync of a tiny file is 0.404 s — so ~0.2 s of
+  per-run overhead, which is essentially all this sleep loop. Worth
+  understanding whether it's real waiting. Checking how msleep behaves on POSIX
+  first.
+
+● msleep restarts on EINTR, so POSIX also sleeps the full 20 ms — the
+  Windows-only penalty is tick rounding (20 ms requested becomes ~31 ms). If
+  each teardown round trip costs a full quantum, that would explain the whole
+  0.2 s. Testable: make the sleep exact and re-measure.
+
+● No real change (0.430 → 0.422, within noise), so the quantum isn't the cost.
+  Bounding it directly with a temporary diagnostic clamp.
+
+● Decisive: clamping the sleep from 20 ms down to 100 µs moves the run from
+  0.397 s to 0.385 s — 12 ms, i.e. nothing. The poll isn't costing anything, so
+  the high-resolution sleep isn't justified. Reverting it.
+
+● Reverted cleanly. Let me find a home in the docs for the finding so it isn't
+  re-chased.
+
+
+```
+
+# Moar Speed Pt. 4! Windows Performance Analyzer (xperf.exe)
+
+```
+❯ How do I install Windows Performance Analyzer, is it part of Visual Studio?
+  If no or even if so, can you add it to the windows-setup process here? Also:
+  in other testing, I found out that xperf.exe needed to be run by an
+  administrator, but I usually run in this account as a Normal user. Is there a
+  way to change xperf's permissions to allow a normal user to run it, or is
+  there an easy way to make it usable by Claude?
 ```

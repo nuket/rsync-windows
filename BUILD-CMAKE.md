@@ -519,6 +519,36 @@ Two details worth knowing:
 
 Set `RSYNC_WIN32_DEBUG=1` to trace the shim's fd operations to stderr.
 
+### Profiling
+
+Build `RelWithDebInfo` to profile, into a directory of its own so the release
+build is left alone:
+
+    windows-build-and-test.bat --arch x64 --config RelWithDebInfo --build-dir build-rwdi --no-tests
+
+`Release` produces no `.pdb`, so a profiler has nothing to work with and every
+frame in rsync's own code comes back as `?`. Nothing built that way is fit to
+ship: the release workflow builds `Release` explicitly and fails if a `.pdb`
+reaches a zip.
+
+Two things that have already been chased down, so they need not be again:
+
+* **A sampling profiler here measures wall time, not processor time** — a
+  thread suspended in a system call is sampled in that call. A large
+  `Nt*` share means blocked, not busy. Read it against the process's actual
+  CPU time (`(Get-Process rsync).TotalProcessorTime`) before concluding
+  anything.
+* **The `msleep(20)` in `wait_process_with_flush()`** (upstream `main.c`)
+  shows up as ~10% of the main thread's wall time on a fast link, and is
+  *not* worth removing. It is the teardown poll, and the samples fall
+  entirely in the last ~0.2 s before exit: on a 4 GB push over 20 Gbit,
+  2.44 s–2.91 s of a 2.96 s window. Nor is the sleep itself the cost —
+  clamping it from 20 ms to 100 µs moved a whole small-file run by 12 ms,
+  inside the run-to-run spread. What the loop waits for is the ssh child
+  genuinely exiting. (Windows rounds `Sleep(20)` up to the 15.6 ms timer
+  tick, so it really sleeps ~31 ms; a high-resolution waitable timer fixes
+  that and measured as nothing here, which is why there isn't one.)
+
 ## Testing
 
 `testsuite/` is written against Unix semantics throughout -- ACLs, xattrs,
