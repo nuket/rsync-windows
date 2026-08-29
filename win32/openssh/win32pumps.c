@@ -810,6 +810,41 @@ sockio_pump_wanted(struct w32_io *pio)
 
 /* ---- send ------------------------------------------------------------ */
 
+/*
+ * SSH_SOCK_SNDBUF, if set, is the SO_SNDBUF to ask for.  Unset -- the
+ * default -- leaves Windows' own autotuning alone, which measurement says is
+ * the right answer: a 1 GB push ran at 783 MB/s autotuned against 657 at a
+ * fixed 256 KB and 756 at a fixed 1 MB.
+ *
+ * SO_SNDBUF=0 is the interesting value and the trap.  It turns off the
+ * kernel's send buffering so that a send puts our buffer on the wire
+ * directly rather than copying it first, which is the last copy per byte of
+ * a push that we could still delete -- but with the synchronous send below
+ * it also means one send in flight and nothing on the wire between them: a
+ * round trip per call, and a 64 MB push fell from 110 MB/s to 2.9.  Getting
+ * that copy needs overlapped sends with several outstanding, not a socket
+ * option.  The knob stays for measuring; do not set it to 0.
+ */
+static void
+sock_set_sndbuf(SOCKET s)
+{
+	char env[16];
+	DWORD n = GetEnvironmentVariableA("SSH_SOCK_SNDBUF", env, sizeof env);
+	int want, have = 0, len = sizeof have;
+
+	if (n == 0 || n >= sizeof env)
+		return;
+	want = atoi(env);
+	if (want < 0)
+		return;
+	if (setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char *)&want, sizeof want) != 0) {
+		debug3("SO_SNDBUF=%d refused: %d", want, WSAGetLastError());
+		return;
+	}
+	getsockopt(s, SOL_SOCKET, SO_SNDBUF, (char *)&have, &len);
+	debug("socket send buffer set to %d (asked %d)", have, want);
+}
+
 /* under the lock: a finished block goes to the free list, or away */
 static void
 sock_wblock_recycle(struct sock_wpump *p, char *d, size_t alloc)
@@ -980,6 +1015,7 @@ sock_wpump_start(struct w32_io *pio)
 		goto fail;
 	InitializeCriticalSection(&p->lock);
 	p->s = pio->sock;
+	sock_set_sndbuf(p->s);
 	p->thread = (HANDLE)_beginthreadex(NULL, 0, SockWpumpThread, p, 0, NULL);
 	if (!p->thread) {
 		DeleteCriticalSection(&p->lock);

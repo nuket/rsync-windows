@@ -593,6 +593,17 @@ above were measured and a way out if a ring ever misbehaves.
 `RSYNC_WIN32_SHMPIPE_DEBUG=1` makes both sides say on stderr which transport
 they settled on, and how many bytes went through the rings.
 
+The last copy per byte of a push is the one `WSASend` makes into the kernel's
+socket buffer, and Windows has a classic way to delete it: `SO_SNDBUF=0`, so
+the send goes straight from our block to the wire. It does not work with the
+send pump as written — one blocking send in flight and no kernel buffer means
+a round trip per call with nothing on the wire in between, and a 64MB push
+falls from 110MB/s to **2.9MB/s**. Collecting that copy needs overlapped
+sends with several outstanding, which the pump's block ownership would
+support but its loop does not. Fixed buffer sizes are no help either: 783MB/s
+autotuned, 657 at a fixed 256KB, 756 at a fixed 1MB. `SSH_SOCK_SNDBUF` sets
+it, for measuring; leaving it unset is right.
+
 When measuring any of this, pin the cipher: the default is
 `chacha20-poly1305@openssh.com`, which tops out around 260 MB/s on this
 laptop and hides everything else. `-e "ssh -c aes128-gcm@openssh.com"`.
