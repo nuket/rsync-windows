@@ -17122,10 +17122,277 @@ completed (exit code 0)
 ● Clean data: Windows CPU 61 → 82 °C while the clock held at ~183% — temperature
   alone doesn't throttle, sustained power draw does. Let me rebuild the chart
   with both machines' temperatures.
+
+● It works — reading thermals from an ordinary, non-elevated shell:
+
+  CPU Probe        59 C
+  True Ambient     54 C
+  Memory Module    42 C
+  Other Probe      33 C
+
+  One correction to make
+
+  The UnitModifier Dell reports is wrong. It says -1, which would turn a raw 56
+  into 5.6 °C. Loading all eight logical CPUs settled it:
+
+  ┌────────────┬───────────┐
+  │            │ CPU Probe │
+  ├────────────┼───────────┤
+  │ idle       │ 56 °C     │
+  ├────────────┼───────────┤
+  │ 10 s load  │ 81 °C     │
+  ├────────────┼───────────┤
+  │ 20 s load  │ 90 °C     │
+  ├────────────┼───────────┤
+  │ 32 s load  │ 91 °C     │
+  ├────────────┼───────────┤
+  │ 20 s after │ 78 °C     │
+  └────────────┴───────────┘
+
+  So CurrentReading is already whole degrees Celsius. I've fixed
+  dell-thermals.ps1 to ignore the modifier and say so.
+
+  What it revealed
+
+  That load test also caught the clock at 62% of base afterwards — below base.
+  Compare with the fresh 3-minute iperf3 run I did with temperature sampling on
+  both ends:
+
+  - Link flat at 1363 MB/s for the full 180 s (first 30 s 1355, last 30 s 1366).
+  - Windows CPU 61 → 82 °C, Linux die 44 → 60 °C, both flat by ~60 s.
+  - Yet the clock held 183–189% of base the whole time — at 82 °C.
+
+  So the missing half of the throttling story: heat alone doesn't throttle this
+  part, sustained power draw does. At 12% CPU it will sit at 82 °C and keep full
+  turbo indefinitely; put crypto on it and it collapses to 62%. That's exactly
+  why an rsync/ssh transfer decays across a session while iperf3 doesn't.
+
+  Updated
+
+  - thunderbolt-link-3min.svg/png regenerated from a fresh run — the temperature
+    panel now plots both machines (shared axis, per your convention), and the
+    "Windows exposes no usable CPU sensor" note is gone.
+  - C:\Users\Claude\dell-thermals.ps1 — corrected scaling.
+  - Commit 125d3e21, CI green: the profiling section now documents the query,
+    the bogus UnitModifier, the Invoke-WmiMethod-vs-Invoke-CimMethod trap that
+    bit us, and the power-vs-heat finding.
+
+  Two things worth flagging: I had to redo the 3-minute run because the Linux
+  sampler script had been deleted in an earlier cleanup, and iperf3 --logfile
+  appends — the chart script now takes the last JSON document rather than
+  choking on two. Also note the run measured 1363 MB/s against 1437 earlier,
+  purely because the machine started at 61 °C from the load test rather than
+  cold.
+
+  The 12 chart files are still untracked — say the word if you want them
+  committed.
+
+✻ Brewed for 18m 42s · done 10:24 PM
+```
+
+# Moar Speed Pt. X! ISA-L?
+
+```
+❯ What about Intel crypto acceleration ISA-L or other libs, are there any
+  other things that could help here? Is ISA-L faster than Windows CNG?
+
+● I built ISA-L and measured it. Short answer: yes, ISA-L is much faster than
+  CNG — and it would buy you almost nothing.
+
+  Is ISA-L faster than CNG?
+
+  Clearly. I fetched NASM (no admin needed), cloned intel/isa-l_crypto, built it
+  with nmake, and wrote a C benchmark so both libraries run in the same process
+  on SSH-shaped work — one complete GCM message per 32 KB packet, fresh IV, 4
+  bytes AAD, 16-byte tag, rounds interleaved:
+
+  ┌──────────────┬────────────────┬───────────────┐
+  │              │ 32 KB messages │ 1 MB messages │
+  ├──────────────┼────────────────┼───────────────┤
+  │ ISA-L crypto │ 5347 MB/s      │ 5312 MB/s     │
+  ├──────────────┼────────────────┼───────────────┤
+  │ CNG (bcrypt) │ 3451 MB/s      │ 3448 MB/s     │
+  ├──────────────┼────────────────┼───────────────┤
+  │              │ +55%           │ +54%          │
+  └──────────────┴────────────────┴───────────────┘
+
+  For context I also benchmarked the other libraries via ctypes — LibreSSL (what
+  Windows ships, what patch 0006 moved off) 1707 MB/s, OpenSSL 3 2864, CNG
+  3031. Those numbers carry per-call Python overhead, so treat the C-to-C
+  ISA-L/CNG pair as the real comparison; the ordering is consistent either way,
+  and CNG is not the ceiling on this CPU.
+
+  Would it help?
+
+  No — because the cipher stopped being the constraint. Same ssh client, same 2
+  GB send, three ciphers spanning ~5× in cipher speed:
+
+  ┌─────────────────────────────────┬─────────────────┐
+  │             cipher              │   end-to-end    │
+  ├─────────────────────────────────┼─────────────────┤
+  │ aes128-gcm                      │ 1075 MB/s       │
+  ├─────────────────────────────────┼─────────────────┤
+  │ aes256-gcm (~30% slower cipher) │ 1051 MB/s — −2% │
+  ├─────────────────────────────────┼─────────────────┤
+  │ chacha20-poly1305 (no hardware) │ 254 MB/s        │
+  └─────────────────────────────────┴─────────────────┘
+
+  Making the cipher 30% slower costs 2%. So there's a knee: below roughly 1 GB/s
+  of cipher throughput it dominates completely (chacha20), and above ~2.5 GB/s
+  the pipeline dominates instead. CNG at 3451 is already comfortably past that
+  knee; ISA-L's 5347 pushes further into the region where it doesn't matter.
+  Extrapolating the sensitivity, it's worth ~2–4% at absolute best.
+
+  Against that: a NASM dependency in the build, a third-party library in the
+  release (3.5 MB DLL or 6 MB static), and new code in cipher.c — for a change
+  that also only covers the bulk cipher, exactly like CNG, so LibreSSL still
+  stays for key exchange and signatures.
+
+  The other libraries
+
+  Same verdict for all of them, for the same reason. OpenSSL 3 beats CNG too,
+  but shipping it means shipping a DLL, which this port deliberately avoids (it
+  uses the System32 LibreSSL and needs no redistributable). Intel IPP Crypto is
+  a bigger dependency for the same non-benefit. There's no AES-GCM hardware
+  offload path on Windows for SSH.
+
+  When it would be worth revisiting: if the rsync↔ssh pipe hop (the −18% in the
+  budget chart) is ever removed and the link gets faster, or on hardware where
+  ssh.exe is genuinely CPU-bound — a slower CPU, many parallel transfers, or
+  40/100 GbE. On a newer CPU with VAES both libraries jump, so the gap would
+  need re-measuring rather than assuming.
+
+  Committed as 4b1e5b53 with the numbers, which closes out the "Moar Speed Pt.
+  X! ISA-L?" question in your porting log. The two prior commits are green; this
+  one is docs-only. Test data cleaned up; the ISA-L build tree (29 MB) is in
+  the session scratchpad if you want more experiments before it's discarded.
+
+✻ Sautéed for 8m 23s · done 10:38 PM
+
+❯ What do you mean There's no AES-GCM hardware offload path on Windows for SSH.
+  Also: what do the thermals say about using the IPP Crypto primitives at line
+  rate, if we can reduce the CPU power usage, wouldn't it throttle less, and
+  then ultimately that would help us keep the throughput high? We wouldn't be
+  running at 5GB/s, but 1.5GB/s, meaning our overall CPU usage would go down?
+  Explain to me how we don't get what we want? Is it because the piping between
+  rsync and SSH is the bigger issue?
+
+● Two fair challenges. Let me take the second one seriously, because my evidence
+  for it is genuinely weak.
+
+  First, the offload point — I overstated it. AES-NI is hardware acceleration
+  and both CNG and ISA-L use it; the CPU is not doing AES in software. What I
+  should have said is there's no offload to a separate engine for SSH on
+  Windows: no equivalent of kTLS/NIC TLS offload (SSH crypto always runs in the
+  process), and no QAT-style accelerator on this laptop. That was sloppy
+  wording.
+
+  Second — your thermal argument is sound, and my 2-second test doesn't refute
+  it. Throttling develops over minutes; my aes128-vs-aes256 comparison ran ~2 s
+  per transfer, far too short to capture it. Let me actually test the sustained
+  case.
+
+● Smoke test works (11 transfers, temp already 58 → 81 °C in 20 s). Now the real
+  thing: 100 s of continuous transfer per cipher, in ABBA order so heat can't
+  favour either.
+
+❯ Create charts about these tests too.
+❯ ISA-L vs other cipher libraries would be another great chart, but we
+  definitely want to know about thermal throttling and how well each of
+  these libraries performs thermally against one another
+❯ It's pretty clear when I watch the Linux network graph, that there's
+  periodic and regular throttling happening, below the level of the
+  Thunderbolt controller potentially. The measured transfer rate goes up
+  and down cyclically.
+
+❯ Ok wait do this test for about 3 minutes or so, it should get hot enough that
+  time.
+
+● Good call — 3 minutes each will reach thermal equilibrium, which makes the
+  comparison much more meaningful. Let me first make the script dump time series
+  so I can chart it, then run ABBA as two passes.
+
+❯ Wait. Stop. Stop. Stop. What are you doing? I didn't ask for aes128 vs
+  aes256. That wasn't even in the spec. The question I asked was: If I use
+  aes128-gcm from ISA-L, CNG, LibreSSL, and OpenSSL, do they all throttle the
+  same way? Run each of those for 2 minutes and watch for throughput changes
+  while also logging CPU use and thermals, then graph all of that into an SVG
+  and PNG similar to the other windows-perf charts.
+
+● You're right, I misread that — you asked about one cipher across four
+  libraries, and I ran a different experiment entirely. My mistake. Let me build
+  the right thing.
+
+  ssh.exe only has CNG and LibreSSL backends, so to compare all four at a
+  sustained rate I'll run each library's AES-128-GCM continuously in one harness
+  and log throughput, CPU and thermals per second.
+
+● All four work now — and note OpenSSL 3 is nearly as fast as ISA-L (5265 vs
+  5343); my earlier Python figure was dominated by ctypes overhead. Now the
+  sustained comparison with cooldowns so each starts from the same thermal
+  state.
+
+❯ One more thing: Can you try encrypting a raw stream of bytes and send it
+  with raw TCP to the Linux system? That way we can see if we can see if the
+  Thunderbolt link transfer rate also cycles periodically depending on how
+  this CPU throttles? This is as close as we can get to actually building SSH
+  with each of these ciphers. Right now we don't want to do that yet, so we
+  need as close of an approximation to this as possible. Log the Linux side of
+  things as well so we have a full picture of what's going on.
+
+● That's a much better approximation — and it directly tests whether the link
+  rate cycles with the CPU. Let me build it: encrypt with each library and push
+  the ciphertext over raw TCP, logging both ends.
+
+● Works end to end — ~1850 MB/s payload encrypted-and-sent, confirmed by the
+  Linux sink, which is near the link ceiling. So all four libraries should be
+  able to saturate, which is exactly the condition your hypothesis needs. Let me
+  wire the Linux logging into the driver.
+
+● Strong signal, and it supports your hypothesis:
+
+  ┌───────┬───────────┬──────────────────┬───────┬─────────┬──────────┐
+  │       │   mean    │ decay over 2 min │  CPU  │  clock  │   temp   │
+  ├───────┼───────────┼──────────────────┼───────┼─────────┼──────────┤
+  │ ISA-L │ 1817 MB/s │ −0.4% (none)     │ 15.9% │ 185→173 │ 53→95 °C │
+  ├───────┼───────────┼──────────────────┼───────┼─────────┼──────────┤
+  │ CNG   │ 1622 MB/s │ 12.5%            │ 20%   │ 168→154 │ 60→89 °C │
+  └───────┴───────────┴──────────────────┴───────┴─────────┴──────────┘
+
+  CNG started 7 °C hotter though, so I'll need a reverse pass. First, the other
+  two libraries.
+
+● All four now — and the pattern is clean:
+
+  ┌───────────┬──────┬───────┬───────┐
+  │           │ mean │ decay │  CPU  │
+  ├───────────┼──────┼───────┼───────┤
+  │ ISA-L     │ 1817 │ −0.4% │ 15.9% │
+  ├───────────┼──────┼───────┼───────┤
+  │ OpenSSL 3 │ 1811 │ 0.1%  │ 18.5% │
+  ├───────────┼──────┼───────┼───────┤
+  │ CNG       │ 1622 │ 12.5% │ 20%   │
+  ├───────────┼──────┼───────┼───────┤
+  │ LibreSSL  │ 1239 │ 17.1% │ 21.6% │
+  └───────────┴──────┴───────┴───────┘
+
+  ISA-L started coolest, so let me flip the bias: run CNG first, then ISA-L hot.
+  If ISA-L still wins from the worse starting point, the result is robust.
+
+● Reproducible with matched start temps (58 vs 59 °C): CNG 1618 / −13.1%, ISA-L
+  1809 / −0.7%. Now let me check your cyclic observation in the time series.
+
+● The Linux side tracks the sender almost exactly (1818 vs 1817), so the
+  variation originates on the Windows/CPU side — not the Thunderbolt controller.
+  But that autocorrelation is picking up the downward trend, not a cycle. Let
+  me detrend and look for a genuine period.
+
+● Now I have the full picture. Let me build the two charts.
+
+❯ I didn't see a cyclical trend on the Linux side this time, so it could be
+  an issue with rsync + ssh, we can check later.
 ```
 
 # Moar Speed Pt. X! Shared Memory IPC?
-
-# Moar Speed Pt. X! ISA-L?
 
 # Moar Speed Pt. X! Windows Performance Analyzer (xperf.exe)

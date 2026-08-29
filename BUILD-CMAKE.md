@@ -552,17 +552,43 @@ Two things that have already been chased down, so they need not be again:
   that Windows ships is far behind at ~1700 MB/s, which is what patch 0006
   moved away from.
 
-  None of that is worth having here, because the cipher stopped being the
-  constraint. Swapping aes128-gcm for aes256-gcm makes the cipher ~30%
-  slower and costs **2%** end to end (1075 → 1051 MB/s on a 2 GB send);
-  only a cipher with no hardware behind it moves the needle, and then
-  enormously — chacha20-poly1305 drops the same send to 254 MB/s. So the
-  useful range is "fast enough", and CNG already is: going from 3451 to
-  5347 MB/s of cipher buys a few percent at most, against a NASM
-  dependency in the build, a third-party library in the release, and work
-  in `cipher.c`. Revisit only if the pipe hop above is ever removed and
-  the link gets faster, or on a machine where ssh.exe is genuinely
-  CPU-bound.
+  Whether that is worth having depends entirely on the regime, and a first
+  pass here got it wrong by testing only one of them.
+
+  **In the pipeline as it stands, no.** An rsync push is limited by the
+  pipe hop above at ~1000 MB/s, well under where the cipher binds:
+  swapping aes128-gcm for aes256-gcm makes the cipher ~30% slower and
+  costs **2%** end to end (1075 → 1051 MB/s on a 2 GB send). Only a
+  cipher with no hardware behind it moves that needle, and then enormously
+  — chacha20-poly1305 drops the same send to 254 MB/s.
+
+  **At sustained line rate, yes, and by a lot** — which short tests miss,
+  because throttling needs minutes to develop. Encrypting 32 KB packets and
+  pushing them over raw TCP for two minutes each (as close to "ssh built
+  with this cipher" as it gets without building four ssh.exes), after
+  cooling the CPU to ~60 °C each time:
+
+  | library | cipher alone | sustained, 2 min | lost to throttling |
+  | --- | --- | --- | --- |
+  | ISA-L | 5347 MB/s | **1817 MB/s** | −0.4% |
+  | OpenSSL 3 | 5265 | 1811 | +0.1% |
+  | CNG | 3452 | 1622 | −12.6% |
+  | LibreSSL | 2247 | 1239 | −17.1% |
+
+  ISA-L and OpenSSL sit on the link ceiling (1894 MB/s) for the whole run;
+  CNG starts lower and sinks, LibreSSL worse. Reversing the order
+  reproduced it from matched start temperatures (CNG 1618 / −13.1%, ISA-L
+  1809 / −0.7%), and the Linux end logged the same rates it received while
+  never exceeding 7% CPU, so none of this is the far end. The mechanism is
+  the obvious one: fewer cycles per byte is less package power, and on a
+  15 W part that is the difference between holding a rate and decaying
+  away from it — ISA-L held 1809 MB/s at the *same* 167% clock where CNG
+  managed 1618.
+
+  So: not worth the NASM dependency and the third-party library while the
+  pipe hop is what limits rsync, but the moment that is fixed — or for any
+  workload that already runs near the wire for minutes at a time — the
+  cipher library is worth about 12% of sustained throughput.
 * **Reading the temperature on this Latitude.** Windows exposes no usable
   CPU sensor of its own — `MSAcpi_ThermalZoneTemperature` needs elevation
   and only reports the `\_TZ.THM` ACPI zone, which sits at a constant
