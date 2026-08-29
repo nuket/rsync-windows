@@ -544,6 +544,25 @@ Two things that have already been chased down, so they need not be again:
   `setup-windows-rsync` from dotfiles reinstalls the last *release* into
   `C:\Tools\rsync`, so an `-e C:/Tools/rsync/ssh.exe` benchmark can quietly
   be measuring an old client. `rsync.exe --version` names the commit.)
+* **A faster AES-GCM than CNG exists, and it would not help.** Intel's
+  ISA-L crypto, built from source with NASM and measured in-process against
+  CNG on SSH-shaped work (one complete GCM message per 32 KB packet, fresh
+  IV, 4 bytes of AAD, 16-byte tag), is **55% faster**: 5347 MB/s against
+  3451, and the same margin at 1 MB. OpenSSL 3 also beats CNG; the LibreSSL
+  that Windows ships is far behind at ~1700 MB/s, which is what patch 0006
+  moved away from.
+
+  None of that is worth having here, because the cipher stopped being the
+  constraint. Swapping aes128-gcm for aes256-gcm makes the cipher ~30%
+  slower and costs **2%** end to end (1075 → 1051 MB/s on a 2 GB send);
+  only a cipher with no hardware behind it moves the needle, and then
+  enormously — chacha20-poly1305 drops the same send to 254 MB/s. So the
+  useful range is "fast enough", and CNG already is: going from 3451 to
+  5347 MB/s of cipher buys a few percent at most, against a NASM
+  dependency in the build, a third-party library in the release, and work
+  in `cipher.c`. Revisit only if the pipe hop above is ever removed and
+  the link gets faster, or on a machine where ssh.exe is genuinely
+  CPU-bound.
 * **Reading the temperature on this Latitude.** Windows exposes no usable
   CPU sensor of its own — `MSAcpi_ThermalZoneTemperature` needs elevation
   and only reports the `\_TZ.THM` ACPI zone, which sits at a constant
