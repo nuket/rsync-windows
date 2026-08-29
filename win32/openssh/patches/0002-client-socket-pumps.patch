@@ -1,0 +1,81 @@
+diff --git a/contrib/win32/win32compat/socketio.c b/contrib/win32/win32compat/socketio.c
+index c4eceae..b114666 100644
+--- a/contrib/win32/win32compat/socketio.c
++++ b/contrib/win32/win32compat/socketio.c
+@@ -38,6 +38,11 @@
+ #include "inc\utf.h"
+ #include "misc_internal.h"
+ #include "debug.h"
++/* A connected socket is pumped by a thread each way (rsync-windows,
++ * win32/openssh/win32pumps.c): recv(), send(), select(), shutdown() and
++ * close() go there first.  Listening and connecting sockets keep the
++ * overlapped paths below. */
++#include "win32pumps.h"
+ 
+ #define INTERNAL_SEND_BUFFER_SIZE 70*1024 //70KB
+ #define INTERNAL_RECV_BUFFER_SIZE 70*1024 //70KB
+@@ -378,6 +383,9 @@ socketio_recv(struct w32_io* pio, void *buf, size_t len, int flags)
+ 		return -1;
+ 	}
+ 
++	if (sockio_pump_wanted(pio))
++		return sockio_pump_recv(pio, buf, len);
++
+ 	/* TODO - ensure socket is in accepted or connected state */
+ 	/* /io is initiated and pending */
+ 	if (pio->read_details.pending) {
+@@ -533,6 +541,9 @@ socketio_send(struct w32_io* pio, const void *buf, size_t len, int flags)
+ 		return -1;
+ 	}
+ 
++	if (sockio_pump_wanted(pio))
++		return sockio_pump_send(pio, buf, len);
++
+ 	/* TODO - ensure socket is in accepted or connected state */
+ 	/* if io is already pending */
+ 	if (pio->write_details.pending) {
+@@ -623,6 +634,7 @@ socketio_send(struct w32_io* pio, const void *buf, size_t len, int flags)
+ int
+ socketio_shutdown(struct w32_io* pio, int how)
+ {
++	sockio_pump_shutdown(pio, how);   /* what send() reported written goes before the FIN */
+ 	SET_ERRNO_ON_ERROR(shutdown(pio->sock, how));
+ }
+ 
+@@ -631,7 +643,8 @@ int
+ socketio_close(struct w32_io* pio)
+ {
+ 	debug4("close - io:%p", pio);
+-	closesocket(pio->sock);
++	if (!sockio_pump_close(pio))   /* drains, closes and joins the pumps if there are any */
++		closesocket(pio->sock);
+ 	/* wait for pending io to abort */
+ 	SleepEx(0, TRUE);
+ 	if ((pio->internal.state == SOCK_READY) &&
+@@ -929,6 +942,8 @@ socketio_is_io_available(struct w32_io* pio, BOOL rd)
+ 		}
+ 
+ 		return FALSE;
++	} else if (sockio_pump_wanted(pio)) {
++		return sockio_pump_available(pio, rd);
+ 	} else if (rd) {
+ 		if (pio->read_details.remaining || pio->read_details.error)
+ 			return TRUE;
+@@ -961,14 +976,9 @@ socketio_on_select(struct w32_io* pio, BOOL rd)
+ 				return;
+ 			}
+ 	} else if(sock_state == SOCK_READY) {
+-		/* connected socket - WSARecv if needed */
+-		if ((!pio->read_details.pending) && (!socketio_is_io_available(pio, rd)) && (socketio_WSARecv(pio, NULL, 0) != 0))
+-		{
+-			/* set error, recv() will pick it */
+-			pio->read_details.error = errno;
+-			errno = 0;
+-			return;
+-		}
++		/* connected socket - the read pump, started on first interest;
++		 * it keeps recv() running from then on */
++		sockio_pump_on_select(pio);
+ 	}
+ }
+ 

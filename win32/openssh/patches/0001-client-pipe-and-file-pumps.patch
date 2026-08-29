@@ -1,0 +1,321 @@
+diff --git a/contrib/win32/win32compat/fileio.c b/contrib/win32/win32compat/fileio.c
+index 2f62fa8..327b213 100644
+--- a/contrib/win32/win32compat/fileio.c
++++ b/contrib/win32/win32compat/fileio.c
+@@ -79,6 +79,10 @@ struct createFile_flags {
+ };
+ 
+ int syncio_initiate_read(struct w32_io* pio);
++/* A pipe or file on a sync fd is pumped (win32pumps.c): read() and write()
++ * go straight between the caller's buffer and the pump's ring, and select()
++ * asks the pump.  Those take the fd before any staging below. */
++#include "win32pumps.h"
+ int syncio_initiate_write(struct w32_io* pio, DWORD num_bytes);
+ int syncio_close(struct w32_io* pio);
+ 
+@@ -427,12 +431,12 @@ file_in_chroot_jail(HANDLE handle) {
+ 	if (!final_path)
+ 		return 0;
+ 
+-	const wchar_t* uncPrefix = L"UNC\\";
+-	int isUNCPath = memcmp(final_path, uncPrefix, 2 * wcslen(uncPrefix));
+-
+-	if (0 == isUNCPath) {
+-		debug3("symlink points to UNCPath");
+-		return 1;
++	const wchar_t* uncPrefix = L"UNC\\";
++	int isUNCPath = memcmp(final_path, uncPrefix, 2 * wcslen(uncPrefix));
++
++	if (0 == isUNCPath) {
++		debug3("symlink points to UNCPath");
++		return 1;
+ 	}
+ 
+ 	return file_in_chroot_jail_helper(final_path);
+@@ -585,6 +589,9 @@ fileio_read(struct w32_io* pio, void *dst, size_t max_bytes)
+ 
+ 	debug5("read - io:%p remaining:%d", pio, pio->read_details.remaining);
+ 
++	if (SYNCIO_PUMPED(pio))
++		return syncio_pump_read(pio, dst, max_bytes);
++
+ 	/* if read is pending */
+ 	if (pio->read_details.pending) {
+ 		if (w32_io_is_blocking(pio)) {
+@@ -688,35 +695,39 @@ WriteCompletionRoutine(_In_ DWORD dwErrorCode,
+ 	*((__int64*)&lpOverlapped->Offset) += dwNumberOfBytesTransfered;
+ }
+ 
+-int
+-fileio_write_wrapper(struct w32_io* pio, const void* buf, size_t bytes_to_copy)
+-{
+-	int bytes_written = 0;
+-	if (bytes_to_copy <= WRITE_BUFFER_SIZE) {
+-		bytes_written = fileio_write(pio, buf, bytes_to_copy);
+-		return bytes_written;
+-	}
+-
+-	void* chunk_buf = NULL;
+-	int chunk_count = 0;
+-	int bytes_copied = -1;
+-	size_t chunk_size = 0;
+-
+-	for (size_t i = 0; i < bytes_to_copy; i += WRITE_BUFFER_SIZE, chunk_count++) {
+-		chunk_buf = (BYTE*)buf + chunk_count * WRITE_BUFFER_SIZE;
+-		chunk_size = ((bytes_to_copy - i) >= WRITE_BUFFER_SIZE) ? WRITE_BUFFER_SIZE : (bytes_to_copy - i);
+-		bytes_written = fileio_write(pio, chunk_buf, chunk_size);
+-
+-		if (bytes_written == -1)
+-			return bytes_copied;
+-
+-		if (bytes_copied == -1)
+-			bytes_copied = 0;
+-
+-		bytes_copied += bytes_written;
+-	}
+-	return bytes_copied;
+-
++int
++fileio_write_wrapper(struct w32_io* pio, const void* buf, size_t bytes_to_copy)
++{
++	int bytes_written = 0;
++	if (bytes_to_copy <= WRITE_BUFFER_SIZE) {
++		bytes_written = fileio_write(pio, buf, bytes_to_copy);
++		return bytes_written;
++	}
++
++	void* chunk_buf = NULL;
++	int chunk_count = 0;
++	int bytes_copied = -1;
++	size_t chunk_size = 0;
++
++	for (size_t i = 0; i < bytes_to_copy; i += WRITE_BUFFER_SIZE, chunk_count++) {
++		chunk_buf = (BYTE*)buf + chunk_count * WRITE_BUFFER_SIZE;
++		chunk_size = ((bytes_to_copy - i) >= WRITE_BUFFER_SIZE) ? WRITE_BUFFER_SIZE : (bytes_to_copy - i);
++		bytes_written = fileio_write(pio, chunk_buf, chunk_size);
++
++		if (bytes_written == -1)
++			return bytes_copied;
++
++		if (bytes_copied == -1)
++			bytes_copied = 0;
++
++		bytes_copied += bytes_written;
++		/* a short write ends the run: the next chunk must follow the
++		 * bytes actually taken, not the next 100KB boundary */
++		if ((size_t)bytes_written < chunk_size)
++			return bytes_copied;
++	}
++	return bytes_copied;
++
+ }
+ 
+ /* write() implementation */
+@@ -728,6 +739,9 @@ fileio_write(struct w32_io* pio, const void *buf, size_t max_bytes)
+ 	errno_t r = 0;
+ 
+ 	debug4("write - io:%p", pio);
++	if (SYNCIO_PUMPED(pio))
++		return syncio_pump_write(pio, buf, max_bytes);
++
+ 	if (pio->write_details.pending) {
+ 		if (w32_io_is_blocking(pio)) {
+ 			debug4("write - io pending, blocking call made, io:%p", pio);
+@@ -953,51 +967,51 @@ fileio_lseek(struct w32_io* pio, unsigned __int64 offset, int origin)
+ 	return 0;
+ }
+ 
+-/* fdopen() to be used  on pipe handles */
+-static FILE*
+-fileio_fdopen_pipe(struct w32_io* pio, const char *mode)
+-{
+-	int fd_flags = 0;
+-	FILE* ret;
+-	debug4("fdopen - io:%p", pio);
+-
+-	if (mode[1] == '\0') {
+-		switch (*mode) {
+-		case 'r':
+-			fd_flags = _O_RDONLY;
+-			break;
+-		case 'w':
+-			break;
+-		case 'a':
+-			fd_flags = _O_APPEND;
+-			break;
+-		default:
+-			errno = ENOTSUP;
+-			debug3("fdopen - ERROR unsupported mode %s", mode);
+-			return NULL;
+-		}
+-	}
+-	else {
+-		errno = ENOTSUP;
+-		debug3("fdopen - ERROR unsupported mode %s", mode);
+-		return NULL;
+-	}
+-
+-	int fd = _open_osfhandle((intptr_t)pio->handle, fd_flags);
+-
+-	if (fd == -1 || (ret = _fdopen(fd, mode)) == NULL) {
+-		errno = EOTHER;
+-		debug3("fdopen - ERROR:%d _open_osfhandle()", errno);
+-		return NULL;
+-	}
+-
+-	// overwrite underlying win32 handle - its expected to be closed via fclose
+-	// and close pio
+-	pio->handle = NULL;
++/* fdopen() to be used  on pipe handles */
++static FILE*
++fileio_fdopen_pipe(struct w32_io* pio, const char *mode)
++{
++	int fd_flags = 0;
++	FILE* ret;
++	debug4("fdopen - io:%p", pio);
++
++	if (mode[1] == '\0') {
++		switch (*mode) {
++		case 'r':
++			fd_flags = _O_RDONLY;
++			break;
++		case 'w':
++			break;
++		case 'a':
++			fd_flags = _O_APPEND;
++			break;
++		default:
++			errno = ENOTSUP;
++			debug3("fdopen - ERROR unsupported mode %s", mode);
++			return NULL;
++		}
++	}
++	else {
++		errno = ENOTSUP;
++		debug3("fdopen - ERROR unsupported mode %s", mode);
++		return NULL;
++	}
++
++	int fd = _open_osfhandle((intptr_t)pio->handle, fd_flags);
++
++	if (fd == -1 || (ret = _fdopen(fd, mode)) == NULL) {
++		errno = EOTHER;
++		debug3("fdopen - ERROR:%d _open_osfhandle()", errno);
++		return NULL;
++	}
++
++	// overwrite underlying win32 handle - its expected to be closed via fclose
++	// and close pio
++	pio->handle = NULL;
+ 	int w32_close(int);
+-	w32_close(pio->table_index);
+-	return ret;
+-}
++	w32_close(pio->table_index);
++	return ret;
++}
+ 
+ /* fdopen() to be used  on file handles */
+ static FILE*
+@@ -1061,6 +1075,15 @@ fileio_on_select(struct w32_io* pio, BOOL rd)
+ 	if (!rd)
+ 		return;
+ 
++	if (SYNCIO_PUMPED(pio)) {
++		/* the pump keeps reading from the moment select() first asks */
++		if (syncio_pump_prepare(pio) != 0) {
++			pio->read_details.error = errno;
++			errno = 0;
++		}
++		return;
++	}
++
+ 	if (!pio->read_details.pending && !fileio_is_io_available(pio, rd))
+ 		/* initiate read, record any error so read() will pick up */
+ 		if (pio->type == NONSOCK_SYNC_FD || FILETYPE(pio) == FILE_TYPE_CHAR) {
+@@ -1124,6 +1147,8 @@ fileio_close(struct w32_io* pio)
+ BOOL
+ fileio_is_io_available(struct w32_io* pio, BOOL rd)
+ {
++	if (SYNCIO_PUMPED(pio))
++		return syncio_pump_available(pio, rd);
+ 	if (rd) {
+ 		if (pio->read_details.remaining || pio->read_details.error)
+ 			return TRUE;
+@@ -1314,7 +1339,7 @@ fileio_symlink(const char *target, const char *linkpath)
+ 		goto cleanup;
+ 	}
+ 
+-	/* if chroot, get full path for target, similar to behavior in realpath() in misc.c 
++	/* if chroot, get full path for target, similar to behavior in realpath() in misc.c 
+ 	   note: _wfullpath() is required to resolve paths containing unicode characters */
+ 	if (chroot_pathw != NULL &&
+ 		(resolved_target_chroot = _wfullpath(NULL, resolved_target_utf16, 0)) != NULL &&
+diff --git a/contrib/win32/win32compat/termio.c b/contrib/win32/win32compat/termio.c
+index 4d3c783..3eaee60 100644
+--- a/contrib/win32/win32compat/termio.c
++++ b/contrib/win32/win32compat/termio.c
+@@ -47,6 +47,11 @@
+ #include "debug.h"
+ #include "tnnet.h"
+ #include "misc_internal.h"
++/* A pipe or file on a sync fd is pumped by a thread each way (rsync-windows,
++ * win32/openssh/win32pumps.c); fileio.c routes it there before it reaches
++ * anything below.  The console keeps the thread-per-call paths here. */
++#include "win32pumps.h"
++#define SYNC_IO_BULK_BUF_SIZE (256 * 1024)   /* read_details.buf for a non-pumped, non-console sync fd */
+ 
+ extern int in_raw_mode;
+ BOOL isFirstTime = TRUE;
+@@ -150,14 +155,23 @@ syncio_initiate_read(struct w32_io* pio)
+ 
+ 	debug5("syncio_initiate_read io:%p", pio);
+ 	if (pio->read_details.buf_size == 0) {
+-		pio->read_details.buf = malloc(TERM_IO_BUF_SIZE);
++		/* TERM_IO_BUF_SIZE (3KB) is sized for a console, where a read is
++		 * a few keystrokes; anything else is bulk data, read big */
++		DWORD size = (FILETYPE(pio) == FILE_TYPE_CHAR) ? TERM_IO_BUF_SIZE : SYNC_IO_BULK_BUF_SIZE;
++		pio->read_details.buf = malloc(size);
+ 		if (pio->read_details.buf == NULL) {
+ 			errno = ENOMEM;
+ 			return -1;
+ 		}
+-		pio->read_details.buf_size = TERM_IO_BUF_SIZE;
++		pio->read_details.buf_size = size;
+ 	}
+ 
++	/* A pumped fd never gets here: fileio.c routes it to syncio_pump_read()
++	 * and syncio_pump_prepare() first.  Should a new caller appear, start
++	 * the pump anyway; there is nothing to deliver into read_details. */
++	if (syncio_pump_wanted(pio))
++		return syncio_pump_prepare(pio);
++
+ 	read_thread = (HANDLE) _beginthreadex(NULL, 0, ReadThread, pio, 0, NULL);
+ 	if (read_thread == NULL) {
+ 		errno = errno_from_Win32LastError();
+@@ -236,6 +250,13 @@ syncio_initiate_write(struct w32_io* pio, DWORD num_bytes)
+ {
+ 	HANDLE write_thread;
+ 	debug5("syncio_initiate_write initiate io:%p", pio);
++	if (syncio_pump_wanted(pio)) {
++		/* fileio.c routes a pumped fd to syncio_pump_write() before it
++		 * stages anything; this path would leave the write pending forever */
++		error("syncio_initiate_write on a pumped fd, io:%p", pio);
++		errno = EINVAL;
++		return -1;
++	}
+ 	memset(&(pio->sync_write_status), 0, sizeof(pio->sync_write_status));
+ 	pio->sync_write_status.to_transfer = num_bytes;
+ 	write_thread = (HANDLE)_beginthreadex(NULL, 0, WriteThread, pio, 0, NULL);
+@@ -262,6 +283,11 @@ syncio_close(struct w32_io* pio)
+ {
+ 	debug4("syncio_close - pio:%p", pio);
+ 
++	/* A pumped fd: flush the ring (its bytes were reported written) and
++	 * stop the pumps before the handle goes.  Nothing is pending on the
++	 * thread paths below for such an fd. */
++	syncio_pump_close(pio);
++
+ 	/*
+ 	* Wait for io write operation that is called by worker thread to terminate
+ 	* to avoid the write operation being terminated prematurely by CancelIoEx.

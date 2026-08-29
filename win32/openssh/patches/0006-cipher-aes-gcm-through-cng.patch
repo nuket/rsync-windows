@@ -1,0 +1,97 @@
+diff --git a/cipher.c b/cipher.c
+index 8a18da2..ccf1777 100644
+--- a/cipher.c
++++ b/cipher.c
+@@ -55,6 +55,14 @@
+ #define EVP_CIPHER_CTX void
+ #endif
+ 
++#ifdef WINDOWS
++/* AES-GCM through Windows CNG, faster than the LibreSSL Windows ships
++ * (rsync-windows, win32/openssh/win32cnggcm.c); everything else stays
++ * with libcrypto.  SSH_AESGCM_BACKEND=libcrypto forces the EVP path. */
++#include "log.h"
++#include "win32cnggcm.h"
++#endif
++
+ struct sshcipher_ctx {
+ 	int	plaintext;
+ 	int	encrypt;
+@@ -62,6 +70,9 @@ struct sshcipher_ctx {
+ 	struct chachapoly_ctx *cp_ctx;
+ 	struct aesctr_ctx ac_ctx; /* XXX union with evp? */
+ 	const struct sshcipher *cipher;
++#ifdef WINDOWS
++	struct cng_gcm *cng;	/* AES-GCM through CNG when set; evp unused */
++#endif
+ };
+ 
+ struct sshcipher {
+@@ -287,6 +298,18 @@ cipher_init(struct sshcipher_ctx **ccp, const struct sshcipher *cipher,
+ 	ret = SSH_ERR_INVALID_ARGUMENT;
+ 	goto out;
+ #else /* WITH_OPENSSL */
++#ifdef WINDOWS
++	if (cipher_authlen(cipher) && cng_gcm_wanted()) {
++		cc->cng = cng_gcm_new(key, cipher->key_len, iv, cipher_ivlen(cipher));
++		if (cc->cng == NULL) {
++			ret = SSH_ERR_LIBCRYPTO_ERROR;
++			goto out;
++		}
++		debug3_f("%s via CNG", cipher->name);
++		ret = 0;
++		goto out;
++	}
++#endif
+ 	type = (*cipher->evptype)();
+ 	if ((cc->evp = EVP_CIPHER_CTX_new()) == NULL) {
+ 		ret = SSH_ERR_ALLOC_FAIL;
+@@ -353,6 +376,15 @@ cipher_crypt(struct sshcipher_ctx *cc, u_int seqnr, u_char *dest,
+ 		memcpy(dest, src, aadlen + len);
+ 		return 0;
+ 	}
++#ifdef WINDOWS
++	if (cc->cng != NULL) {
++		if (authlen != cipher_authlen(cc->cipher) ||
++		    len % cc->cipher->block_size)
++			return SSH_ERR_INVALID_ARGUMENT;
++		return cng_gcm_crypt(cc->cng, cc->encrypt, dest, src, len,
++		    aadlen, authlen);
++	}
++#endif
+ #ifndef WITH_OPENSSL
+ 	if ((cc->cipher->flags & CFLAG_AESCTR) != 0) {
+ 		if (aadlen)
+@@ -427,6 +459,10 @@ cipher_free(struct sshcipher_ctx *cc)
+ 		cc->cp_ctx = NULL;
+ 	} else if ((cc->cipher->flags & CFLAG_AESCTR) != 0)
+ 		explicit_bzero(&cc->ac_ctx, sizeof(cc->ac_ctx));
++#ifdef WINDOWS
++	cng_gcm_free(cc->cng);
++	cc->cng = NULL;
++#endif
+ #ifdef WITH_OPENSSL
+ 	EVP_CIPHER_CTX_free(cc->evp);
+ 	cc->evp = NULL;
+@@ -455,6 +491,10 @@ cipher_get_keyiv(struct sshcipher_ctx *cc, u_char *iv, size_t len)
+ 	}
+ 	if ((cc->cipher->flags & CFLAG_NONE) != 0)
+ 		return 0;
++#ifdef WINDOWS
++	if (cc->cng != NULL)
++		return cng_gcm_get_iv(cc->cng, iv, len);
++#endif
+ 
+ #ifdef WITH_OPENSSL
+ 	evplen = EVP_CIPHER_CTX_iv_length(cc->evp);
+@@ -486,6 +526,10 @@ cipher_set_keyiv(struct sshcipher_ctx *cc, const u_char *iv, size_t len)
+ 		return 0;
+ 	if ((cc->cipher->flags & CFLAG_NONE) != 0)
+ 		return 0;
++#ifdef WINDOWS
++	if (cc->cng != NULL)
++		return cng_gcm_set_iv(cc->cng, iv, len);
++#endif
+ 
+ #ifdef WITH_OPENSSL
+ 	evplen = EVP_CIPHER_CTX_iv_length(cc->evp);

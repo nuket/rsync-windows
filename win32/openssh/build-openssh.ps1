@@ -14,6 +14,10 @@
     openssh/ submodule with the patches in win32/openssh/patches applied
     (see BUILD-CMAKE.md for what each one does), and leaves ssh.exe in the
     rsync build directory, where rsync.exe prefers it over the one on PATH.
+    The port's own code -- the I/O pumps and the CNG AES-GCM backend -- is
+    in win32pumps.c and win32cnggcm.c beside this script; patch 0003 adds
+    a Directory.Build.targets that compiles them into the OpenSSH projects,
+    and the other patches only hook Microsoft's files into them.
 
     Its libcrypto is the one Windows already has.  ssh.exe links against the
     LibreSSL SDK Microsoft publishes for Win32-OpenSSH (headers and import

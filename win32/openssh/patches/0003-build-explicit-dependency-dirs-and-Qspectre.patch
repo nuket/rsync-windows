@@ -1,19 +1,41 @@
-diff --git a/contrib/win32/openssh/Directory.Build.props b/contrib/win32/openssh/Directory.Build.props
+diff --git a/contrib/win32/openssh/Directory.Build.targets b/contrib/win32/openssh/Directory.Build.targets
 new file mode 100644
-index 0000000..c0898c7
+index 0000000..4470f4d
 --- /dev/null
-+++ b/contrib/win32/openssh/Directory.Build.props
-@@ -0,0 +1,11 @@
++++ b/contrib/win32/openssh/Directory.Build.targets
+@@ -0,0 +1,33 @@
 +<?xml version="1.0" encoding="utf-8"?>
-+<!-- Picked up by every vcxproj in this directory.  The projects already
-+     carry CFG, CET, /sdl, a static CRT and LTCG; this adds the speculative-
-+     execution mitigation, so ssh.exe matches the rsync.exe it ships with. -->
++<!-- Picked up by every vcxproj in this directory, after the project's own
++     settings.  Two things for the rsync for Windows port:
++
++     /Qspectre: the projects already carry CFG, CET, /sdl, a static CRT and
++     LTCG; this adds the speculative-execution mitigation, so ssh.exe
++     matches the rsync.exe it ships with.
++
++     The port's own translation units, from win32/openssh in the parent
++     repository: the I/O pumps (into posix_compat, beside the files they
++     serve) and the CNG AES-GCM backend (into libssh, beside cipher.c).
++     The patches in win32/openssh/patches only hook Microsoft's files into
++     them.  A .targets rather than a .props so the items pick up the
++     projects' include directories, and the projects pick up ours.
++     RsyncWin32Dir can be given on the msbuild command line. -->
 +<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
++  <PropertyGroup>
++    <RsyncWin32Dir Condition="'$(RsyncWin32Dir)' == ''">$(MSBuildThisFileDirectory)..\..\..\..\win32\openssh\</RsyncWin32Dir>
++  </PropertyGroup>
 +  <ItemDefinitionGroup>
 +    <ClCompile>
 +      <AdditionalOptions>/Qspectre %(AdditionalOptions)</AdditionalOptions>
++      <!-- win32compat: posix_compat's own files find w32fd.h beside them; ours are elsewhere -->
++      <AdditionalIncludeDirectories>$(RsyncWin32Dir);$(OpenSSH-Src-Path)contrib\win32\win32compat;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
 +    </ClCompile>
 +  </ItemDefinitionGroup>
++  <ItemGroup Condition="'$(MSBuildProjectName)' == 'win32iocompat'">
++    <ClCompile Include="$(RsyncWin32Dir)win32pumps.c" />
++  </ItemGroup>
++  <ItemGroup Condition="'$(MSBuildProjectName)' == 'libssh'">
++    <ClCompile Include="$(RsyncWin32Dir)win32cnggcm.c" />
++  </ItemGroup>
 +</Project>
 diff --git a/contrib/win32/openssh/config.h.vs b/contrib/win32/openssh/config.h.vs
 index 3a19ea0..de7a5b8 100644

@@ -124,17 +124,29 @@ The release therefore carries its own `ssh.exe`, built from the same source
 with that fixed, and `rsync.exe` prefers an `ssh.exe` in its own directory
 over the one on `PATH` (a remote shell given with a path is used as given).
 
-The source is the `openssh/` submodule, Win32-OpenSSH pinned to a commit, plus
-the patches in `win32/openssh/patches/`, which is where the fixes live:
+The source is the `openssh/` submodule, Win32-OpenSSH pinned to a commit. The
+port's own code sits beside it in `win32/openssh/`, as translation units of
+its own that the OpenSSH projects compile in:
+
+| File | What it is |
+| --- | --- |
+| `win32pumps.c`, `.h` | A reader and a writer thread for every fd that carries bulk data: a pipe or file on stdin/stdout, and the connection socket. Each pump owns a ring (1 MB for a pipe or file, 4 MB for the socket); `read()`, `write()`, `recv()` and `send()` copy straight between the caller's buffer and the ring, the thread reads or writes straight from it, and the main thread is woken by an APC only when it said it was waiting. A pump that finds its ring empty (or full) spins briefly before it sleeps and is signalled only when it is asleep, so at speed neither side makes a kernel call per packet. Compiled into `posix_compat`, beside the files it serves. |
+| `win32cnggcm.c`, `.h` | AES-GCM through Windows CNG (`BCryptEncrypt`/`BCryptDecrypt` with `BCRYPT_CHAIN_MODE_GCM`) instead of LibreSSL's EVP: 2.2 GB/s against 1.6 GB/s at 32 KB on the same core. Only the bulk cipher moves; key exchange, signatures, the other ciphers and MACs stay in `libcrypto.dll`. `SSH_AESGCM_BACKEND=libcrypto` in the environment forces the EVP path. Compiled into `libssh`, beside `cipher.c`. |
+
+The patches in `win32/openssh/patches/` are what remains: the hooks that route
+Microsoft's files into those units, and the fixes that have to be edits of
+upstream lines. The build script applies them once and checks each with
+`git apply --reverse --check`, so a patch that no longer fits the pinned source
+fails loudly rather than silently:
 
 | Patch | What it changes |
 | --- | --- |
-| `0001` | A pipe or file on stdin gets a reader thread with a 1 MB ring instead of a thread per 3 KB read; a pipe or file on stdout gets a writer thread with a ring instead of a thread per write. The first is the 17 MB/s upload cap; the second was a third of the client's time on a 20 Gbit link when receiving. `read()` and `write()` copy straight between the caller's buffer and the ring — `fileio.c` routes a pumped fd there before any of its own staging — and the pump is signalled only when the ring was full or empty. Console fds keep the original paths. |
-| `0002` | The connection socket gets a thread each way: `send()` copies into a 4 MB ring a thread sends straight from, `recv()` copies out of a ring a thread receives straight into. The socket work then overlaps the crypto instead of following it on the same thread, and each direction loses one copy. A pump thread that finds its ring empty (or full) spins briefly before it sleeps, and the main thread signals it only when it is asleep, so at speed neither side pays a kernel call per packet. Measured over 20 Gbit Thunderbolt: send 764 → ~1020 MB/s, receive 573 → ~930 MB/s. |
-| `0003` | Build: explicit dependency directories, `/Qspectre`, and `HAVE_PSELECT` in `config.h.vs`. |
+| `0001` | `termio.c` and `fileio.c` route a pipe or file on a sync fd to the pumps before any of their own staging (the original path is a thread per 3 KB read — `TERM_IO_BUF_SIZE`, sized for a console — which is the 17 MB/s upload cap, and a thread per write, a third of the client's time on a 20 Gbit link when receiving). Console fds keep the original paths. |
+| `0002` | `socketio.c` routes a connected socket's `recv()`, `send()`, `select()`, `shutdown()` and `close()` to the pumps, so the socket work overlaps the crypto instead of following it on the same thread, and each direction loses one copy. Measured over 20 Gbit Thunderbolt when first done: send 764 → ~1020 MB/s, receive 573 → ~930 MB/s. |
+| `0003` | Build: a `Directory.Build.targets` that compiles the two units above into their projects and adds `/Qspectre`; explicit dependency directories; `HAVE_PSELECT` in `config.h.vs`. |
 | `0004` | A native `pselect()`. Without one, OpenSSH's portable fallback creates a *notify pipe on every call* to close a signal race that this port's alertable waits do not have — and on Windows `pipe()` is a named pipe, an open and two closes, per packet. This alone took the client from ~340 to ~800 MB/s on a 20 Gbit link. |
 | `0005` | `sshbuf_reset()` keeps its allocation and zeroes only what was used since the last reset (a high-water mark), instead of shrinking to 256 bytes, zeroing the whole buffer and growing it again on the next packet. Two `realloc`s and a needless `memset` per packet gone; ~6% on a 20 Gbit link. |
-| `0006` | AES-GCM through Windows CNG (`BCryptEncrypt`/`BCryptDecrypt` with `BCRYPT_CHAIN_MODE_GCM`) instead of LibreSSL's EVP: 2.2 GB/s against 1.6 GB/s at 32 KB on the same core. Only the bulk cipher moves; key exchange, signatures, the other ciphers and MACs stay in `libcrypto.dll`. `SSH_AESGCM_BACKEND=libcrypto` in the environment forces the old path. With `0005`, and the pumps no longer signalling per packet, the client sends at ~1400 MB/s and receives at ~1260 MB/s (rsync ~1000 MB/s pushing, ~980 MB/s pulling). |
+| `0006` | `cipher.c` hands an AES-GCM context to `win32cnggcm.c` when the backend is wanted: four call sites (`init`, `crypt`, `free`, get/set IV) and a pointer in the context. With `0005`, and the pumps no longer signalling per packet, the client sends at ~1400 MB/s and receives at ~1260 MB/s (rsync ~1000 MB/s pushing, ~980 MB/s pulling). |
 | `0007` | `arc4random()` locks a critical section instead of a kernel Mutex. The packet layer draws random padding for every packet it sends, and the Mutex cost two system calls per draw — a tenth of the sending thread on a 20 Gbit link. |
 
 To build it:

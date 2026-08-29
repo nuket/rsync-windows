@@ -16048,4 +16048,61 @@ completed (exit code 0)
 ❯ Go for 1, then ask again. Also: for changes to openssh, do we have clean
   patches, or does it make sense to put this into our own specific translation
   units?
+
+● Done: 2e45839b pushed, CI green (run 33224739550), full suite 24/24 on x64 and
+  x86 against the Thunderbolt box, /tmp there back to 16 MB,
+  C:\Users\Claude\rsync-perf deleted. Future tests will use
+  claude@169.254.238.153 (verified).
+
+  Patch 0007: arc4random on a critical section
+
+  NtReleaseMutant and the contended lock entry are gone from the profile. Raw
+  send wall-clock (4 GB incl. connect) 3.5–3.9 s → 3.15–3.4 s; rsync push 997 →
+  ~1040 MB/s; pull unchanged (~955, inside the spread — it barely sends). Main
+  thread is now ~52% AES-GCM, ~25% memcpy, ~6% waiting on the peer, and not much
+  else.
+
+  Patches vs. our own translation units
+
+  Both, and the line is the one the port already uses for rsync:
+
+  - Patches stay for changes inside upstream code: sshbuf_reset (0005), the
+    cipher_* hooks (0006), arc4random's lock (0007), the pselect replacement
+    (0004) and the socket/pipe pump hooks in fileio.c/socketio.c. These edit
+    lines that already exist; a separate file can't replace them without a diff
+    somewhere. They're clean — each is a git diff against the pinned submodule
+    commit, reverse-checked by the build script, and 0003–0007 are small (0007
+    is 49 lines).
+  - What should move out: the bulk of 0001 and 0002 is new code — the pump rings
+    and threads — dropped into Microsoft's termio.c and socketio.c. That's ~900
+    lines of ours living inside a diff, which is what makes those two patches
+    fragile on a submodule bump. Splitting them into win32/openssh/win32pumps.c
+    (+ a header), added to the vcxproj by the build script, would shrink
+    0001/0002 to the hook lines only (~40 lines each). Same for the CNG backend:
+    win32cnggcm.c with cipher.c keeping only the four #ifdef WINDOWS call
+    sites.
+
+  That refactor is mechanical, doesn't change behaviour, and is the thing I'd do
+  next before any further OpenSSH work — it makes the next rebase and the next
+  reviewer's life easier.
+
+  Anything else single-threaded?
+
+  Remaining, with what each is worth:
+
+  1. Move the pump/CNG code into own translation units — not speed, but it's the
+     prerequisite hygiene above.
+  2. Zero-copy handoff to the socket pump (~7% each way): swap the packet output
+     buffer's storage with the pump instead of copying into its ring. Needs a
+     hook in packet.c — a core-code patch, though a small one.
+  3. Skip sshbuf_reset's zeroing for the two packet-state buffers (~2–3%):
+     trivial, but it's upstream's hygiene step; I'd leave it.
+  4. Console/NUL stdin thread-per-read (16% for a bare ssh host cmd > file
+     without -n; rsync unaffected).
+
+  The cipher at ~2.2 GB/s is the floor on this CPU, so the single-core ceiling
+  is ~2.2 GB/s and we're at ~1.4. My recommendation: do #1, then #2 if you want
+  the last stretch. Reminder: ufw on the Linux box is still off.
+
+✻ Cogitated for 11m 0s · done 2:57 AM
 ```
