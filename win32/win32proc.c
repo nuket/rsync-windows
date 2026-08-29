@@ -414,13 +414,39 @@ static int make_pipe(HANDLE *parent_end, HANDLE *child_end, int parent_reads)
  * child does not answer: the pipes are created either way and the fds are
  * the same fds.
  */
-#define SHM_RING_BYTES  (4 * 1024 * 1024)
+/*
+ * One ring's worth of buffering, per direction.  Measured on its own the
+ * ring holds ~22.5 GB/s anywhere from 128 KB to 2 MB, gives up 5% at 4 MB
+ * and falls to 13.8 GB/s at 8 MB, which is this machine's 6 MB L3 showing
+ * through: past it, every byte is copied out of memory rather than cache.
+ * End to end the difference is under 2% either way, since only the busy
+ * direction's ring is ever touched -- but 1 MB is free, is what the pipe it
+ * replaced held, and leaves the cliff a long way off.
+ */
+#define SHM_RING_BYTES  (1024 * 1024)
 #define SHM_ENV         "RSYNC_WIN32_SHMPIPE"
 #define SHM_READY_MS    5000
 
 /* RSYNC_WIN32_SHMPIPE_DEBUG=1 says on stderr which transport was settled on.
  * Not rprintf(): this file is linked into the C test helpers, which supply
  * no logging symbols. */
+/*
+ * How big each ring is.  The copy in and the copy out are what is left of
+ * the hop's cost, and they run at cache speed or memory speed depending on
+ * whether the two rings fit alongside everything else in L3 -- 30 GB/s
+ * against 13 GB/s measured on this machine -- so the size is worth being
+ * able to move without a rebuild.  RSYNC_WIN32_SHMPIPE_KB overrides it.
+ */
+static size_t shm_ring_bytes(void)
+{
+	const char *kb = getenv(SHM_ENV "_KB");
+	long n = kb && *kb ? atol(kb) : 0;
+
+	if (n < 16 || n > 64 * 1024)
+		return SHM_RING_BYTES;
+	return (size_t)n * 1024;
+}
+
 static int shm_disabled(void)
 {
 	const char *off = getenv("RSYNC_WIN32_NO_SHMPIPE");
@@ -499,9 +525,11 @@ pid_t win32_piped_child(char **command, int *f_in, int *f_out)
 	 * RSYNC_WIN32_NO_SHMPIPE=1 keeps the pipes, for measuring one against
 	 * the other and as a way out if a ring ever misbehaves. */
 	if (is_bundled_ssh(command[0]) && !shm_disabled()) {
-		if (shmpipe_create(&shm_to, SHM_RING_BYTES) < 0)
+		size_t bytes = shm_ring_bytes();
+
+		if (shmpipe_create(&shm_to, bytes) < 0)
 			shm_to = NULL;
-		else if (shmpipe_create(&shm_from, SHM_RING_BYTES) < 0) {
+		else if (shmpipe_create(&shm_from, bytes) < 0) {
 			shmpipe_free(shm_to);
 			shm_to = NULL;
 		}

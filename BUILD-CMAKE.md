@@ -578,6 +578,16 @@ A fifth of the work of a push, gone; the throughput follows more modestly,
 which is what a machine limited by its power budget rather than by any one
 stage looks like. A pull gains about the same (884 → 913 MB/s).
 
+The rings are 1MB each, which is what the pipe they replace held. Size turns
+out to matter less than it looks: measured on its own the ring holds ~22.5GB/s
+anywhere between 128KB and 2MB, gives up 5% at 4MB, and falls to 13.8GB/s at
+8MB — this machine's 6MB L3 showing through, since past it every byte is
+copied out of memory rather than cache. End to end the difference between a
+1MB and a 4MB ring was under 2% and did not survive a second sweep, because
+only the busy direction's ring is ever touched (the reverse ring carried 86
+bytes during a 4.3GB push). `RSYNC_WIN32_SHMPIPE_KB` sets it, if a link fast
+enough to care ever turns up.
+
 `RSYNC_WIN32_NO_SHMPIPE=1` keeps the pipes, which is how the two columns
 above were measured and a way out if a ring ever misbehaves.
 `RSYNC_WIN32_SHMPIPE_DEBUG=1` makes both sides say on stderr which transport
