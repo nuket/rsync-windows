@@ -544,6 +544,31 @@ Two things that have already been chased down, so they need not be again:
   `setup-windows-rsync` from dotfiles reinstalls the last *release* into
   `C:\Tools\rsync`, so an `-e C:/Tools/rsync/ssh.exe` benchmark can quietly
   be measuring an old client. `rsync.exe --version` names the commit.)
+* **Reading the temperature on this Latitude.** Windows exposes no usable
+  CPU sensor of its own — `MSAcpi_ThermalZoneTemperature` needs elevation
+  and only reports the `\_TZ.THM` ACPI zone, which sits at a constant
+  24.9 °C under any load. **Dell Command | Monitor** does the job: it adds
+  a WMI provider whose readings a *non-elevated* shell can query, once an
+  administrator has granted the account access to the namespace (Dell
+  leaves it Administrators-only):
+
+      Get-CimInstance -Namespace root/dcim/sysman -ClassName DCIM_NumericSensor |
+        Where-Object SensorType -eq 2 |
+        Select-Object ElementName, CurrentReading
+
+  Dell reports `UnitModifier = -1`, but **`CurrentReading` is already whole
+  degrees Celsius** — applying the modifier would turn 56 °C into 5.6 °C.
+  Granting that access has to be done with `Invoke-WmiMethod` under Windows
+  PowerShell 5.1; `Invoke-CimMethod` cannot write the security descriptor
+  back and fails with `Type mismatch` (0x80041005), and pwsh 7 has no
+  `Invoke-WmiMethod` at all.
+
+  Worth knowing what it shows: an all-core load takes the CPU probe from
+  56 °C to 91 °C in half a minute and leaves the clock at **62% of base**,
+  while three minutes of iperf3 — 12% CPU — sits at 82 °C with turbo still
+  held at 183%. Heat alone does not throttle this part; sustained power
+  draw does. That is why a transfer that also does crypto slows over a
+  session and one that does not, does not.
 * **Where the rest of a push goes, measured interleaved.** Feeding the same
   ssh client the same 2 GB three ways: from a file 1080-1181 MB/s, from a
   pipe fed by an unrelated process 840-869, and from rsync 819-841. So the

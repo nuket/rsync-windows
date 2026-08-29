@@ -16723,8 +16723,409 @@ completed (exit code 0)
 
   Let me take one final interleaved measurement with shorter runs to limit
   heating.
+
+● I found where the remaining performance is, and it isn't where I'd been
+  looking. Commit a8664bae records it; CI green.
+
+  First: two of my measurements were invalid
+
+  Your dotfiles setup-windows-rsync had replaced C:\Tools\rsync with the
+  f800ace2 release — the pre-pump client. My -e C:/Tools/rsync/ssh.exe
+  benchmarks were measuring that, which is why "raw ssh" suddenly read 342 MB/s
+  (its original number was ~341). Rebuilt both from HEAD and re-based
+  everything.
+
+  Worse, and affecting numbers going back further: this laptop thermally
+  throttles. The i5-8350U runs ~190% of base clock on the first sustained
+  transfer and decays past 90% within minutes — the same 4 GB push measured 3.66
+  s early in the session and 4.9 s later on identical code. Only interleaved
+  A/B is trustworthy. I redid the pipeline breakdown that way, twice.
+
+  Where the time actually goes
+
+  Same ssh client, same 2 GB, three ways, interleaved:
+
+  ┌─────────────────────────────────────────────┬────────────────┐
+  │                stdin source                 │   throughput   │
+  ├─────────────────────────────────────────────┼────────────────┤
+  │ a file                                      │ 1080–1181 MB/s │
+  ├─────────────────────────────────────────────┼────────────────┤
+  │ a pipe from an unrelated process (no rsync) │ 840–869 MB/s   │
+  ├─────────────────────────────────────────────┼────────────────┤
+  │ rsync                                       │ 819–841 MB/s   │
+  └─────────────────────────────────────────────┴────────────────┘
+
+  The pipe hop is the cost, not rsync. rsync's own protocol work — framing, the
+  whole-file checksum — is the last ~3%. That reframes the problem: I'd been
+  optimizing rsync's internals, and rsync was never the problem.
+
+  What I ruled out, each with a measurement
+
+  - Packet fragmentation (my leading hypothesis): instrumented the channel's
+    reads — a pipe delivers full 32 KB reads, 8191 of 8192, exactly like a file.
+  - Stalls / flow control: sampled the wire at 100 ms — flat, no sawtooth, in
+    both cases.
+  - A saturated stage: busiest thread anywhere is ssh's main thread at 78% of a
+    core; machine at 48%; far-end sshd-session 66%, remote rsync 75%; link good
+    for ~1.9 GB/s.
+  - Pump wake batching: built an eager-wake variant — no difference (907/911/829
+    vs 952/870/776, i.e. noise plus drift).
+  - Remote destination: writing to tmpfs is free — raw ssh to a file matched raw
+    ssh to /dev/null.
+
+  The honest answer on "the last bit"
+
+  A pipe costs two kernel copies of every byte plus cross-process wake-ups, and
+  that's inherent to ssh being a separate process — I can't remove it without a
+  different IPC design. Of that path, exactly two user-space memcpys are ours:
+  rsync's copy into its write ring, and ssh's copy out of its read ring. That's
+  the only genuinely addressable piece, and it's maybe a third of the hop.
+
+  There's also ~10% of pure pipelining slack: two concurrent streams reach ~1400
+  MB/s aggregate against ~1256 for one (four are no better — the machine runs
+  out).
+
+  I've stopped there rather than build a fourth thing that measures as noise.
+  Removing those two memcpys means letting the pump hand buffers over instead of
+  copying through a ring — a real change to both pump layers, and detecting a
+  ~5% win against ±25% thermal drift needs careful interleaved runs. Want me to
+  take that on? If not, the pragmatic lever today is parallel streams for
+  multi-file trees.
+
+✻ Sautéed for 25m 31s · done 8:50 PM
+
+※ recap: Goal: recover the last throughput in the rsync-over-ssh pipeline. I
+  measured that the remaining gap is the rsync-to-ssh pipe hop, not rsync
+  itself, and committed the findings. Next: your call on whether I remove the
+  two user-space memcpys in that path. (disable recaps in /config)
+
+❯ Ok, before doing that, I installed iperf3 here on Windows and there's a copy
+  on the Linux side, can you test the raw Thunderbolt link performance? Run
+  it for a 3 minutes also regularly sampling CPU, network, and thermals;
+  create an SVG and PNG graph of this. Looking at the Power Management in
+  Windows, I see PCIe Link State Power Management and some other settings in
+  Balanced profile, I don't know if there are any benefits to changing some of
+  these, or enabling the Ultimate Performance profile.
+
+❯ 1) Generate another set of charts for the Ultimate Performance mode vs
+  Balanced mode 2) Ah, also I'd like you to give me another set of 4 charts
+  like the windows-perf-*.png charts that cover the improves that we've made
+  after testing with Thunderbolt (as documented in Moar Speed Pt. 3!
+  Thunderbolt, Go!)
+
+● All done. Power plan restored to Balanced, test data cleaned off both
+  machines, 12 new chart files (SVG + PNG) in the repo root, untracked so you
+  can decide what to keep.
+
+  The link itself: 3 minutes of iperf3
+
+  thunderbolt-link-3min.svg/png — throughput, CPU on both ends, Windows
+  effective clock, Linux die temperature.
+
+  The link is rock solid. 1437 MB/s (11.5 Gbit/s) single stream, first 30 s 1443
+  vs last 30 s 1433 — a 0.7% drop over 3 minutes, no dips, zero retransmits.
+  Windows CPU only 9%, and the clock held 186% of base the whole run. So the
+  link doesn't degrade and doesn't throttle under its own load; the throttling
+  I've been fighting all along only appears once crypto pushes the package to
+  ~48% CPU.
+
+  Also worth knowing:
+  - 4 streams: 1894 MB/s — so a single stream isn't link-limited, and ssh at
+    ~1380 was already at ~96% of what one TCP stream can do here.
+  - Reverse (Linux→Windows) single stream: 1365 MB/s.
+  - Wire counters read 1826 MB/s for 1437 payload (~27%); both ends agree, so
+    it's the adapter's accounting, not loss.
+
+  Power management: neither setting helps
+
+  windows-perf-tb-power-plan.svg/png. You were right that Balanced looked
+  suspicious — PCIe Link State Power Management is on "Maximum power savings"
+  (AC and DC), and min processor state is 5%. Ultimate Performance flips exactly
+  those two (ASPM Off, min state 100%), so switching plans tests both at once.
+  I could switch plans unelevated, so I measured it, alternating
+  Balanced/Ultimate/Ultimate/Balanced so thermal drift couldn't favour either:
+
+  ┌──────────────────┬───────────┬───────────┬───────┐
+  │                  │ Balanced  │ Ultimate  │       │
+  ├──────────────────┼───────────┼───────────┼───────┤
+  │ rsync push, 2 GB │ 977 MB/s  │ 946 MB/s  │ −3.1% │
+  ├──────────────────┼───────────┼───────────┼───────┤
+  │ iperf3, 1 stream │ 1444 MB/s │ 1465 MB/s │ +1.5% │
+  └──────────────────┴───────────┴───────────┴───────┘
+
+  Run-to-run spread is ±4%, so iperf3 is a tie and rsync is, if anything,
+  slightly worse on Ultimate. Effective clock was 189% vs 187% either way — the
+  CPU was already boosting fully under Balanced, so raising the floor buys
+  nothing and just makes idle hotter on a 15 W chip that's thermally limited. My
+  recommendation: stay on Balanced.
+
+  If you want to try ASPM alone (the one I'd still consider, since it's the
+  Thunderbolt bus), in an admin shell:
+
+  powercfg /setacvalueindex SCHEME_CURRENT 501a4d13-42af-4429-9fd1-a8218c268e20
+  ee12f906-d277-404b-b6da-e5fa1a576df5 0
+  powercfg /setactive SCHEME_CURRENT
+  (0 = Off, 2 = Maximum power savings to restore.) Happy to re-measure if you
+  do.
+
+  Four charts for "Moar Speed Pt. 3"
+
+  - windows-perf-tb-ssh-ladder — the client step by step: 341→764→1020→1080→1400
+    sending, 223→573→930→1070→1260 receiving. 4.1× / 5.6×.
+  - windows-perf-tb-rsync — end to end: push 326→1000, pull 320→980. 3.1× both
+    ways.
+  - windows-perf-tb-cpu — same speed for less CPU: ssh.exe 2.45→1.76 cores
+    (aes128-gcm), 2.90→1.25 (chacha20); rsync.exe 89%→80% of a core.
+  - windows-perf-tb-budget — where a push's throughput goes: link 1894 → one
+    stream 1437 → ssh from a file 1275 → ssh from a pipe 1045 → rsync 945, with
+    the pipe hop (−18%) and rsync's protocol (−10%) called out.
+
+  Reading temperature as a normal user
+
+  Short answer: not without installing something once, because CPU package
+  temperature comes from an MSR (IA32_THERM_STATUS) that needs a kernel driver.
+  What I found on this machine:
+
+  - MSAcpi_ThermalZoneTemperature fails with access denied, so it would work in
+    an admin shell — but the only ACPI zone here is \_TZ.THM, which sat at a
+    constant 24.9 °C under full load. Almost certainly not worth it.
+  - The Dell Command | Monitor namespace (root/dcim/sysman) exists but has no
+    sensor classes — it isn't actually installed.
+  - No Intel Power Gadget (discontinued anyway).
+
+  Practical options, best first for a Latitude 7490:
+
+  1. Dell Command | Monitor (free from Dell) — installs a WMI provider;
+     afterwards temperatures are readable by a normal user with a plain
+     Get-CimInstance against root/dcim/sysman. Best fit for scripting on Dell
+     hardware, and no background app.
+  2. LibreHardwareMonitor — winget install
+     LibreHardwareMonitor.LibreHardwareMonitor (0.9.6 is in winget). Needs admin
+     to load its driver, but enable Options → Remote Web Server and any
+     unprivileged process can then read http://localhost:8085/data.json. Set it
+     to run at logon via Task Scheduler and it's transparent.
+  3. HWiNFO64 — winget install REALiX.HWiNFO. Sensors-only mode plus Shared
+     Memory Support lets unprivileged readers get the values; also logs CSV
+     directly.
+  4. Core Temp — winget install ALCPU.CoreTemp. Lightweight, package/per-core
+     temps, shared-memory API and CSV logging.
+
+  That said — for the throttling question specifically, \Processor
+  Information(_Total)\% Processor Performance needs no admin at all and measures
+  the thing that actually matters (are we still boosting?). That's what the
+  charts use, and it caught the throttling cleanly.
+
+✻ Churned for 23m 39s · done 9:23 PM
+
+※ recap: We're chasing the last performance in the rsync-to-ssh pipeline on the
+  Thunderbolt link; I finished the 3-minute iperf3 test, five charts, and the
+  power-plan comparison. Next: decide whether to remove the two user-space
+  memcpys in the pipe path. (disable recaps in /config)
 ```
 
-# Moar Speed Pt. 4! Windows Performance Analyzer (xperf.exe)
+# Moar Speed Pt. 4! iperf3
 
-TODO.
+```
+❯ Ok, before doing that, I installed iperf3 here on Windows and there's a copy
+  on the Linux side, can you test the raw Thunderbolt link performance? Run
+  it for a 3 minutes also regularly sampling CPU, network, and thermals;
+  create an SVG and PNG graph of this. Looking at the Power Management in
+  Windows, I see PCIe Link State Power Management and some other settings in
+  Balanced profile, I don't know if there are any benefits to changing some of
+  these, or enabling the Ultimate Performance profile.
+
+● iperf3 3.21 on both. Let me find the right counter names and get the Linux
+  sensors listed (my quoting mangled that one).
+
+● Windows exposes no usable CPU temperature (that zone is a static stub at 24.9
+  C), so I'll use effective clock vs base as the throttling signal — which is
+  the actionable one anyway. Let me verify the counters, then set up the run.
+
+● All counters work; Balanced plan, base clock 1.7 GHz, idle turbo at 122%.
+  Setting up the 3-minute run with sampling on both ends.
+
+● 11.2 Gbit/s = 1404 MB/s on a single stream — which means ssh at ~1380 was
+  already at link speed. Now the full 3-minute run with sampling on both ends.
+
+● All done. Power plan restored to Balanced, test data cleaned off both
+  machines, 12 new chart files (SVG + PNG) in the repo root, untracked so you
+  can decide what to keep.
+
+  The link itself: 3 minutes of iperf3
+
+  thunderbolt-link-3min.svg/png — throughput, CPU on both ends, Windows
+  effective clock, Linux die temperature.
+
+  The link is rock solid. 1437 MB/s (11.5 Gbit/s) single stream, first 30 s 1443
+  vs last 30 s 1433 — a 0.7% drop over 3 minutes, no dips, zero retransmits.
+  Windows CPU only 9%, and the clock held 186% of base the whole run. So the
+  link doesn't degrade and doesn't throttle under its own load; the throttling
+  I've been fighting all along only appears once crypto pushes the package to
+  ~48% CPU.
+
+  Also worth knowing:
+  - 4 streams: 1894 MB/s — so a single stream isn't link-limited, and ssh at
+    ~1380 was already at ~96% of what one TCP stream can do here.
+  - Reverse (Linux→Windows) single stream: 1365 MB/s.
+  - Wire counters read 1826 MB/s for 1437 payload (~27%); both ends agree, so
+    it's the adapter's accounting, not loss.
+
+  Power management: neither setting helps
+
+  windows-perf-tb-power-plan.svg/png. You were right that Balanced looked
+  suspicious — PCIe Link State Power Management is on "Maximum power savings"
+  (AC and DC), and min processor state is 5%. Ultimate Performance flips exactly
+  those two (ASPM Off, min state 100%), so switching plans tests both at once.
+  I could switch plans unelevated, so I measured it, alternating
+  Balanced/Ultimate/Ultimate/Balanced so thermal drift couldn't favour either:
+
+  ┌──────────────────┬───────────┬───────────┬───────┐
+  │                  │ Balanced  │ Ultimate  │       │
+  ├──────────────────┼───────────┼───────────┼───────┤
+  │ rsync push, 2 GB │ 977 MB/s  │ 946 MB/s  │ −3.1% │
+  ├──────────────────┼───────────┼───────────┼───────┤
+  │ iperf3, 1 stream │ 1444 MB/s │ 1465 MB/s │ +1.5% │
+  └──────────────────┴───────────┴───────────┴───────┘
+
+  Run-to-run spread is ±4%, so iperf3 is a tie and rsync is, if anything,
+  slightly worse on Ultimate. Effective clock was 189% vs 187% either way — the
+  CPU was already boosting fully under Balanced, so raising the floor buys
+  nothing and just makes idle hotter on a 15 W chip that's thermally limited. My
+  recommendation: stay on Balanced.
+
+  If you want to try ASPM alone (the one I'd still consider, since it's the
+  Thunderbolt bus), in an admin shell:
+
+  powercfg /setacvalueindex SCHEME_CURRENT 501a4d13-42af-4429-9fd1-a8218c268e20
+  ee12f906-d277-404b-b6da-e5fa1a576df5 0
+  powercfg /setactive SCHEME_CURRENT
+  (0 = Off, 2 = Maximum power savings to restore.) Happy to re-measure if you
+  do.
+
+  Four charts for "Moar Speed Pt. 3"
+
+  - windows-perf-tb-ssh-ladder — the client step by step: 341→764→1020→1080→1400
+    sending, 223→573→930→1070→1260 receiving. 4.1× / 5.6×.
+  - windows-perf-tb-rsync — end to end: push 326→1000, pull 320→980. 3.1× both
+    ways.
+  - windows-perf-tb-cpu — same speed for less CPU: ssh.exe 2.45→1.76 cores
+    (aes128-gcm), 2.90→1.25 (chacha20); rsync.exe 89%→80% of a core.
+  - windows-perf-tb-budget — where a push's throughput goes: link 1894 → one
+    stream 1437 → ssh from a file 1275 → ssh from a pipe 1045 → rsync 945, with
+    the pipe hop (−18%) and rsync's protocol (−10%) called out.
+
+  Reading temperature as a normal user
+
+  Short answer: not without installing something once, because CPU package
+  temperature comes from an MSR (IA32_THERM_STATUS) that needs a kernel driver.
+  What I found on this machine:
+
+  - MSAcpi_ThermalZoneTemperature fails with access denied, so it would work in
+    an admin shell — but the only ACPI zone here is \_TZ.THM, which sat at a
+    constant 24.9 °C under full load. Almost certainly not worth it.
+  - The Dell Command | Monitor namespace (root/dcim/sysman) exists but has no
+    sensor classes — it isn't actually installed.
+  - No Intel Power Gadget (discontinued anyway).
+
+  Practical options, best first for a Latitude 7490:
+
+  1. Dell Command | Monitor (free from Dell) — installs a WMI provider;
+     afterwards temperatures are readable by a normal user with a plain
+     Get-CimInstance against root/dcim/sysman. Best fit for scripting on Dell
+     hardware, and no background app.
+  2. LibreHardwareMonitor — winget install
+     LibreHardwareMonitor.LibreHardwareMonitor (0.9.6 is in winget). Needs admin
+     to load its driver, but enable Options → Remote Web Server and any
+     unprivileged process can then read http://localhost:8085/data.json. Set it
+     to run at logon via Task Scheduler and it's transparent.
+  3. HWiNFO64 — winget install REALiX.HWiNFO. Sensors-only mode plus Shared
+     Memory Support lets unprivileged readers get the values; also logs CSV
+     directly.
+  4. Core Temp — winget install ALCPU.CoreTemp. Lightweight, package/per-core
+     temps, shared-memory API and CSV logging.
+
+  That said — for the throttling question specifically, \Processor
+  Information(_Total)\% Processor Performance needs no admin at all and measures
+  the thing that actually matters (are we still boosting?). That's what the
+  charts use, and it caught the throttling cleanly.
+
+✻ Churned for 23m 39s · done 9:23 PM
+
+※ recap: We're chasing the last performance in the rsync-to-ssh pipeline on the
+  Thunderbolt link; I finished the 3-minute iperf3 test, five charts, and the
+  power-plan comparison. Next: decide whether to remove the two user-space
+  memcpys in the pipe path. (disable recaps in /config)
+
+● All six charts regenerated (SVG + PNG) with commit provenance.
+
+  Commit annotations
+
+  Where a bar represents a code change, the commit sits under its x-label in
+  purple monospace:
+
+  windows-perf-tb-ssh-ladder — one commit per step:
+  f800ace2 (shipped baseline) → fa2b317c (write pump + pselect) → e517f056
+  (socket pumps) → d013a0e8 (staging copies) → caca7c5e (CNG + sshbuf). The
+  footer names the three that improved things without moving these two numbers:
+  2e45839b, fc99ad80, eacfa8d2.
+
+  windows-perf-tb-rsync — f800ace2 → fa2b317c → e517f056 + d013a0e8 → caca7c5e +
+  fc99ad80, with a footer note that all of them live in the bundled ssh.exe
+  rather than rsync.exe, except 8e1bd987.
+
+  windows-perf-tb-cpu — caca7c5e → eacfa8d2 under each ssh.exe pair, and
+  eacfa8d2 → 8e1bd987 under the rsync.exe pair. I corrected that last one after
+  the first render: I'd initially written caca7c5e → 8e1bd987, but that A/B was
+  built against 8e1bd987's parent, so eacfa8d2 is the real "before".
+
+  windows-perf-tb-budget and windows-perf-tb-power-plan measure a state rather
+  than a change, so they carry "measured at a8664bae" instead of per-bar ids —
+  and the power-plan chart says explicitly that no code differs between the two
+  columns, only the Windows power plan.
+
+  thunderbolt-link-3min gets "iperf3 3.21, no rsync or ssh involved — this is
+  the link on its own, measured at a8664bae", plus the Thunderbolt driver
+  version.
+
+  Also fixed while regenerating
+
+  - The commit row initially collided with the footer on three charts — the
+    footer now anchors lower on those.
+  - The link chart's footer was being clipped off the bottom; margin widened,
+    verified by cropping and re-reading the rendered PNG.
+
+  All twelve files are in the repo root, still untracked, alongside your
+  existing windows-perf-* set. The generator scripts (tbcharts.py, linkchart.py)
+  are in the session scratchpad — say the word if you'd like them committed
+  somewhere like win32/tools/ so the numbers and provenance stay reproducible.
+
+✻ Baked for 4m 20s · done 9:46 PM
+
+❯ Ok I added the Dell Command | Monitor, see if you can read thermals via WMI.
+
+● It works — unelevated read succeeds. But the scaling is wrong: raw 56,
+  modifier -1 gives 5.6 °C, which is nonsense; the raw value is almost certainly
+  already °C. Let me confirm by loading the CPU and watching it move.
+
+● Definitive: the raw value is °C — Dell's UnitModifier of −1 is bogus. And look
+  at what it caught: CPU 56 → 91 °C under all-core load, with the clock at 62%
+  of base afterwards. That's the throttling I've been fighting, now directly
+  measurable.
+
+  Let me fix the scaling and check the query is cheap enough to sample once a
+  second.
+
+● ~115 ms per query — fine for 1 Hz. Let me re-run the 3-minute test with
+  Windows temperature sampled, and fix the separator bug that corrupted the CSV
+  last time.
+
+● Clean data: Windows CPU 61 → 82 °C while the clock held at ~183% — temperature
+  alone doesn't throttle, sustained power draw does. Let me rebuild the chart
+  with both machines' temperatures.
+```
+
+# Moar Speed Pt. X! Shared Memory IPC?
+
+# Moar Speed Pt. X! ISA-L?
+
+# Moar Speed Pt. X! Windows Performance Analyzer (xperf.exe)
