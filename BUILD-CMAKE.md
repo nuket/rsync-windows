@@ -533,6 +533,32 @@ reaches a zip.
 
 Two things that have already been chased down, so they need not be again:
 
+* **This machine thermally throttles, so only interleaved A/B counts.** The
+  i5-8350U is a 15 W laptop part: `\Processor Information(_Total)\%
+  Processor Performance` reads ~190% of base clock on the first run of a
+  sustained transfer and decays past 90% within a few minutes. The same
+  4 GB push measured 3.66 s early in a session and 4.9 s an hour later
+  with identical code. Never compare a number taken now against one taken
+  earlier — run the variants back to back in one command, repeated, and
+  compare within the set. (Also check what is actually installed:
+  `setup-windows-rsync` from dotfiles reinstalls the last *release* into
+  `C:\Tools\rsync`, so an `-e C:/Tools/rsync/ssh.exe` benchmark can quietly
+  be measuring an old client. `rsync.exe --version` names the commit.)
+* **Where the rest of a push goes, measured interleaved.** Feeding the same
+  ssh client the same 2 GB three ways: from a file 1080-1181 MB/s, from a
+  pipe fed by an unrelated process 840-869, and from rsync 819-841. So the
+  **pipe hop is the cost, not rsync** — rsync's own protocol work
+  (framing, the whole-file checksum) is the last ~3%. It is not packet
+  fragmentation (the channel gets full 32 KB reads, 8191 of 8192, from a
+  pipe just as from a file), not a stall (the wire rate is flat, no
+  sawtooth), and not flow control or a saturated stage: during a push the
+  busiest thread anywhere is ssh's main thread at 78% of a core, the
+  machine sits at 48%, and the far end's sshd-session and rsync run at 66%
+  and 75%. What a pipe adds is two kernel copies of every byte plus
+  cross-process wake-ups, of which only two user-space memcpys (rsync's
+  into its write ring, ssh's out of its read ring) are ours to remove.
+  Two concurrent streams reach ~1400 MB/s aggregate against ~1256 for one,
+  so a single stream leaves roughly 10% to pipelining; four are no better.
 * **A sampling profiler here measures wall time, not processor time** — a
   thread suspended in a system call is sampled in that call. A large
   `Nt*` share means blocked, not busy. Read it against the process's actual

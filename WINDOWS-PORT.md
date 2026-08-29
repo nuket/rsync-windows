@@ -14824,8 +14824,7 @@ at least for a single core. It remains an exercise to multithread that.
 
   Set-NetAdapterAdvancedProperty -Name "Ethernet 4" -DisplayName "Maximum transmission
   unit" -DisplayValue "65332 Bytes"
-  Get-NetIPInterface -InterfaceAlias "Ethernet 4" -AddressFamily IPv4 | Select-Object
-  NlMtu   # expect 65332
+  Get-NetIPInterface -InterfaceAlias "Ethernet 4" -AddressFamily IPv4 | Select-Object NlMtu   # expect 65332
 
   Linux (the thunderbolt0 link; takes effect immediately, not persistent across reboots):
 
@@ -16531,15 +16530,201 @@ completed (exit code 0)
 
 ● Reverted and clean. Recording the negative result so it isn't retried, and
   correcting my earlier over-claim about rsync.exe being "the ceiling".
+
+● I built it, measured it, and it doesn't help — so it's reverted. Commit
+  41addf40 records the finding; CI green.
+
+  What I built
+
+  A readahead engine in win32/win32readahead.c (+ header), with zero upstream
+  changes — read/write/open/close are all our own shims, so four one-line hooks
+  in win32io.c/win32compat.c were the whole integration:
+
+  - A reader thread filling 4 × 1 MB buffers ahead of rsync; read() served them
+    with a memcpy.
+  - Its own file object via ReOpenFile — DuplicateHandle would have shared the
+    file position and been wrong — so it never moved the position rsync sees,
+    and after serving it advanced the fd's own position (lseek64 is the CRT's,
+    not ours, so the CRT stays the source of truth).
+  - Gated to read-only disk fds, never-written, reads ≥ 64 KB; two engines
+    because this port runs the generator and receiver as threads sharing one fd
+    table; a thrash guard, and RSYNC_NO_READAHEAD to A/B one binary.
+
+  Why it's gone
+
+  I settled the design with a benchmark first, which is also where the trap was:
+
+  ┌────────────────┬────────┬─────────────────┐
+  │                │  wall  │ main-thread CPU │
+  ├────────────────┼────────┼─────────────────┤
+  │ plain read     │ 1.30 s │ 1.30 s          │
+  ├────────────────┼────────┼─────────────────┤
+  │ reader thread  │ 0.86 s │ 0.77 s          │
+  ├────────────────┼────────┼─────────────────┤
+  │ overlapped I/O │ 1.48 s │ 1.48 s          │
+  └────────────────┴────────┴─────────────────┘
+
+  That looked decisive — 3.1 → 4.8 GB/s, 40–55% of the main thread handed back.
+  (It also killed the async option: a ReadFile that hits the page cache
+  completes inline whether or not the handle is overlapped, so double-buffered
+  FILE_FLAG_OVERLAPPED came out slower than a plain read. Only another thread
+  moves that copy.)
+
+  In rsync it bought nothing:
+
+  ┌───────────────────────┬─────────────────────────┬────────────────────────┐
+  │                       │      readahead off      │      readahead on      │
+  ├───────────────────────┼─────────────────────────┼────────────────────────┤
+  │ push over Thunderbolt │ 1040 / 1102 / 1098 MB/s │ 1079 / 1068 / 950 MB/s │
+  ├───────────────────────┼─────────────────────────┼────────────────────────┤
+  │ local 4 GB copy       │ 1218 / 1382 MB/s        │ 1245 / 1180 MB/s       │
+  ├───────────────────────┼─────────────────────────┼────────────────────────┤
+  │ rsync.exe CPU         │ ~3.1 s                  │ ~4.7 s                 │
+  └───────────────────────┴─────────────────────────┴────────────────────────┘
+
+  No wall-time change in either case, and +1.8 s of CPU per 4 GB — the reader
+  thread's copy plus the ring-to-caller copy that intercepting read() forces.
+  All transfers hashed identical, with and without.
+
+  The reason is the thing worth keeping: my benchmark had the main thread
+  computing between reads with no slack. rsync's already blocks on the pipe to
+  ssh — about a quarter of its wall time — so the read was overlapping a wait
+  that existed anyway. I'd rather not ship a change that costs a core's worth of
+  work to move time that wasn't on the critical path.
+
+  The correction that matters
+
+  This also corrects something my last few messages implied. rsync.exe's main
+  thread sitting at ~85% of a core does not make it what sets the pace. Two
+  attempts to hand it back time have now moved CPU and not throughput — the
+  syscall trims in 8e1bd987 (kept; those were free) and this one. I've written
+  that into BUILD-CMAKE.md alongside the other two dead ends (the msleep(20)
+  teardown poll, async I/O) with the numbers, so the next person doesn't
+  re-derive them.
+
+  The next genuine lead is the pipeline as a whole — rsync → pipe → ssh → socket
+  — rather than either process alone. That's a bigger piece of work than a
+  single-file optimisation, and I'd want a plan before starting it.
+
+  Everything reverted, suite 24/24 on x64 and x86, working tree clean apart from
+  your untracked PERF.txt and chart PNG, test data cleaned off both machines.
+  ufw on the Linux box is still disabled.
+
+✻ Crunched for 20m 50s · done 7:06 PM
+
+※ recap: Goal was speeding up rsync-over-ssh on Windows; the ssh client work
+  landed, but the source-file readahead I built showed no throughput gain and
+  was reverted, with the finding documented and pushed. Next lead is the whole
+  rsync-to-ssh pipeline, which needs a plan first. (disable recaps in /config)
+
+❯ Ok check and optimize the whole rsync-to-ssh pipeline, there's something
+  that is still leaving performance on the table, and we should get that last
+  bit back.
+
+● Good — this deserves a proper end-to-end look rather than another
+  single-component guess. Let me start by checking whether my baseline was even
+  fair: "raw ssh" discarded the data with cat > /dev/null, while rsync actually
+  writes the file on the far side.
+
+● Now the picture is real and the gap is genuine: raw ssh 1380 MB/s, rsync push
+  1120 — about 19% left on the table. Note writing to tmpfs costs nothing (B ≥
+  A), so the remote destination isn't it. Let me find which end is saturated by
+  measuring CPU on both.
+
+● Two things stand out: local ssh.exe burns 7.0 s of CPU for rsync's 4 GB versus
+  5.34 s for the same 4 GB from a file — 31% more work for identical bytes —
+  and the remote is not saturated. So the cost is in how rsync feeds the pipe.
+  Let me measure the actual write sizes.
+
+● The trace only catches the non-pump path; pumped writes bypass it. Let me look
+  at rsync's own output buffering, which is the authoritative answer.
+
+  Searched for 3 patterns, read 1 file (ctrl+o to expand)
+
+● rsync's output buffer is 64 KB (IO_BUFFER_SIZE * 2). The suspicion is that ssh
+  ends up building smaller SSH packets when fed by a pipe than by a file,
+  paying per-packet cost more often. Let me check what size ssh asks for, then
+  measure it directly.
+
+  Read 1 file (ctrl+o to expand)
+
+● channel_handle_rfd reads up to 32 KB into the channel buffer and whatever it
+  gets becomes one SSH packet — so a partially-filled pipe produces small
+  packets. My pump signals "readable" on the very first byte, which would cause
+  exactly that. Let me instrument the pump to confirm before designing anything.
+
+● My hypothesis was wrong — rsync's data reaches ssh in full 32 KB reads (8191
+  of 8192), same as a file. And re-reading the CPU numbers, ssh.exe consumes
+  ~1.8 cores in both cases; it only totals more because the run lasts longer. So
+  nothing is saturated — this looks like a stall, not a throughput ceiling. Let
+  me watch the wire.
+
+● Both are steady — no stalls or sawtooth, so it isn't a flow-control problem;
+  rsync's pipeline simply runs at a lower steady rate (wire 1380 vs 1700 MB/s).
+  Nothing I've measured is saturated, but I never measured the remote sshd. Let
+  me fix that.
+
+● PowerShell(Set-Location C:\Users\Claude\devsrc\rsync-windows;
+            $sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devsr
+            c-rsync-windows\66c00488-88a8-48c3-be31-6…)
+  ⎿  === rawssh : remote CPU
+        cat            busy  2.4 s  mean  60% of a core  peak  68%
+        sshd-session   busy  2.4 s  mean  72% of a core  peak  78%
+     … +3 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Nothing is saturated on either end (remote sshd-session 66%, remote rsync
+  75%). With a steady rate and no saturated stage, the limit is latency in the
+  chain — and the rsync case has one extra hop. Let me profile the client's main
+  thread in both cases.
+
+● No thread anywhere is near saturation — busiest is ssh's main thread at 78%,
+  remote sshd 66%, remote rsync 75%. Every stage idle ~25% is the signature of a
+  latency-bound pipeline (SSH channel window ÷ round-trip). Cheap decisive
+  test: if that's it, concurrent transfers should scale.
+
+● Concurrency barely scales (4 streams = 1146 MB/s vs 1 stream ≈ 1100), which
+  rules out the latency hypothesis and points at a shared resource. Let me check
+  the machine itself — this is a 4-core laptop, and the pipeline uses ~2.6
+  cores per stream.
+
+● Machine is only at 48% — not CPU-bound either. But my concurrency test was
+  flawed: those four 1 GB source files were freshly written and not warmed, so
+  it may have been measuring disk. Let me redo it properly.
+
+● Now it's clearer: with startup subtracted, one stream ≈ 1256 MB/s, two ≈ 1403,
+  four ≈ 1223 — so a single stream leaves ~10% on the table and the pipeline
+  tops out near raw ssh's 1380. The decisive question is whether that 10% is
+  rsync's protocol work or simply the pipe hop. Same ssh, fed by a pipe, with no
+  rsync involved:
+
+● Now I have a real signal: the pipe hop costs ~20% (file stdin 1275 → pipe
+  stdin 1045), with rsync's protocol adding ~8% on top. But test B may be
+  confounded — cmd creates pipes with a small default buffer, whereas rsync
+  creates 1 MB ones. Let me check the read sizes.
+
+● Not confounded — the python-fed pipe also delivers full 32 KB reads. So the
+  pipe hop genuinely costs ~18–20%, independent of rsync.
+
+  One last hypothesis worth testing: my pumps deliberately wake in batches (a
+  writer at 128 KB, a reader at 256 KB of freed room). That was tuned to cut
+  syscalls, but in a chained pipeline it can add hand-off latency — which is
+  exactly what a single stream is losing.
+
+● No consistent difference — and note the numbers drifting downward across
+  rounds (907→829 batched, 952→776 eager). That's thermal, not code. Let me
+  confirm, and revert my diagnostic instrumentation.
+
+● Confirmed thermal throttling: 107% → 92% → 87% of base clock and falling. This
+  i5-8350U is a 15 W laptop part, which is why absolute numbers drifted from
+  ~1380 down to ~900 across this session. Only tightly interleaved A/B
+  comparisons are valid — which is what my pipeline breakdown used. Tree is
+  clean; instrumentation reverted.
+
+  Let me take one final interleaved measurement with shorter runs to limit
+  heating.
 ```
 
 # Moar Speed Pt. 4! Windows Performance Analyzer (xperf.exe)
 
-```
-❯ How do I install Windows Performance Analyzer, is it part of Visual Studio?
-  If no or even if so, can you add it to the windows-setup process here? Also:
-  in other testing, I found out that xperf.exe needed to be run by an
-  administrator, but I usually run in this account as a Normal user. Is there a
-  way to change xperf's permissions to allow a normal user to run it, or is
-  there an easy way to make it usable by Claude?
-```
+TODO.
