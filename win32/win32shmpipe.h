@@ -18,8 +18,28 @@
  * Both ends fall back to the pipe if any of that fails, so an ssh.exe that
  * does not know about this still works.
  *
- * Copyright (C) 2026 Max Vilimpoc, rsync CMake/Windows port.
- * Distributed under the same GPL-3.0-or-later terms as the rest of rsync.
+ * Copyright (c) 2026 Max Vilimpoc.
+ *
+ * Permissive on purpose: this file is compiled into both rsync.exe, which is
+ * GPL-3.0-or-later, and the ssh.exe beside it, which is BSD and says so ("The
+ * licences which components of this software fall under ... all components
+ * are under a BSD licence, or a licence more free than that").  GPL code in
+ * ssh.exe would make that untrue and would relicense the binary, so this file
+ * is BSD 2-clause, which either can include.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT, ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE.
  */
 #ifndef WIN32SHMPIPE_H
 #define WIN32SHMPIPE_H
