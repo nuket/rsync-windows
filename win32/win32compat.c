@@ -116,6 +116,21 @@ int win32_open(const char *path, int flags, ...)
 	flags &= ~(O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC | O_NOATIME | O_NOCTTY | O_NONBLOCK);
 	flags |= _O_BINARY;
 
+	/* A file opened only for reading is, in rsync, a file about to be read
+	 * from start to finish and never looked at again: _O_SEQUENTIAL passes
+	 * FILE_FLAG_SEQUENTIAL_SCAN, which tells the cache manager to read
+	 * further ahead and to drop what is behind rather than keeping it.
+	 * RSYNC_WIN32_NO_SEQSCAN=1 turns it off. */
+	if ((flags & (_O_WRONLY | _O_RDWR)) == 0) {
+		static int off = -1;
+		if (off < 0) {
+			const char *e = getenv("RSYNC_WIN32_NO_SEQSCAN");
+			off = e && *e && *e != '0';
+		}
+		if (!off)
+			flags |= _O_SEQUENTIAL;
+	}
+
 	/* Windows keeps one bit of a Unix mode: whether the file is writable.
 	 * Carry that bit across rather than making every created file
 	 * read-write and relying on the chmod that follows. */
