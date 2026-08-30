@@ -375,7 +375,14 @@ def nulls():
 # --------------------------------------------------------------------------
 # 7. The whole arc, 521ad8ad -> today
 # --------------------------------------------------------------------------
-def journey():
+def journey(scale="log"):
+    """The whole arc, twice.
+
+    On a log axis every step is legible but the *size* of the win is flattened
+    -- that is what a log axis is for.  On a linear axis the early bars nearly
+    vanish, which is the honest picture of what 80x actually looks like.  Both
+    are drawn, because each hides what the other shows.
+    """
     # (label, MB/s, commit, era)  era 0 = 2.5 GbE, era 1 = Thunderbolt
     steps = [
         ("Windows ssh\nas shipped", 17, "before 521ad8ad", 0),
@@ -399,14 +406,21 @@ def journey():
     cols[-1] = GREEN
     bars = ax.bar(x, vals, 0.52, color=cols, zorder=3)
 
-    ax.set_yscale("log")
-    # headroom above the bars for the era titles and the two multipliers
-    ax.set_ylim(9, 7000)
-    ticks = [10, 20, 50, 100, 200, 500, 1000, 2000]
-    ax.yaxis.set_major_locator(FixedLocator(ticks))
-    ax.yaxis.set_minor_locator(FixedLocator([]))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: "%g" % v))
-    ax.set_ylabel("MB/s, rsync push (Windows → Linux), log scale")
+    if scale == "log":
+        ax.set_yscale("log")
+        # headroom above the bars for the era titles and the two multipliers
+        ax.set_ylim(9, 7000)
+        ticks = [10, 20, 50, 100, 200, 500, 1000, 2000]
+        ax.yaxis.set_major_locator(FixedLocator(ticks))
+        ax.yaxis.set_minor_locator(FixedLocator([]))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: "%g" % v))
+        ax.set_ylabel("MB/s, rsync push (Windows → Linux), log scale")
+        y_era, y_span1, y_span2, y_tb, y_25 = 5200, 900, 2900, 2020, 185
+    else:
+        ax.set_ylim(0, 2650)
+        ax.yaxis.set_major_locator(MultipleLocator(200))
+        ax.set_ylabel("MB/s, rsync push (Windows → Linux)")
+        y_era, y_span1, y_span2, y_tb, y_25 = 2500, 700, 2150, 1930, 200
     ax.grid(True, axis="y", color="#e2e2e8", lw=0.8, zorder=0)
     ax.set_axisbelow(True)
 
@@ -425,15 +439,16 @@ def journey():
     # link ceilings, per era.  Labels sit at the outer edge of each span so
     # they cannot land on a bar's value.
     ax.plot([-0.5, 1.5], [280, 280], ls="--", lw=1.4, color=ACCENT, zorder=4)
-    ax.annotate("2.5 GbE line rate ≈ 280", xy=(-0.44, 185), ha="left",
-                va="top", fontsize=9, color=ACCENT, fontweight="bold")
+    ax.annotate("2.5 GbE line rate ≈ 280", xy=(-0.44, y_25), ha="left",
+                va="top" if scale == "log" else "bottom",
+                fontsize=9, color=ACCENT, fontweight="bold")
     ax.plot([1.5, 7.5], [1900, 1900], ls="--", lw=1.4, color=ACCENT, zorder=4)
-    ax.annotate("Thunderbolt link ≈ 1900", xy=(1.6, 2020), ha="left",
+    ax.annotate("Thunderbolt link ≈ 1900", xy=(1.6, y_tb), ha="left",
                 fontsize=9, color=ACCENT, fontweight="bold")
     ax.axvline(1.5, color="#b9b9c2", lw=1.1, ls=":", zorder=1)
-    ax.annotate("2.5 GbE", xy=(0.5, 5200), ha="center", fontsize=10.5,
+    ax.annotate("2.5 GbE", xy=(0.5, y_era), ha="center", fontsize=10.5,
                 color="#666666", style="italic")
-    ax.annotate("Thunderbolt networking, 20 Gbit/s", xy=(4.5, 5200), ha="center",
+    ax.annotate("Thunderbolt networking, 20 Gbit/s", xy=(4.5, y_era), ha="center",
                 fontsize=10.5, color="#666666", style="italic")
 
     # multipliers, in the clear band between the bars and the era titles
@@ -444,18 +459,36 @@ def journey():
                     textcoords="offset points", ha="center", va="bottom",
                     fontsize=10, color=GREEN, fontweight="bold")
 
-    span(0, 1, 900, "15×\nand then the link, not the\ncode, was the limit")
-    span(2, 7, 2900, "4.2× more, once a faster link showed there was room")
+    span(0, 1, y_span1, "15×\nand then the link, not the\ncode, was the limit")
+    span(2, 7, y_span2, "4.2× more, once a faster link showed there was room")
 
-    ax.set_title("From 17 MB/s to 1362: the whole optimisation arc, 521ad8ad → e9918e59",
-                 fontsize=15, fontweight="bold", loc="left", pad=16)
-    footer(fig,
-           "Each bar is what was measured at that commit, in that session; this laptop throttles, so "
-           "only same-session comparisons are exact.\n"
-           "The last bar is today's back-to-back figure. 80× overall, on a 15 W laptop doing AES on "
-           "every byte — and the remaining gap to the\ndashed line is the far-end receiver, not this "
-           "machine.", y=-0.155)
-    save(fig, "windows-perf-journey")
+    if scale == "log":
+        ax.set_title("From 17 MB/s to 1362: the whole optimisation arc, "
+                     "521ad8ad → e9918e59",
+                     fontsize=15, fontweight="bold", loc="left", pad=16)
+        extra = ("Each bar is what was measured at that commit, in that session; this laptop "
+                 "throttles, so only same-session comparisons are exact.\n"
+                 "The last bar is today's back-to-back figure. 80× overall, on a 15 W laptop "
+                 "doing AES on every byte — and the remaining gap to the\ndashed line is the "
+                 "far-end receiver, not this machine.  Log scale: every step is legible, but "
+                 "the size of the win is flattened.")
+    else:
+        # the point of this one is the bar you can barely see; the value label
+        # above it is already drawn, so this only needs to say why it is there
+        ax.annotate("where this started:\na sliver, 17 MB/s",
+                    xy=(0, 17), xytext=(0, 430), ha="center", va="bottom",
+                    fontsize=10, color=INK, fontweight="bold",
+                    arrowprops=dict(arrowstyle="->", color=INK, lw=1.2,
+                                    shrinkA=4, shrinkB=2))
+        ax.set_title("The same arc on a linear axis: 80× since 521ad8ad",
+                     fontsize=15, fontweight="bold", loc="left", pad=16)
+        extra = ("The companion to windows-perf-journey-log.  Same numbers, linear axis: the "
+                 "whole 2.5 GbE era is the bottom tenth of\nthe chart, and the first bar is a "
+                 "sliver.  That is what 80× looks like when it is not flattened by a log scale. "
+                 "Each bar is what\nwas measured at that commit, in that session; this laptop "
+                 "throttles, so only same-session comparisons are exact.")
+    footer(fig, extra, y=-0.155)
+    save(fig, "windows-perf-journey-%s" % scale)
 
 
 ceiling()
@@ -464,4 +497,5 @@ busy()
 cpu_profile()
 spin()
 nulls()
-journey()
+journey("log")
+journey("linear")

@@ -19303,11 +19303,17 @@ completed (exit code 0)
   - windows-perf-xperf-nulls — ring size flat across 64×, and the sequential-write
     hint doing nothing.
 
-  windows-perf-journey is the overall one: rsync push from 17 MB/s to 1362, log
-  scale, the two link eras separated, each era's line rate as a dashed ceiling. It
-  shows something the individual charts don't — the port hit the 2.5 GbE ceiling
-  (15×) and stalled there until a faster link revealed there was more to win (4.2×
-  more). 80× overall, on a 15 W laptop doing AES on every byte.
+  windows-perf-journey-log and windows-perf-journey-linear are the overall pair:
+  rsync push from 17 MB/s to 1362, the two link eras separated, each era's line
+  rate as a dashed ceiling. They show something the individual charts don't — the
+  port hit the 2.5 GbE ceiling (15×) and stalled there until a faster link
+  revealed there was more to win (4.2× more). 80× overall, on a 15 W laptop doing
+  AES on every byte.
+
+  Two axes because each hides what the other shows. The log one makes every step
+  legible and flattens the size of the win; the linear one puts the whole 2.5 GbE
+  era in the bottom tenth of the chart and leaves the first bar a sliver, which is
+  what 80× actually looks like.
 
   Two things I corrected while charting, worth flagging since they'd otherwise be
   baked into published data:
