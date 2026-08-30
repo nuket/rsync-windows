@@ -120,6 +120,22 @@ if (-not $sdk) { throw "no Windows 10/11 SDK found" }
 Write-Host "    msbuild    : $msbuild"
 Write-Host "    windows sdk: $($sdk.Name)"
 
+# NASM, for the two ISA-L AES-GCM objects (isal/README.md).  Optional on
+# purpose: without it ssh.exe is built exactly as before and AES-GCM stays on
+# CNG, so nobody needs a new tool to build this.  $env:NASM overrides.
+$nasm = if ($env:NASM -and (Test-Path $env:NASM)) { $env:NASM }
+        else { (Get-Command nasm.exe -ErrorAction SilentlyContinue).Source }
+if (-not $nasm) {
+    # NASM's own Windows installer -- what winget runs -- puts it here, per
+    # user and not on PATH.
+    foreach ($guess in (Join-Path $Env:LOCALAPPDATA 'bin\NASM\nasm.exe'),
+                       (Join-Path ${Env:ProgramFiles} 'NASM\nasm.exe'),
+                       (Join-Path ${Env:ProgramFiles(x86)} 'NASM\nasm.exe')) {
+        if ($guess -and (Test-Path $guess)) { $nasm = $guess; break }
+    }
+}
+Write-Host ("    nasm       : " + $(if ($nasm) { $nasm } else { "not found -- ssh.exe will use CNG for AES-GCM" }))
+
 # paths.targets carries a hard-coded SDK version; point it at the one present.
 $pt = Join-Path $sol 'paths.targets'
 $xml = [xml](Get-Content $pt)
@@ -177,14 +193,38 @@ foreach ($a in $archs) {
     Copy-Item (Join-Path $libressl "bin\desktop\$a\libcrypto.lib") (Join-Path $dep 'lib\libcrypto.lib') -Force
     Copy-Item (Join-Path $zlib "bin\$a\zlib.lib") (Join-Path $dep 'lib\zs.lib') -Force
 
+    # The ISA-L objects, if NASM is here and we are building x64 (the
+    # assembly is win64 only).  They go into the link of ssh.exe and turn on
+    # the backend in win32isalgcm.c; without them that file compiles to a
+    # stub that says "not available" and CNG carries on.
+    $isalObjs = @()
+    if ($nasm -and $a -eq 'x64') {
+        Step "${a}: ISA-L AES-GCM (nasm)"
+        $isalSrc = Join-Path $PSScriptRoot 'isal'
+        $isalOut = Join-Path $sol "isal-obj\$platform"
+        New-Item -ItemType Directory -Force $isalOut | Out-Null
+        foreach ($f in 'gcm128_avx_gen4', 'gcm256_avx_gen4') {
+            $obj = Join-Path $isalOut "$f.obj"
+            & $nasm -f win64 -I "$isalSrc/" (Join-Path $isalSrc "$f.asm") -o $obj
+            if ($LASTEXITCODE -ne 0) { throw "nasm failed on $f.asm" }
+            $isalObjs += $obj
+        }
+        Write-Host "    $($isalObjs.Count) objects -> $isalOut"
+    }
+
     Step "${a}: ssh.exe (msbuild, $platform $Configuration)"
     # In dependency order; the projects reference the dependency directory
     # explicitly, so vcpkg's MSBuild integration is not needed and manifest
     # mode is off.  /nodeReuse:false: otherwise MSBuild leaves worker
     # processes behind holding the tree open.
     foreach ($proj in 'config.vcxproj', 'win32iocompat.vcxproj', 'openbsd_compat.vcxproj', 'libssh.vcxproj', 'ssh.vcxproj') {
-        & $msbuild (Join-Path $sol $proj) "/p:Platform=$platform" "/p:Configuration=$Configuration" `
-            "/p:SolutionDir=$sol\" '/p:VcpkgEnableManifest=false' /m /nologo /v:m /nodeReuse:false
+        $mbArgs = @("/p:Platform=$platform", "/p:Configuration=$Configuration",
+                    "/p:SolutionDir=$sol\", '/p:VcpkgEnableManifest=false')
+        # A directory, not a list: MSBuild reads a semicolon in a /p: value as
+        # the start of another property, and the two names are fixed anyway.
+        if ($isalObjs) { $mbArgs += "/p:RsyncIsalObjDir=$isalOut" }
+        $mbArgs += '/m', '/nologo', '/v:m', '/nodeReuse:false'
+        & $msbuild (Join-Path $sol $proj) @mbArgs
         if ($LASTEXITCODE -ne 0) { throw "msbuild failed: $proj ($a)" }
     }
 

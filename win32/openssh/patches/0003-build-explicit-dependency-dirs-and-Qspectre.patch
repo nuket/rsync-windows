@@ -1,9 +1,9 @@
 diff --git a/contrib/win32/openssh/Directory.Build.targets b/contrib/win32/openssh/Directory.Build.targets
 new file mode 100644
-index 0000000..b1de516
+index 0000000..2eeff64
 --- /dev/null
 +++ b/contrib/win32/openssh/Directory.Build.targets
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,54 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!-- Picked up by every vcxproj in this directory, after the project's own
 +     settings.  Two things for the rsync for Windows port:
@@ -39,8 +39,24 @@ index 0000000..b1de516
 +  </ItemGroup>
 +  <ItemGroup Condition="'$(MSBuildProjectName)' == 'libssh'">
 +    <ClCompile Include="$(RsyncWin32Dir)win32cnggcm.c" />
++    <ClCompile Include="$(RsyncWin32Dir)win32isalgcm.c" />
 +    <ClCompile Include="$(RsyncWin32Dir)win32sendbuf.c" />
 +  </ItemGroup>
++  <!-- RsyncIsalObjDir, when build-openssh.ps1 found NASM and assembled them
++       there: the two AES-GCM objects go into the link, and win32isalgcm.c
++       compiles to the real backend rather than a stub that reports itself
++       unavailable.  A directory rather than a list of files because MSBuild
++       reads a semicolon in a /p: value as the start of another property. -->
++  <ItemDefinitionGroup Condition="'$(RsyncIsalObjDir)' != '' and '$(MSBuildProjectName)' == 'libssh'">
++    <ClCompile>
++      <PreprocessorDefinitions>RSYNC_ISAL_GCM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++    </ClCompile>
++  </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(RsyncIsalObjDir)' != '' and '$(MSBuildProjectName)' == 'ssh'">
++    <Link>
++      <AdditionalDependencies>$(RsyncIsalObjDir)\gcm128_avx_gen4.obj;$(RsyncIsalObjDir)\gcm256_avx_gen4.obj;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++  </ItemDefinitionGroup>
 +</Project>
 diff --git a/contrib/win32/openssh/config.h.vs b/contrib/win32/openssh/config.h.vs
 index 3a19ea0..de7a5b8 100644

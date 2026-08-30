@@ -133,6 +133,7 @@ its own that the OpenSSH projects compile in:
 | `win32pumps.c`, `.h` | A reader and a writer thread for every fd that carries bulk data: a pipe or file on stdin/stdout, and the connection socket. Each pump owns a ring (1 MB for a pipe or file, 4 MB for the socket); `read()`, `write()`, `recv()` and `send()` copy straight between the caller's buffer and the ring, the thread reads or writes straight from it, and the main thread is woken by an APC only when it said it was waiting. A pump with nothing to do sleeps at once and is woken in batches — a writer once 128 KB has piled up, a reader once a chunk's worth of room has opened, and every writer with anything queued when the main thread is about to wait (patch 0009) — so the main thread pays one `SetEvent()` per four packets rather than one per packet, and no pump ever spins (an earlier version did, and burned a core per pump on a slow link). Each pump also gets an ideal processor away from the main thread's, so a woken pump does not run its `send()` on the main thread's core. Compiled into `posix_compat`, beside the files it serves. |
 | `win32shmio.c`, `.h` | stdin and stdout carried in a shared-memory ring instead of the pipe rsync created, when rsync offered one and the handshake came off (see [The hop to ssh](#the-hop-to-ssh)). Attaches before `main()`, since rsync waits to hear whether we understood it and ssh will not look at stdin until the session is up. `read()` and `write()` copy straight out of and into the ring; a notifier thread per direction, which moves no bytes, gives the main thread's alertable wait something to end it. Falls back to the pipe at every step. Compiled into `posix_compat`, beside `win32pumps.c`; the ring itself is `win32/win32shmpipe.c`, the same source `rsync.exe` is built from. |
 | `win32sendbuf.c`, `.h` | `write()` for the packet layer's output buffer that hands the buffer's storage to the socket pump whole, taking a block the pump has finished with in exchange (`sshbuf_swap_storage()`, patch 0005), instead of copying every byte into the pump's ring: the send side of the socket pump is a queue of blocks for this. Small writes are copied as before. One memcpy per byte fewer, 7% of the sending thread; `SSH_SENDBUF_COPY` in the environment keeps the copying path. Compiled into `libssh`, beside `packet.c`. |
+| `win32isalgcm.c`, `.h`, `isal/` | AES-GCM through Intel's ISA-L assembly, and the default where it is present. Six files from isa-l_crypto 2.26.1 (BSD-3-Clause, unmodified; `isal/README.md` says what was taken and what was not: the AVX2 path only, no multibinary dispatcher, no non-temporal variants, no key-expansion assembly), plus a CPUID check, an AES key schedule and a NIST known-answer test in C. If NASM was not there at build time, or the processor has no AVX2/AES-NI/PCLMULQDQ, or the known answers disagree, this says so and CNG carries on. `SSH_AESGCM_BACKEND=cng` forces CNG. Compiled into `libssh`; the two assembled objects go into `ssh.exe`'s link. |
 | `win32cnggcm.c`, `.h` | AES-GCM through Windows CNG (`BCryptEncrypt`/`BCryptDecrypt` with `BCRYPT_CHAIN_MODE_GCM`) instead of LibreSSL's EVP: 2.2 GB/s against 1.6 GB/s at 32 KB on the same core. Only the bulk cipher moves; key exchange, signatures, the other ciphers and MACs stay in `libcrypto.dll`. `SSH_AESGCM_BACKEND=libcrypto` in the environment forces the EVP path. Compiled into `libssh`, beside `cipher.c`. |
 
 The patches in `win32/openssh/patches/` are what remains: the hooks that route
@@ -603,6 +604,35 @@ sends with several outstanding, which the pump's block ownership would
 support but its loop does not. Fixed buffer sizes are no help either: 783MB/s
 autotuned, 657 at a fixed 256KB, 756 at a fixed 1MB. `SSH_SOCK_SNDBUF` sets
 it, for measuring; leaving it unset is right.
+
+### Why ISA-L rather than CNG
+
+CNG was already faster than the LibreSSL Windows ships, and ISA-L is barely
+faster than CNG when the machine is cold -- 1447 MB/s against 1389 through one
+ssh connection fed from memory, about 4%. That is not why it is the default.
+
+Held at line rate for three minutes from a 60 C start, four runs alternating so
+neither backend got the cold machine twice:
+
+| | first 36 s | last 36 s | change |
+|---|---|---|---|
+| Windows CNG | 1389 MB/s | 1265 MB/s | **-8.9%** (runs: -11.2%, -6.4%) |
+| ISA-L | 1447 MB/s | 1432 MB/s | **-1.0%** (runs: -1.1%, -1.0%) |
+
+Both ended at the same effective clock (131% and 128% of base, down from
+145-168%) and the same temperature (82 C). The throttling is identical; what
+differs is what it costs. Hot -- which is where a long transfer spends almost
+all of its time on a 15W laptop -- ISA-L is 13% ahead rather than 4%.
+
+The load is `spew.exe` feeding one ssh connection from memory, so neither the
+disk nor rsync is in the way: this is the cipher and the socket and nothing
+else. `windows-perf-tb-isal-thermal.png` is the whole three minutes,
+`windows-perf-tb-isal.png` the summary.
+
+NASM builds the two objects and is optional: without it `ssh.exe` is built
+exactly as before and AES-GCM stays on CNG, so nobody needs a new tool to build
+this. `winget install NASM.NASM` puts it in `%LOCALAPPDATA%\bin\NASM`, not on
+PATH, which `build-openssh.ps1` knows to look for.
 
 When measuring any of this, pin the cipher: the default is
 `chacha20-poly1305@openssh.com`, which tops out around 260 MB/s on this

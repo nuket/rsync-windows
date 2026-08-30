@@ -33,6 +33,7 @@
 
 #include "ssherr.h"
 #include "win32cnggcm.h"
+#include "win32isalgcm.h"
 
 #ifndef STATUS_AUTH_TAG_MISMATCH
 #define STATUS_AUTH_TAG_MISMATCH ((NTSTATUS)0xC000A002L)
@@ -42,8 +43,37 @@
 struct cng_gcm {
 	BCRYPT_ALG_HANDLE alg;
 	BCRYPT_KEY_HANDLE key;
+	struct isal_gcm *isal;   /* set instead of alg/key when ISA-L is doing it */
 	u_char iv[CNG_GCM_IVLEN];
 };
+
+/*
+ * Which of the three does the bulk cipher.  SSH_AESGCM_BACKEND picks:
+ * "libcrypto" keeps EVP (cng_gcm_wanted() says no and cipher.c never gets
+ * here), "cng" forces CNG, and unset means ISA-L where there is any -- the
+ * assembly has to have been built in and the processor has to have AVX2,
+ * AES-NI and PCLMULQDQ, and failing either of those this quietly becomes
+ * CNG.
+ *
+ * ISA-L is the default because of what a long transfer does to a 15W
+ * laptop rather than because of its peak: held at line rate for three
+ * minutes from a cold start, CNG went from 1436 to 1276 MB/s (-11.2%) and
+ * again from 1342 to 1255 (-6.4%), while ISA-L went 1460 -> 1444 (-1.1%)
+ * and 1434 -> 1419 (-1.0%).  Both ended at the same clock -- around 130% of
+ * base, down from 145-168 -- so the throttling is identical and what
+ * differs is how much throughput it costs.
+ */
+static int
+isal_wanted(void)
+{
+	static int wanted = -1;
+
+	if (wanted < 0) {
+		const char *e = getenv("SSH_AESGCM_BACKEND");
+		wanted = e == NULL || e[0] == 0 || strcasecmp(e, "isal") == 0;
+	}
+	return wanted;
+}
 
 int
 cng_gcm_wanted(void)
@@ -62,6 +92,7 @@ cng_gcm_free(struct cng_gcm *g)
 {
 	if (g == NULL)
 		return;
+	isal_gcm_free(g->isal);
 	if (g->key)
 		BCryptDestroyKey(g->key);
 	if (g->alg)
@@ -76,6 +107,10 @@ cng_gcm_new(const u_char *key, u_int keylen, const u_char *iv, u_int ivlen)
 
 	if (ivlen != CNG_GCM_IVLEN || (g = calloc(1, sizeof(*g))) == NULL)
 		return NULL;
+	if (isal_wanted() && (g->isal = isal_gcm_new(key, keylen)) != NULL) {
+		memcpy(g->iv, iv, CNG_GCM_IVLEN);
+		return g;
+	}
 	if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&g->alg,
 	    BCRYPT_AES_ALGORITHM, NULL, 0)) ||
 	    !BCRYPT_SUCCESS(BCryptSetProperty(g->alg, BCRYPT_CHAINING_MODE,
@@ -111,6 +146,12 @@ cng_gcm_crypt(struct cng_gcm *g, int encrypt, u_char *dest, const u_char *src,
 
 	if (authlen > sizeof(tag))
 		return SSH_ERR_INVALID_ARGUMENT;
+	if (g->isal != NULL) {
+		int r = isal_gcm_crypt(g->isal, encrypt, dest, src, len,
+		    aadlen, authlen, g->iv);
+		cng_gcm_iv_inc(g->iv);   /* one IV per packet, either way */
+		return r;
+	}
 	BCRYPT_INIT_AUTH_MODE_INFO(info);
 	memcpy(nonce, g->iv, sizeof(nonce));
 	info.pbNonce = nonce;
