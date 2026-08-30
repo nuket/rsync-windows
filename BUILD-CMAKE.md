@@ -605,6 +605,67 @@ support but its loop does not. Fixed buffer sizes are no help either: 783MB/s
 autotuned, 657 at a fixed 256KB, 756 at a fixed 1MB. `SSH_SOCK_SNDBUF` sets
 it, for measuring; leaving it unset is right.
 
+### Where a transfer's time goes, and four things that did not help
+
+Sampled from outside with a small stack-walking profiler (suspend each
+thread that is actually burning processor time, read its instruction
+pointer, walk up to the first frame in rsync's own code, resume). No admin
+rights are needed for that, which is why it exists; with them, xperf or
+VTune will say more, particularly about who is waiting on whom.
+
+A 4.3GB push, counting only threads that were running:
+
+| where rsync.exe was | share |
+|---|---|
+| `NtWaitForMultipleObjects` (waiting on ssh through the ring) | 34.7% |
+| `NtReadFile` (reading the source) | 29.9% |
+| `memcpy_repmovs` (two copies per byte) | 13.9% |
+| `XXH3_64bits_update` (the whole-file checksum) | 6.3% |
+
+And a pull, where the destination write takes the place of the source read:
+`NtWriteFile` 36.3%, waiting 34.1%, `memcpy` 11.7%, and about 7% spread
+across `ZwClose` from `stat_path`, `_close_nolock_internal` and
+`win32_utimes` -- teardown, not a hot loop.
+
+Measured back to back on the same machine in the same state, an rsync push
+runs at **1358MB/s** and one ssh connection fed from memory -- no rsync, no
+file, no protocol -- runs at **1786MB/s**. The pipeline delivers 76% of what
+the transport alone can do, and the missing quarter is the table above.
+
+Four attempts at that quarter, all measured with interleaved A/B, none kept:
+
+* **Memory-map the source instead of reading it.** The obvious read of the
+  table: 30% in `NtReadFile` against 14% for two memcpys means the read costs
+  about four times what a copy does, so serve it from a mapped view and pay
+  only the copy. It is much worse: **1125MB/s against 1317**, and rsync's own
+  processor time went from 1.89s to 3.23s. Prefetching the window with
+  `PrefetchVirtualMemory` made it worse again (1019MB/s). A mapped view is
+  demand-paged, so a 4.3GB file is about a million soft faults, against one
+  bulk copy per 256KB read -- and the kernel's copy is very good. The 30% is
+  not waste; it is what reading 4.3GB costs. (This is a different reason from
+  upstream's for avoiding mmap, and it holds even where truncation cannot
+  happen.)
+* **A bigger read window.** 256KB (`MAX_MAP_SIZE`) to 1MB: 1293MB/s against
+  1306. The cache manager's own readahead already covers it.
+* **A bigger output buffer.** `iobuf.out` from 64KB to 256KB: 1302 against
+  1294. The shared-memory ring made the write size stop mattering.
+* **Preallocating the destination.** `SetEndOfFile` to the final size before
+  writing: 0.218 CPU-seconds per GB either way. Writes of 256KB cost 0.218
+  against 0.378 at 32KB, but rsync already coalesces receiver writes to
+  `WRITE_SIZE * 8` = 256KB, so that lever is pulled before we get there.
+
+What is left, and deliberately not done: `iobuf.out` could live inside the
+shared ring, so the multiplexed stream is formatted straight into shared
+memory and the copy into the ring disappears. That copy is about 4.5% of a
+core at 1.35GB/s -- roughly 7% of rsync.exe's processor time, 3-4% end to
+end -- and collecting it means restructuring `io.c`'s buffer management,
+since `xbuf` is a linear buffer with a memmove, not a ring. The price is not
+worth that.
+
+The whole-file checksum costs 1.1% (1355MB/s against 1370 with
+`--checksum-choice=none`), and is already xxh128 rather than MD5 -- worth
+knowing, not worth changing.
+
 ### Why ISA-L rather than CNG
 
 CNG was already faster than the LibreSSL Windows ships, and ISA-L is barely
