@@ -2,9 +2,9 @@
 
 In the Year of our Lord, 2026, we're gonna go for it. Leeeeeeeerrrrrrooooooyyyyyyy Jeeeeeeeennnnnkkiinnns!
 
----------------------------------------------------------------------------------------------------
+
 # Here's the porting log from Claude.
----------------------------------------------------------------------------------------------------
+
 
 ```
 C:\Users\user\src>git clone https://github.com/RsyncProject/rsync.git rsync
@@ -2472,9 +2472,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   ◼ Test against Ubuntu VM over ssh
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Do the next changes.
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● User answered Claude's questions:
@@ -3870,9 +3870,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Brewed for 1m 13s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Do the rest of the changes.
----------------------------------------------------------------------------------------------------
+
 
 ```
 ❯ 0) ok I've run the script on both VMs and it worked perfectly. 1) I hate conditional compilation,
@@ -5907,9 +5907,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   suite. Next: only daemon mode remains unsupported, if you want it. (disable recaps in /config)
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Run the unit tests on Windows too if possible
----------------------------------------------------------------------------------------------------
+
 
 ```
 ❯ Run the unit tests on Windows if possible, modify where needed, but keep #ifdefs and conditional
@@ -6781,10 +6781,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
      overall result is 67
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Claude was going down the wrong path.
 # Port the testsuite to Windows and drop tests we can't do here.
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● You're right — forcing the Unix suite to run on Windows means editing shared test code, which is the
@@ -8117,9 +8117,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Baked for 55m 51s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # ❯ Add a windows-build-and-test.bat to build rsync and run its unit tests on Windows.
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● PowerShell($vs = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"; if
@@ -8603,9 +8603,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Cooked for 12m 6s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # ❯ To the extent possible, do we cover everything in the Windows test suite that the Unix test suite covers?
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● Good question — let me actually check rather than assume. There's a coverage doc in the suite:
@@ -8707,9 +8707,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Baked for 2m 34s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Current Status
----------------------------------------------------------------------------------------------------
+
 
 ```
 C:\Users\user\src\rsync\build>rsync --version
@@ -8736,9 +8736,9 @@ are welcome to redistribute it under certain conditions.  See the GNU
 General Public Licence for details.
 ```
 
----------------------------------------------------------------------------------------------------
+
 # ❯ dumpbin says the following, can we build it as a static exe instead, so it works everywhere?
----------------------------------------------------------------------------------------------------
+
 
 ```
 ✻ Cogitated for 18m 43s
@@ -8814,9 +8814,9 @@ File Type: EXECUTABLE IMAGE
        82000 .text
 ```
 
----------------------------------------------------------------------------------------------------
+
 # ❯ What mitigations can you add to the rsync exe? Memory safety, control flow guard, CIG, etc?
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● Baseline: ASLR + DEP + /GS are on, but CFG is off (DLL characteristics 0x8160 lacks the 0x4000
@@ -9432,9 +9432,9 @@ File Type: EXECUTABLE IMAGE
 ✻ Brewed for 21m 12s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # ❯ Are there any other mitigations that can be enabled? Spectre v2?
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● Good question, and the honest answer for v2 is different from v1. Let me verify what the toolchain
@@ -9826,9 +9826,9 @@ File Type: EXECUTABLE IMAGE
 ✻ Cogitated for 10m 2s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # ❯ Are we building everything in parallel?
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● Let me check rather than assume:
@@ -9848,9 +9848,9 @@ File Type: EXECUTABLE IMAGE
   tests sequentially because several do real ssh transfers to the same host.
 ```
 
----------------------------------------------------------------------------------------------------
+
 # > Cover everything else in the Windows test suite that is coverable. Here's what you said at the time: (see above)
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● Let me start by re-reading the framework so the new tests match it.
@@ -11312,9 +11312,9 @@ File Type: EXECUTABLE IMAGE
 ✻ Brewed for 41m 51s
 ```
 
----------------------------------------------------------------------------------------------------
+
 ❯ Now try fixing --read-batch properly
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● Let me re-open this properly. First, restore the ability to run it, and note that in read-batch mode
@@ -12104,9 +12104,9 @@ File Type: EXECUTABLE IMAGE
 ✻ Cogitated for 17m 20s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Is rsync on Linux a multiprocess architecture or multithreaded? If it's multiprocess shouldn't we also be multiprocess?
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● Good question, and it goes to the heart of the port's design. Let me get the facts rather than
@@ -12497,9 +12497,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Churned for 14m 34s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # So are append_mode and make_backups then so dangerous that we should disable them? Or are they fixed now?
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● They're fixed, not dangerous — but let me verify that rather than assert it.
@@ -12578,9 +12578,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Brewed for 1m 52s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Look at the added Windows support code and check it for correctness, duplication, and simplification opportunities.
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● I've read all ~3,400 lines. One finding is genuinely serious; the rest are minor or cosmetic.
@@ -13403,12 +13403,12 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Sautéed for 7m 42s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Summarize this branch's changes and improvements / mitigations to support Windows and write this
 # into a section at the very top of the README.md, add a table listing the minimal changes to the
 # non-Windows files and a summary of the Windows support files and build files; do not touch any
 # other parts of the README.
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● Added as a 96-line section at the very top of README.md. The diff is a pure prepend — git diff shows
@@ -13444,10 +13444,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Cogitated for 3m 14s
 ```
 
----------------------------------------------------------------------------------------------------
+
 # Set up a GitHub workflow that builds and releases rsync.exe for Windows only, no
 # other builds. Check that GitHub performs that build or tell me how to set up GitHub to do so.
----------------------------------------------------------------------------------------------------
+
 
 ```
 ● All three done, and the build is verified running on GitHub.
@@ -13505,9 +13505,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Baked for 8m 20s
 ```
 
-# ---------------------------------------------------------------------------------------------------
+# 
 # Porting onto upstream v3.5.0
-# ---------------------------------------------------------------------------------------------------
+# 
 
 ```
 ● I'll wait for that to finish before moving the branch. Meanwhile, here's where things stand.
@@ -13709,9 +13709,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 ✻ Baked for 46s
 ```
 
-# ---------------------------------------------------------------------------------------------------
+# 
 # Windows automated setup script for OpenSSH Server + Agent
-# ---------------------------------------------------------------------------------------------------
+# 
 
 ```
 ● setup-windows-rsync.ps1 (repo root) — one self-elevating script that does all five pieces.
@@ -17190,7 +17190,7 @@ completed (exit code 0)
 ✻ Brewed for 18m 42s · done 10:24 PM
 ```
 
-# Moar Speed Pt. X! ISA-L?
+# Moar Speed Pt. 5! ISA-L?
 
 ```
 ❯ What about Intel crypto acceleration ISA-L or other libs, are there any
@@ -17472,8 +17472,1919 @@ completed (exit code 0)
   chart looks wrong, it should be negative percentages, that would be more
   intuitive for the reader, it loses performance compared to the start of the
   tests.
+
+● Fixed and pushed as 5fc501b6.
+
+  The third panel now plots a change rather than a loss, so it reads the
+  intuitive way:
+
+  ┌───────────┬─────────────────────────────┐
+  │           │                             │
+  ├───────────┼─────────────────────────────┤
+  │ ISA-L     │ +0.4% (bar just above zero) │
+  ├───────────┼─────────────────────────────┤
+  │ OpenSSL 3 │ −0.1%                       │
+  ├───────────┼─────────────────────────────┤
+  │ CNG       │ −12.6%                      │
+  ├───────────┼─────────────────────────────┤
+  │ LibreSSL  │ −16.9%                      │
+  └───────────┴─────────────────────────────┘
+
+  Axis relabelled to "throughput change over 2 min, %", zero line drawn, and
+  labels sit above positive bars / below negative ones so nothing collides.
+
+  While fixing it I found the same muddle in the doc table I'd committed
+  earlier: the column was headed "lost to throttling" but carried mixed signs —
+  ISA-L was written as −0.4% under a "lost" heading when it had actually gained
+  slightly. That table now uses the same "change over the run" convention as the
+  chart, with a note that negative means throughput given away, and the
+  reverse-pass figure for ISA-L corrected from −0.7% to +0.7%.
+
+✻ Cooked for 1m 32s · done 11:43 PM
+
+※ recap: We've been chasing the last performance out of rsync-over-ssh on the
+  Thunderbolt link; the latest work measured four AES-GCM libraries and charted
+  them. Everything is committed and pushed. Next: chase the cyclic throughput
+  you saw, which looks specific to rsync+ssh. (disable recaps in /config)
 ```
 
-# Moar Speed Pt. X! Shared Memory IPC?
+# Moar Speed Pt. 6! Shared Memory IPC?
 
-# Moar Speed Pt. X! Windows Performance Analyzer (xperf.exe)
+```
+❯ Now let's fix the rsync to ssh pipe hop
+
+● Right — that's the ~18% and the biggest remaining lever. Since we ship both
+  binaries, the real fix is to stop going through a kernel pipe at all: a
+  shared-memory ring between rsync.exe and ssh.exe. That's the "Shared Memory
+  IPC?" idea already in your porting log.
+
+  Let me first understand exactly how rsync spawns ssh and where the pipe is
+  created.
+
+● Now I understand the plumbing: win32_piped_child makes two 1 MB pipes and
+  CreateProcessA with lpEnvironment = NULL, so the child inherits our
+  environment — which gives us a clean channel to hand it shared-memory handles.
+
+  The plan: since we ship both binaries, replace the kernel pipe with an SPSC
+  ring in shared memory. That takes the data path from four copies (rsync ring →
+  kernel → kernel → ssh ring) down to two, and removes two syscalls per chunk.
+
+  Before touching rsync or ssh, let me build the ring standalone and measure it
+  against a pipe — if it doesn't win here, it won't win there.
+
+❯ Remember to log performance data as we're fixing this for later charting.
+
+● Noted — I'll keep a running log for later charting.
+
+  Now the standalone validation: same data flow through a kernel pipe vs the
+  shared ring, so we know the achievable gain before touching rsync or ssh.
+
+● The ring works, and in isolation it's 22.3 GB/s vs 5.7 GB/s for a pipe — 3.9×.
+  Put in context: moving 1.5 GB/s through a pipe costs ~26% of a core in
+  transport alone; through the ring, ~7%.
+
+  Let me start the performance log you asked for, seeded with this session's
+  pipe-hop measurements.
+
+● Useful: at rsync's 32–64 KB chunk sizes the pipe manages 5.7–6.0 GB/s, while
+  the ring holds ~22 GB/s regardless. Logging that, then wiring it in.
+
+● Now the handshake, so an ssh that doesn't understand the ring falls back to
+  pipes safely.
+
+● The pipe hop is gone — rsync and ssh now share memory. Committed as 3e660145.
+
+  What it is. win32/win32shmpipe.c is a single-producer/single-consumer ring in
+  a shared section, compiled into both binaries. win32_piped_child() creates one
+  per direction and passes the inheritable handles in the environment;
+  win32/openssh/win32shmio.c attaches in ssh before main() and takes over the
+  read/write paths that the pumps served. The pipes are still created and still
+  work — they're the fallback at every step.
+
+  Three things needed solving beyond the ring itself:
+  - The handshake: child says ready, rsync says go only if it saw that, child
+    uses the rings only if it sees go. Neither end can commit alone. Only the
+    ssh.exe beside rsync.exe is offered rings.
+  - Death without a close: a section reports no EOF when the far side dies, so
+    each end holds a handle to the other process and reads "gone, and empty" as
+    end of file.
+  - The dup: ssh_session2_open() gives the session channel dup()s of fd 0/1/2
+    and it's those the client loop uses. That cost the most time to find — the
+    rings looked attached but nothing flowed. It's one line in w32_dup2()
+    (patch 0004).
+
+  Measured — 4.3 GB pushed over the Thunderbolt link, runs alternating so
+  thermal drift lands on both arms:
+
+  ┌───────────────┬────────────┬────────────┐
+  │               │    pipe    │    ring    │
+  ├───────────────┼────────────┼────────────┤
+  │ throughput    │ 976 MB/s   │ 1021 MB/s  │
+  ├───────────────┼────────────┼────────────┤
+  │ rsync.exe CPU │ 3.73 s     │ 2.57 s     │
+  ├───────────────┼────────────┼────────────┤
+  │ ssh.exe CPU   │ 8.14 s     │ 6.83 s     │
+  ├───────────────┼────────────┼────────────┤
+  │ both, per GB  │ 2.76 CPU-s │ 2.19 CPU-s │
+  └───────────────┴────────────┴────────────┘
+
+  A fifth of the work of a push, gone; throughput follows more modestly, which
+  is what a machine limited by its power budget rather than any one stage looks
+  like. A pull gains about the same (884 → 913 MB/s). All logged to
+  scratchpad/perflog.csv.
+
+  One correction worth having: my first A/B said "no difference", and it was
+  wrong twice over — -e "ssh ..." named ssh by path, which bundled_ssh()
+  rejected, so both arms ran on pipes; and the default cipher is chacha20, which
+  caps at 258 MB/s here and hid everything. Fixed the path check, pinned
+  aes128-gcm, and only then did the real numbers appear.
+
+  Tests: 24/24 x64 including the ssh transfers, 23 passed + 1 skipped x86.
+  RSYNC_WIN32_NO_SHMPIPE=1 keeps the pipes, RSYNC_WIN32_SHMPIPE_DEBUG=1 says
+  which transport each side settled on. Remote and local scratch cleaned up; the
+  4 GB source is still in the scratchpad if you want charts from this — say the
+  word and I'll draw them in the windows-perf-* style.
+
+✻ Churned for 1h 4m 11s · done 12:53 AM
+
+● Three charts, SVG and PNG, committed as 0345a796:
+
+  windows-perf-tb-shmpipe — the result, two panels: throughput (push and pull,
+  +4.6% / +3.3%) beside processor-seconds per GB (−21%). The four interleaved
+  runs are drawn as dots on each bar, because with a 4.6% throughput move the
+  spread is the argument: the CPU dots separate cleanly, the throughput dots
+  overlap. Titled honestly — "Throughput moves a little … the work does not".
+
+  windows-perf-tb-shmpipe-cpu — where the saving falls: rsync.exe 3.73 → 2.57 s
+  (−31%), ssh.exe 8.14 → 6.83 s (−16%) per 4.3 GB pushed. The footer explains
+  why each side drops: rsync stops copying into the kernel and calling WriteFile
+  per chunk, ssh stops copying back out, and the pump thread that read its
+  stdin gives way to a notifier that moves no bytes.
+
+  windows-perf-tb-shmpipe-transport — the hop measured on its own at 32/64/256
+  KB chunks: 6.0/5.7/9.3 GB/s for the pipe against 22.7/22.4/21.5 for the ring.
+  This is the "why it was worth trying" chart, and it also shows the pipe caring
+  about chunk size where the ring doesn't.
+
+  All three carry the commit pair (a8664bae → 3e660145), matching the rest of
+  the family. Generator is scratchpad/shmcharts.py, data from scratchpad/perflog.csv.
+
+  One judgement call worth flagging: the pull bars are one run each rather than
+  four, so that pair is labelled as such on the axis — it's a directional sanity
+  check, not a measurement of the same weight as the push.
+
+✻ Churned for 4m 31s · done 1:02 AM
+
+● Both fixed, committed as 803fd15e.
+
+  windows-perf-tb-shmpipe-cpu — the whitespace was the footer, not the axes: the
+  footer line is wider than the plot was, and bbox_inches="tight" sizes the
+  page to the widest element, so the bars ended up in the left two thirds.
+  Widened the figure to match the text, and the bars with it.
+
+  windows-perf-tb-shmpipe-transport — it now says in three places that nothing
+  leaves the machine:
+  - title: "the hop on its own, between two processes on one machine"
+  - y label: "GB/s, parent to child on one machine"
+  - footer, first sentence: "Nothing here crosses a network. A parent and a
+    child on the Windows laptop, the parent writing bytes and the child throwing
+    them away: the hop between two local processes and nothing else — no ssh,
+    no cipher, no link, no disk."
+
+  I also dropped the Linux box and the 20 Gbit link from that chart's machine
+  line — they were inherited from the shared footer and were exactly the thing
+  that made it look like a network measurement. It now reads "Both processes on
+  the Windows machine: Dell Latitude 7490, i5-8350U (4 cores / 8 threads, 15 W)
+  · no network, no disk".
+```
+
+# Moar Speed Pt. 7! Shared Memory IPC, Part Deux
+
+```
+● Measured on this laptop just now, so the rest of the answer has prices rather
+  than adjectives:
+
+  ┌──────────────────────────────────────────┬──────────────────────────────┐
+  │ one memcpy of a byte, at transfer chunk  │             cost             │
+  │                  sizes                   │                              │
+  ├──────────────────────────────────────────┼──────────────────────────────┤
+  │ 32–64 KB chunks, 1 MB working set (stays │ 30 GB/s → 3.3% of a core per │
+  │  in L2)                                  │  GB/s                        │
+  ├──────────────────────────────────────────┼──────────────────────────────┤
+  │ 32 KB chunks, 4 MB working set           │ 13 GB/s → 7.7%               │
+  ├──────────────────────────────────────────┼──────────────────────────────┤
+  │ 256 KB chunks, 64 MB working set (out of │ 9.1 GB/s → 11%               │
+  │  cache)                                  │                              │
+  └──────────────────────────────────────────┴──────────────────────────────┘
+
+  What we have now, and what's left
+
+  The ring already removed two copies, not because shared memory is magic but
+  because it replaced three buffers with one: rsync's pump ring, the kernel's
+  pipe buffer, and ssh's pump ring all collapsed into the shared ring. Four
+  copies → two. The two that remain are rsync copying into the ring and ssh
+  copying out of it, and they exist for a boring reason: each side's own code
+  wants the bytes in its own buffer. That's the wall you hit — the IPC is
+  already zero-syscall, but neither program was written to work in place.
+
+  Full census for a push, priced per GB/s of transfer (total measured: 2.19
+  cores at 1 GB/s):
+
+  ┌─────┬────────────────────────────────┬──────────────────────────┬───────┐
+  │  #  │              hop               │           kind           │ ~cost │
+  ├─────┼────────────────────────────────┼──────────────────────────┼───────┤
+  │ 1   │ page cache → rsync's sliding   │ kernel copy              │ 8–11% │
+  │     │ read window                    │                          │       │
+  ├─────┼────────────────────────────────┼──────────────────────────┼───────┤
+  │ 2   │ read window → iobuf.out (adds  │ memcpy                   │ 3–8%  │
+  │     │ the 4-byte mux header)         │                          │       │
+  ├─────┼────────────────────────────────┼──────────────────────────┼───────┤
+  │ 3   │ iobuf.out → shared ring        │ memcpy                   │ 3–8%  │
+  ├─────┼────────────────────────────────┼──────────────────────────┼───────┤
+  │ 4   │ ring → ssh's channel read      │ memcpy                   │ 3–8%  │
+  │     │ buffer                         │                          │       │
+  ├─────┼────────────────────────────────┼──────────────────────────┼───────┤
+  │ 5   │ channel buffer → packet        │ memcpy                   │ ~3%   │
+  │     │ payload                        │                          │       │
+  ├─────┼────────────────────────────────┼──────────────────────────┼───────┤
+  │ 6   │ AES-GCM (reads plaintext,      │ transform                │ ~45%  │
+  │     │ writes ciphertext)             │                          │       │
+  ├─────┼────────────────────────────────┼──────────────────────────┼───────┤
+  │ 7   │ packet buffer → socket pump    │ already zero-copy        │ 0     │
+  │     │                                │ (win32sendbuf.c)         │       │
+  ├─────┼────────────────────────────────┼──────────────────────────┼───────┤
+  │ 8   │ WSASend → kernel socket buffer │ kernel copy              │ 3–8%  │
+  └─────┴────────────────────────────────┴──────────────────────────┴───────┘
+
+  Every copy still in the path adds up to roughly 0.25–0.45 of the 2.19 cores —
+  12–20%. That's the whole prize for going fully zero-copy, and it needs surgery
+  in rsync's io.c and OpenSSH's channel/packet layer, which is exactly the
+  upstream code we've been keeping our hands out of.
+
+  What "true" zero-copy would mean at each hop
+
+  - rsync → ring (#3): gone only if iobuf.out is the shared ring — rsync formats
+    its multiplexed stream directly into shared memory. rsync's out buffer is
+    already a circular buffer with head/tail, so this is conceptually a two-line
+    change and practically an allocator change deep in io.c.
+  - ring → ssh (#4, #5): gone only if the cipher reads plaintext straight out of
+    the ring. BCryptEncrypt supports chained GCM calls
+    (BCRYPT_AUTH_MODE_CHAIN_CALLS), so you could authenticate the 4-byte length,
+    encrypt the packet header from one buffer and the payload from the ring
+    (two calls where it wraps), writing ciphertext into the send block.
+    Contained in our translation units, but it needs the channel layer to stop
+    materialising the payload, which is not our code.
+  - WSASend (#8): this one is genuinely available. SO_SNDBUF=0 plus overlapped
+    sends makes the NIC DMA out of your buffer with no kernel copy, and our
+    socket pump already owns the block until the send completes — structurally
+    we're ready for it. Winsock Registered I/O (RIO) is the heavier,
+    better-engineered version. Both are contained changes; both need measuring,
+    because disabling send buffering can hurt when writes are small.
+  - file read (#1): rsync deliberately doesn't mmap (fileio.c:275 — SIGBUS on
+    truncation), so this copy is upstream policy, not a Windows limitation.
+
+  Can it stay in the kernel?
+
+  No, and the reason is the one you guessed. splice()/TransmitFile move bytes
+  without userspace only when the bytes don't change. SSH transforms every byte
+  in userspace, so the plaintext has to come up and the ciphertext has to go
+  back down. Linux has kTLS, which is exactly this problem solved for TLS by
+  moving the record layer into the kernel — there is no kSSH anywhere, and no
+  Windows equivalent. The only way to keep a transfer in the kernel end-to-end
+  is to have nothing to transform: rsync's own daemon protocol over plain TCP
+  could use TransmitFile from the page cache to the NIC and touch userspace
+  approximately never. That trades encryption for it.
+
+  Latency, and whether the network reaches back
+
+  The ring does not decouple rsync from the network. The control loop is
+  unchanged: rsync blocks when the ring fills, the ring fills when ssh can't
+  drain it, and ssh can't drain when the TCP send window is full. Backpressure
+  propagates identically to the pipe — what changed is the buffer size (4 MB
+  versus the pipe's 1 MB) and the cost per handoff, not the coupling. A bigger
+  buffer smooths jitter and lets rsync run further ahead; it does not insulate
+  it.
+
+  Local handoff latency is strictly better: when both sides are busy there is no
+  syscall at all, just a memcpy and an index update, so it's tens of
+  nanoseconds instead of the pipe's few microseconds. When a side genuinely has
+  nothing to do it spins briefly (capped), then arms its event and parks — so an
+  idle interactive connection doesn't burn a core, and the other side only pays
+  a SetEvent when someone is actually waiting.
+
+  What I'd actually do, in order
+
+  1. Shrink the rings and measure. 4 MB per direction × 2 is 8 MB against a 6 MB
+     L3 — by the table above, our two remaining copies are probably running at
+     the 13 GB/s end rather than 30 GB/s. A 512 KB or 1 MB ring might buy a few
+     percent for free, and it's a one-constant experiment. Best value on this
+     list by a distance.
+  2. SO_SNDBUF=0 + overlapped send, or RIO. The only kernel copy we can actually
+     delete, and the pump already owns the buffers.
+  3. Bigger writes. rsync hands us 32 KB at a time; per-call costs amortise, and
+     it costs nothing in the ring.
+  4. Zero-copy through the cipher — real, worth maybe 5–8% of total CPU, and the
+     most invasive thing on the list.
+
+  The honest summary: the pipe was worth removing because most of its cost was
+  syscalls and scheduling, not copying — 6 GB/s versus 22 GB/s in isolation,
+  when two copies alone would have predicted 11. What's left is ~45% cipher and
+  a long tail of per-packet work, and the remaining copies are a smaller prize
+  than they look. Want me to run experiment 1 now? It's twenty minutes including
+  a clean interleaved A/B.
+
+✻ Crunched for 3m 33s · done 1:18 AM
+
+❯ Yes, run experiment 1, why is it 20 minutes? Each subtest should only about
+  1 - 2 minutes apiece?
+
+● Now the picture is clean. The standalone ring, one direction, by size:
+
+  ┌──────┬────────┬────────┬────────┬──────┬──────┬──────┬──────┐
+  │ ring │ 128 KB │ 256 KB │ 512 KB │ 1 MB │ 2 MB │ 4 MB │ 8 MB │
+  ├──────┼────────┼────────┼────────┼──────┼──────┼──────┼──────┤
+  │ GB/s │ 22.6   │ 22.5   │ 22.3   │ 22.5 │ 22.4 │ 21.4 │ 13.8 │
+  └──────┴────────┴────────┴────────┴──────┴──────┴──────┴──────┘
+
+  The cliff is real and it's exactly where the L3 is (6 MB) — but 4 MB sits just
+  before it, not past it, and only the active direction's ring is ever touched
+  (the reverse ring carried 86 bytes in a 4.3 GB push, so it stays cold and out
+  of cache). That's why the end-to-end sweep couldn't see much: 21.4 vs 22.5
+  GB/s in the transport is worth ~0.2% of total CPU.
+
+● Done — and you were right about the time: the 20 minutes assumed a rebuild per
+  size. Making the size an env var (RSYNC_WIN32_SHMPIPE_KB) meant one rebuild
+  and then ~3 minutes of sweeping, since the size already travels in the
+  handshake spec so ssh needed nothing.
+
+  Result: the hypothesis was right about the mechanism and wrong about the
+  payoff.
+
+  End to end, ring size doesn't matter in the range that matters:
+
+  ┌────────────────┬─────────────────────┬──────────┬──────────┬──────────┐
+  │      ring      │       256 KB        │  512 KB  │   1 MB   │   4 MB   │
+  ├────────────────┼─────────────────────┼──────────┼──────────┼──────────┤
+  │ sweep 1 (3     │ 1122 MB/s, 1.848    │ 1129,    │ 1107,    │ 1081,    │
+  │ rounds)        │ CPU-s/GB            │ 1.840    │ 1.808    │ 1.903    │
+  ├────────────────┼─────────────────────┼──────────┼──────────┼──────────┤
+  │ sweep 2 (5     │ —                   │ —        │ 1097,    │ 1090,    │
+  │ rounds)        │                     │          │ 1.885    │ 1.916    │
+  └────────────────┴─────────────────────┴──────────┴──────────┴──────────┘
+
+  Sweep 1 showed 1 MB about 4% ahead of 4 MB; sweep 2 put it 1.6% ahead, which
+  is the run-to-run spread. Direction is consistent, magnitude is noise.
+
+  The standalone benchmark shows why. The cliff exists and is exactly the 6 MB
+  L3 — but 4 MB sits just short of it, and only the busy direction's ring is
+  ever touched: the reverse ring carried 86 bytes during a 4.3 GB push, so it's
+  allocated and cold, and never pollutes cache. So the real working set was 4
+  MB, not 8, and 21.4 vs 22.5 GB/s in the transport is worth ~0.2% of total CPU.
+
+  I took the 1 MB anyway and committed it (64750e57): it's free, it's what the
+  pipe held, it's a quarter of the committed memory, and it leaves the cliff a
+  long way off. 24/24 tests pass. All the figures are in perflog.csv.
+
+  The useful by-product is the price list for the zero-copy discussion — one
+  copy costs 3.3% of a core per GB/s while it stays in cache, 8–11% once it
+  doesn't. Both of our remaining copies are in-cache at these sizes. That firms
+  up the earlier conclusion: the copies aren't the prize, and it also explains
+  the pipe's 6 GB/s versus the ring's 22.5 — if the two kernel copies had been
+  the cost, the pipe would have managed 11.
+
+  Next on the list is the one copy that is not in cache and is removable:
+  WSASend into the kernel socket buffer (SO_SNDBUF=0 with overlapped sends, or
+  RIO). Say the word.
+
+✻ Cooked for 6m 49s · done 1:37 AM
+
+❯ Yes, do the send-side copy next
+
+● SO_SNDBUF=0 didn't finish 1 GB in 90 s, where the default did it in 1.4. Let
+  me clean up and get an actual number with a small file.
+
+● Decisive, and it kills the cheap version: SO_SNDBUF=0 collapses to 2.9 MB/s —
+  38× down. Exactly the pipelining loss: with no kernel buffer and one blocking
+  send() in flight, the connection runs a round trip per send with nothing on
+  the wire in between. Let me check the opposite direction while I'm here.
+
+● The cheap version of the send-side copy is dead, and decisively so:
+
+  ┌───────────────────────────────┬─────────────────────────────────────────┐
+  │           SO_SNDBUF           │               throughput                │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ auto (Windows autotuning)     │ 783 MB/s (1 GB push)                    │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ 0 — no kernel buffering,      │ 2.9 MB/s (measured on 64 MB; 1 GB       │
+  │ zero-copy send                │ didn't finish in 90 s)                  │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ fixed 256 KB                  │ 657 MB/s                                │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ fixed 1 MB                    │ 756 MB/s                                │
+  └───────────────────────────────┴─────────────────────────────────────────┘
+
+  A 38× collapse, and the mechanism is exactly the risk I flagged: with
+  buffering off, send() doesn't return until the data is on the wire, so a
+  synchronous pump has one send in flight and nothing between them — a round
+  trip per call. The kernel's send buffer isn't just a copy, it's the
+  pipelining. And autotuning already beats every fixed size I tried, so there's
+  nothing free in the other direction either.
+
+  That means the send copy can only be collected the expensive way: overlapped
+  WSASend with several outstanding plus SO_SNDBUF=0. The pump is half-way there
+  already — it owns its blocks until they're sent, which is the hard lifetime
+  rule — but its loop is a simple blocking send, and turning it into a
+  completion-driven state machine touches teardown, drain-before-shutdown,
+  partial sends and error paths. That's the most delicate code in the transport,
+  for a prize I'd estimate at 4–6% of total CPU (one out-of-cache copy at 8–11%
+  of a core per GB/s, against a measured 1.85 CPU-s/GB).
+
+  I've committed the knob and the finding (05ef39a6) — SSH_SOCK_SNDBUF unset by
+  default, with the numbers written into the code comment and BUILD-CMAKE.md so
+  nobody re-derives this the hard way. 24/24 tests pass.
+
+  Your call on whether to build the overlapped path. My honest read: it's the
+  least favourable risk/reward of anything we've done today — the ring was 21%
+  CPU for contained code, this is ~5% for the riskiest code. If you want more,
+  the bigger remaining line item is the cipher at ~45% of a core per GB/s, where
+  ISA-L already showed a sustained-throughput advantage over CNG that we never
+  wired into ssh for real.
+
+  Two process notes, since they cost you time today: the sweeps were sized for a
+  4.3 GB file when these transfers hit steady state in well under a second — 1
+  GB is plenty, and I've switched to it. And I'm now logging each run to a file
+  as it lands, so a lost tool result costs a re-read rather than a re-run.
+
+✻ Churned for 7m 56s · done 1:56 AM
+```
+
+# Moar Speed Pt. 8! ISA-L, Part Deux
+
+```
+❯ Skip the overlapped sends, let's do ISA-L in ssh, take absolutely as little
+  as you can, possibly only the minimal pieces that make sense, if AES GCM is
+  contained to a single translation unit, take that before dragging in every
+  last file; also: what's the status for licensing, are we mixing any BSD and
+  GPL code here in static exes? also: in this case we probably do need to do
+  some longer testing, because we need to see what happens if CPU or thermal
+  throttling kicks in, so you'd want to measure that.
+
+● The include closure is only 6 files / 154 KB for both AES-128 and AES-256 at
+  the AVX2 level — that's the whole take. Now the interface I need to match:
+
+● Now let me vendor the six files and write the backend.
+
+❯ Stop.
+
+● Stopped.
+
+  Where things stand — nothing is built or committed, so it's all still just
+  files on disk:
+
+  Done and committed earlier (unaffected): the licensing fix. win32shmpipe.c/.h
+  were headed GPL-3.0-or-later and I had compiled them into ssh.exe, whose own
+  notice says "OpenSSH contains no GPL code." I relicensed those two files to
+  BSD-2-clause (you're the copyright holder; permissive works in both binaries,
+  GPL in ssh.exe would have relicensed the whole binary and made its notice
+  false). That change is uncommitted in the working tree.
+
+  In progress, uncommitted:
+  - win32/openssh/isal/ — six vendored files (154 KB) from isa-l_crypto 2.26.1,
+    BSD-3-Clause, plus Intel's LICENSE and a README recording what was taken and
+    what was left out.
+  - win32/openssh/win32isalgcm.c/.h — the backend, with its own AES key schedule
+    and a NIST known-answer self-test that disables the backend if anything
+    disagrees.
+  - win32cnggcm.c — wired to pick ISA-L on SSH_AESGCM_BACKEND=isal, CNG
+    otherwise.
+  - build-openssh.ps1 and Directory.Build.targets — NASM optional; no NASM means
+    no ISA-L objects and CNG as before.
+  - Patch 0003 regenerated.
+
+  Not done: never compiled, never run, no correctness test against the Linux
+  box, and none of the thermal measurement you asked for.
+
+  Say the word and I'll either finish it, park it, or revert it.
+
+✻ Baked for 9m 18s · done 2:14 AM
+
+❯ I will install nasm with winget then tell you.
+
+❯ Alright, I installed it.
+
+● _mm_aeskeygenassist_si128 needs a literal immediate, so the 256-bit loop has
+  to be unrolled:
+
+● It builds — 1,627,136 bytes, up from 1,358,848, which is the assembly. Now:
+  does it actually agree with the world?
+
+● Correctness is established: interop both key sizes, a hash-verified 1 GB
+  transfer, and 24/24 with ISA-L as the cipher. Now the thermal question. Let me
+  see what samplers I already have:
+
+● 1640 MB/s sustained from memory — the harness works. Now the long runs. Each
+  is 3 minutes plus cool-down to a fixed 60 °C, so these two calls will take a
+  while by design.
+
+❯ Do the same kind of tests we did to prove throughput, CPU clock, thermals,
+  etc. and graph them at the end.
+
+● Harness works — even 20 s shows the clock dropping 189% → 173%. Now the real
+  runs: 3 minutes each, cooled to 60 °C first, in A-B-B-A order so neither
+  backend gets the cold start. Four runs, so this is the slow part.
+
+● CNG −11.2%, ISA-L −1.1% — that's the shape you predicted earlier in the
+  session. Completing the ABBA order:
+
+● Four runs, consistent:
+
+  ┌──────────┬───────┬──────┬────────┬─────────────┐
+  │   run    │ start │ end  │ change │    clock    │
+  ├──────────┼───────┼──────┼────────┼─────────────┤
+  │ CNG #1   │ 1436  │ 1276 │ −11.2% │ 168% → 131% │
+  ├──────────┼───────┼──────┼────────┼─────────────┤
+  │ ISA-L #1 │ 1460  │ 1444 │ −1.1%  │ 145% → 128% │
+  ├──────────┼───────┼──────┼────────┼─────────────┤
+  │ ISA-L #2 │ 1434  │ 1419 │ −1.0%  │ 145% → 128% │
+  ├──────────┼───────┼──────┼────────┼─────────────┤
+  │ CNG #2   │ 1342  │ 1255 │ −6.4%  │ 146% → 130% │
+  └──────────┴───────┴──────┴────────┴─────────────┘
+
+  Both throttle to the same clock; only ISA-L keeps its throughput. Making it
+  the default when it's actually there:
+
+● ISA-L is in, is the default, and the measurement backs it. Three parts to
+  report:
+
+  Licensing — there was a real problem, now fixed (93c2891d)
+
+  I created it earlier this session: win32shmpipe.c is compiled into both
+  binaries, and it carried a GPL-3.0-or-later header. OpenSSH's own LICENCE —
+  which we ship verbatim as NOTICE-ssh.txt — says "all components are under a
+  BSD licence, or a licence more free than that" and "OpenSSH contains no GPL
+  code." Both sentences were false. It's legal to combine (BSD and ISC are
+  GPL-compatible), but it silently relicenses all of ssh.exe under the GPL, and
+  it sits badly next to a libcrypto whose legacy parts carry the advertising
+  clause and are not GPL-compatible.
+
+  Fixed by making that one file BSD-2-clause — you're the copyright holder, and
+  permissive code goes into a GPL binary without consequence. Nothing else
+  moves: everything else in win32/ is rsync-only and stays GPL; everything in
+  win32/openssh/ is ssh-only and was already BSD. ISA-L itself is BSD-3-Clause,
+  so it raises no new question.
+
+  The take: six files, 154 KB
+
+  That's the entire include closure of AES-128 and AES-256 GCM at the AVX2
+  level. Deliberately left behind: the multibinary dispatcher and its
+  SSE/AVX/AVX-512 siblings (we ask CPUID ourselves), the non-temporal variants,
+  and the key-expansion assembly — thirty lines of AES-NI in our own file
+  instead of three more asm files. Everything fails safe onto CNG: no NASM →
+  stub; no AVX2/AES-NI/PCLMULQDQ → unavailable; and before first use the key
+  schedule and the assembly are checked against NIST GCM test cases 2 and 14 —
+  disagreement disables the backend.
+
+  The thermal answer (eb3ec558)
+
+  Four 3-minute runs, alternating cng/isal/isal/cng, each from a 60 °C start,
+  one ssh connection fed from memory:
+
+  ┌─────────────┬────────────┬───────────┬───────────────────────┐
+  │             │ first 36 s │ last 36 s │        change         │
+  ├─────────────┼────────────┼───────────┼───────────────────────┤
+  │ Windows CNG │ 1389 MB/s  │ 1265 MB/s │ −8.9% (−11.2%, −6.4%) │
+  ├─────────────┼────────────┼───────────┼───────────────────────┤
+  │ ISA-L       │ 1447 MB/s  │ 1432 MB/s │ −1.0% (−1.1%, −1.0%)  │
+  └─────────────┴────────────┴───────────┴───────────────────────┘
+
+  Cold, they're within 4%. Both end at the same clock (131% vs 128% of base,
+  down from 145–168%) and the same temperature (82 °C) — so the throttling is
+  identical and what differs is what it costs. Hot, ISA-L is 13% ahead. That's
+  your hypothesis from earlier in the session, now with the real cipher in the
+  real client rather than a standalone harness.
+
+  Two charts committed: windows-perf-tb-isal-thermal (all three minutes —
+  throughput, clock and temperature stacked on a shared time axis, both runs per
+  backend) and windows-perf-tb-isal (the summary). Verified with both key sizes
+  against the Linux box, a hash-checked 1 GB transfer, and 24/24 with ISA-L
+  carrying every transfer.
+
+  One thing to know: NASM landed in %LOCALAPPDATA%\bin\NASM and not on PATH,
+  which is why nothing found it earlier — build-openssh.ps1 now looks there.
+
+✻ Cooked for 34m 37s · done 2:53 AM
+
+※ recap: We're speeding up rsync-over-ssh on Windows; the ISA-L AES-GCM backend
+  is now in ssh.exe as the default, tested and committed with charts. Next:
+  nothing pending, so pick the next optimization or wrap up. (disable recaps in
+  /config)
+```
+
+# Moar Speed Pt. 9! Moar Profiling With Windows Performance Analyzer (xperf.exe)
+
+❯ I think that's about all we can do, are there any other optimizations you can
+  think of?
+
+● Yes — and the useful thing is that today's numbers have moved the ceiling, so
+  the list is shorter and more specific than it was this morning.
+
+  The reframing
+
+  ssh alone, fed from memory, now sustains 1432 MB/s hot / 1447 cold. A single
+  TCP stream on this link measured 1437 MB/s with iperf3. Those are the same
+  number. ssh.exe is at the single-stream wire limit — the cipher is no longer
+  the constraint, and neither are the copies inside it. Further work in ssh buys
+  nothing on this link.
+
+  Meanwhile rsync+ssh does ~1050–1100 MB/s. So the entire remaining 25–27% is
+  rsync.exe's own thread, at ~0.6 CPU-seconds per GB. That's where everything
+  below points. (Caveat: those two figures come from different sessions and
+  thermal states. A fresh single-stream iperf3 is 20 seconds if you want the
+  comparison tightened before acting on it.)
+
+  Worth doing, in order
+
+  1. Profile rsync.exe's thread during a push. We've never actually looked — we
+  inferred. 0.6 CPU-s/GB is split between the file read, the mux copy into
+  iobuf.out, the ring copy, select/poll, and the per-file checksum, and I'd
+  rather know the split than guess it. Cheapest possible step, and it decides
+  whether 2 and 5 are worth anything.
+
+  2. Memory-map the source file on Windows. The read of the source is a full
+  kernel→user copy per byte, and it's the one that runs at out-of-cache speed:
+  8–11% of a core per GB/s, the most expensive copy left anywhere. rsync avoids
+  mmap upstream for a good reason (SIGBUS if the file is truncated mid-read),
+  but map_ptr() is already an abstraction, and on Windows the equivalent fault
+  is catchable with SEH. Contained to our win32 layer plus a small hook. This is
+  the best-value idea I have left.
+
+  3. Three cheap knob experiments, an hour all in:
+  - What checksum is actually negotiated per file? If anything is falling back
+    to MD5 rather than xxh128, that alone is ~500 MB/s of ceiling. Worth
+    confirming rather than assuming.
+  - Write chunk size: rsync hands us 32 KB. The ring doesn't care, but the
+    number of win32_write/select/ssh-read round trips does.
+  - The sliding read window size, and FILE_FLAG_SEQUENTIAL_SCAN on the source.
+
+  4. The pull asymmetry. Push ~1050, pull ~913 — 13% apart, and we've spent
+  almost all our effort on the send path. On Windows our port emulates the
+  generator/receiver fork with a thread, sharing one heap; that's the
+  least-proven part of the port and the obvious suspect. Worth a profile before
+  any code.
+
+  5. iobuf.out allocated inside the shared ring. True zero-copy on rsync's side
+  — the mux framing writes straight into shared memory. Real but small (~3% of a
+  core per GB/s), and it means touching upstream io.c, which we've deliberately
+  avoided all day.
+
+  Not worth doing
+
+  - Overlapped WSASend — measured today as ~5% of CPU for the most delicate code
+    in the transport. Bad trade.
+  - More ring tuning — swept it, it's flat from 128 KB to 2 MB.
+  - Readahead and hi-res msleep — both tried earlier, both noise, both reverted.
+  - More cipher work — see the reframing; there's nothing to collect.
+
+  The one structural lever
+
+  Multiple TCP streams. iperf3 does 1690 MB/s with four and 1437 with one, so
+  ~15% sits behind a second connection, and that is the only way past the
+  single-stream ceiling. You ruled multithreading out early and I think that was
+  right — it changes rsync's protocol shape, not just its plumbing — but it's
+  the honest answer to "what's left" once rsync's own thread is fixed.
+
+  For perspective: this started at 326 MB/s pushing over this link and is at
+  ~1050 with a 15 W laptop and one thread doing AES on every byte. The remaining
+  headroom is real but it's the last quarter, and item 1 is the only one I'd
+  start without.
+
+✻ Baked for 1m 19s · done 3:15 AM
+
+❯ Let's try all 5 options. Do not pull the structural lever. I'm going to sleep
+  now, see how far you can get.
+
+● Working through 1–5, leaving the structural lever alone. Starting with the
+  profile, since it decides how much 2 and 5 are worth.
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && sed -n '/^###
+      Profiling/,/^### /p' BUILD-CMAKE.md | head -60)
+  ⎿  ### Profiling
+
+     Build `RelWithDebInfo` to profile, into a directory of its own so the
+     … +57 lines (ctrl+o to expand)
+
+● PowerShell(foreach($t in 'wpr.exe','xperf.exe','vsdiagnostics.exe'){
+            $c=(Get-Command $t -ErrorAction SilentlyContinue).Source; if($c){
+            "$t : $c" } }; $wpt="${env:ProgramFi…)
+  ⎿  Error: Exit code 1
+     wpr.exe : C:\Windows\system32\wpr.exe
+     xperf.exe : C:\Program Files (x86)\Windows Kits\10\Windows Performance
+     Toolkit\xperf.exe
+     vsdiagnostics.exe : C:\Program Files\Microsoft Visual
+     Studio\2022\Community\Team Tools\DiagnosticsHub\Collector\VSDiagnostics.exe
+
+     Name
+     ----
+     createdump.exe
+     symcachegen.exe
+     wpa.exe
+
+     … +4 lines (ctrl+o to expand)
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            Get-ChildItem $sp -Filter…)
+  ⎿  Name
+     ----
+     cmphandles.c
+     … +22 lines (ctrl+o to expand)
+
+● Not elevated, so xperf's kernel sampling is out. Writing a small leaf-PC
+  sampler instead:
+
+  Made 1 scratchpad edit +200 (ctrl+o to expand)
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            cmd /c "call `"C:\Program…)
+  ⎿  sampler.c
+     sampler.c(42): warning C4996: 'strncpy': This function or variable may
+      be unsafe. Consider using strncpy_s instead. To disable deprecation,
+     use _CRT_SECURE_NO_WARNINGS. See online help for details.
+  ⎿  (timeout 3m)
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● PowerShell(cd C:\Users\Claude\devsrc\rsync-windows;
+            .\windows-build-and-test.bat --arch x64 --config RelWithDebInfo
+            --build-dir build-rwdi --no-tests 2>&1 | Select-String…)
+  ⎿  -- Looking for strerror - found
+     Build complete (tests skipped):
+     C:\Users\Claude\devsrc\rsync-windows\build-rwdi-x64\rsync.exe
+     … +7 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+❯ Use your custom sampler for now to get as much perf as you can out of the
+  options, then when I wake up in the morning, I'll log in as admin and we can
+  try using xperf and VTune.
+
+● Noted — sampler now, xperf/VTune in the morning. Copying ssh next to the
+  profiling build so the ring still engages:
+
+● PowerShell(Copy-Item C:\Users\Claude\devsrc\rsync-windows\build-x64\ssh.exe
+            C:\Users\Claude\devsrc\rsync-windows\build-rwdi-x64\ssh.exe -Force;
+            $sp="C:\Users\Claude\AppDat…)
+  ⎿  rsync: shmpipe: child answered; using shared memory
+     ssh: shmpipe: attached to both rings
+     ssh: shmpipe: stdin dup: a ring
+     … +13 lines (ctrl+o to expand)
+  ⎿  (timeout 4m)
+
+● Two bugs of mine: Select-Object -First killed rsync early, and sampling every
+  thread means idle pool threads drown the profile. Fixing both — the sampler
+  should follow the threads that are actually burning CPU:
+
+● Bash(cd "C:/Users/Claude/AppData/Local/Temp/claude/C--Users-Claude-devsrc-rsyn
+      c-windows/66c00488-88a8-48c3-be31-6abc940b8590/scratchpad" && python -
+      <<'PY'
+      import io…)
+  ⎿  Running in the background (↓ to manage)
+
+● Bash(sleep 5; cat
+      "C:/Users/Claude/AppData/Local/Temp/claude/C--Users-Claude-devsrc-rsync-wi
+      ndows/66c00488-88a8-48c3-be31-6abc940b8590/tasks/by6y18dk1.output"
+      2>/dev…)
+  ⎿  ok
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            cmd /c "call `"C:\Program…)
+  ⎿  sampler.c
+  ⎿  (timeout 3m)
+
+  Made 1 scratchpad edit +42 (ctrl+o to expand)
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad"; &
+            "$sp\profpush.ps1" -Dir…)
+  ⎿  push rsync.exe: 1267 MB/s (3.39s)
+
+     144 samples over 0 threads (0.0% without symbols)
+     … +17 lines (ctrl+o to expand)
+  ⎿  (timeout 3m)
+
+● Now the real picture of rsync's thread during a push at 1267 MB/s:
+
+  ┌───────────────────────────────────────────────┬─────────────────────────┐
+  │                     where                     │    share of running     │
+  │                                               │         samples         │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ NtWaitForMultipleObjects (waiting on          │ 34.7%                   │
+  │ ssh/ring)                                     │                         │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ NtReadFile (reading the source)               │ 29.9%                   │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ memcpy_repmovs                                │ 13.9%                   │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ XXH3_64bits_update (checksum)                 │ 6.3%                    │
+  ├───────────────────────────────────────────────┼─────────────────────────┤
+  │ NtDelayExecution (poll backoff sleeping)      │ 6.3%                    │
+  └───────────────────────────────────────────────┴─────────────────────────┘
+
+  That's option 2 justified before I write a line of it. Let me get the pull
+            "$sp\profpush.ps1" -Dir…)
+  ⎿  pull rsync.exe: 1046 MB/s (4.11s)
+
+     175 samples over 0 threads (0.0% without symbols)
+     … +11 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● Pull: NtWriteFile 29%, memcpy 18%, and a surprising 10.9% in ZwClose — noted
+  for option 4, since leaf frames can't tell me who's calling it. First, option
+  2, which the push profile already justifies:
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && sed -n '270,300p' fileio.c
+      && echo "=== map_ptr ===" && sed -n '/^char \*map_ptr/,/^}/p' fileio.c |
+      head -70)
+  ⎿     return 0;
+     }
+     … +98 lines (ctrl+o to expand)
+
+● The push profile says NtReadFile costs ~4× per byte what a plain memcpy does.
+  And I can attack it without touching a single shared source, because our layer
+  already owns read():
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && grep -n
+      "lseek\|O_RDONLY\|_telli64" win32/win32compat.h | head -12 && echo "===
+      do_lseek ===" && grep -n "do_lseek"…)
+  ⎿  181:#define lseek64         _lseeki64
+     === do_lseek ===
+     2281:OFF_T do_lseek(int fd, OFF_T offset, int whence)
+     … +24 lines (ctrl+o to expand)
+
+● struct map_struct is opaque outside fileio.c, but the cleaner hook is lower:
+  intercept read() and lseek() in our own layer, so the mapped memory never
+  escapes the translation unit and SEH can contain the truncation hazard
+  completely.
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && cat win32/win32undef.h |
+      head -40 && echo "=== win32_open ===" && grep -n "win32_open"
+      win32/win32compat.h)
+  ⎿  /*
+      * Undo the POSIX-name macros from win32compat.h.
+      *
+     … +44 lines (ctrl+o to expand)
+
+● Write(win32\win32mapread.h)
+  ⎿  Wrote 29 lines to win32\win32mapread.h
+      1 /*
+      2  * win32mapread.h -- serve a sender's reads of its source file fr
+        om a mapped
+      3  * view instead of ReadFile.  See win32mapread.c.
+      4  *
+      6  * Distributed under the same GPL-3.0-or-later terms as the rest
+        of rsync.
+      7  */
+      8 #ifndef RSYNC_WIN32MAPREAD_H
+      9 #define RSYNC_WIN32MAPREAD_H
+     … +25 lines (ctrl+o to expand)
+
+● Write(win32\win32mapread.c)
+  ⎿  Wrote 249 lines to win32\win32mapread.c
+       1 /*
+         apped view.
+       3  *
+       4  * Copyright (C) 2026 Max Vilimpoc, rsync CMake/Windows port.
+          of rsync.
+       6  *
+       8  * ---
+       9  * Sampling rsync.exe through a 4.3 GB push, counting only threa
+         ds that were
+          and the
+     … +267 lines (ctrl+o to expand)
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && python - <<'PY'
+      import io…)
+  ⎿  wired
+     CMakeLists.txt:875:        win32/win32mapread.c
+     CMakeLists.txt:990:        win32/win32shmpipe.c win32/win32mapread.c)
+     … +3 lines (ctrl+o to expand)
+  ⎿  Found 10 new diagnostic issues in 1 file (ctrl+o to expand)
+
+● PowerShell(cd C:\Users\Claude\devsrc\rsync-windows;
+            .\windows-build-and-test.bat --arch x64 --config Release --build-dir
+            build --no-tests 2>&1 | Select-String -Pattern "er…)
+  ⎿  C:\Users\Claude\devsrc\rsync-windows\popt\popt.c(1021): warning C4311:
+      'type
+     cast': pointer truncation from 'short *' to 'unsigned long'
+     … +14 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Update(win32\win32mapread.c)
+  ⎿  Added 13 lines
+      132      return NULL;
+      133    m->tried = 1;
+      134
+      135 +  {     /* RSYNC_WIN32_NO_MAPREAD=1 keeps ReadFile, for measur
+          +ing one
+      136 +     * against the other and as a way out. */
+      137 +    static int off = -1;
+      138 +    if (off < 0) {
+      139 +      const char *e = getenv("RSYNC_WIN32_NO_MAPREAD");
+      140 +      off = e && *e && *e != '0';
+      141 +    }
+      142 +    if (off) {
+      143 +      m->off = 1;
+      144 +      return NULL;
+      145 +    }
+      146 +  }
+      147 +
+      148    h = (HANDLE)_get_osfhandle(fd);
+      149    if (h == INVALID_HANDLE_VALUE || GetFileType(h) != FILE_TYPE
+           _DISK) {
+      150      m->off = 1;
+
+  Made 1 scratchpad edit +65 (ctrl+o to expand)
+  ⎿  Found 10 new diagnostic issues in 1 file (ctrl+o to expand)
+
+● PowerShell(cd C:\Users\Claude\devsrc\rsync-windows;
+            .\windows-build-and-test.bat --arch x64 --config Release --build-dir
+            build --no-tests 2>&1 | Select-String -Pattern "er…)
+  ⎿  Build complete (tests skipped):
+     C:\Users\Claude\devsrc\rsync-windows\build-x64\rsync.exe
+     … +12 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Decisive, and against my prediction: mapped 1125 MB/s / 3.23 s of rsync CPU vs
+  ReadFile 1317 MB/s / 1.89 s. The mapped path is worse, almost certainly one
+  soft fault per 4 KB page (~1M of them for 4.3 GB) against one bulk copy per
+  256 KB. One salvage attempt before I revert it — populate the view in a single
+  call:
+
+● Update(win32\win32mapread.c)
+  ⎿  Added 28 lines
+      194      return -1;
+      195    m->view_base = base;
+      196    m->view_len = want;
+      197 +
+      198 +  /*
+      199 +   * A fresh view is demand-paged, and at 4 KB a fault that is
+          + a soft
+      200 +   * fault per page against one bulk copy per 256 KB read -- w
+          +hich is
+      201 +   * why the first version of this lost.  Ask for the whole wi
+          +ndow to be
+      202 +   * brought into the working set in one call instead.  Win8 a
+          +nd later;
+      203 +   * without it the faults happen anyway, just one at a time.
+      204 +   */
+      205 +  {
+      206 +    static BOOL (WINAPI *prefetch)(HANDLE, ULONG_PTR,
+      207 +                 PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+      208 +    static int looked;
+      209 +    WIN32_MEMORY_RANGE_ENTRY range;
+      210 +
+      211 +    if (!looked) {
+      212 +      HMODULE k = GetModuleHandleW(L"kernel32.dll");
+      213 +      looked = 1;
+      214 +      if (k)
+      215 +        prefetch = (BOOL (WINAPI *)(HANDLE, ULONG_PTR,
+      216 +          PWIN32_MEMORY_RANGE_ENTRY, ULONG))
+      217 +          GetProcAddress(k, "PrefetchVirtualMemory");
+      218 +    }
+      219 +    if (prefetch) {
+      220 +      range.VirtualAddress = m->view;
+      221 +      range.NumberOfBytes = want;
+      222 +      prefetch(GetCurrentProcess(), 1, &range, 0);
+      223 +    }
+      224 +  }
+      225    return 0;
+      226  }
+      227
+
+● PowerShell(cd C:\Users\Claude\devsrc\rsync-windows;
+            .\windows-build-and-test.bat --arch x64 --config Release --build-dir
+            build --no-tests 2>&1 | Select-String -Pattern " e…)
+  ⎿  Build complete (tests skipped):
+     C:\Users\Claude\devsrc\rsync-windows\build-x64\rsync.exe
+     … +12 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+  ⎿  Found 10 new diagnostic issues in 1 file (ctrl+o to expand)
+
+● Prefetching made it worse still (1019). That's conclusive — mapping loses to
+  ReadFile here, and the profile's 30% was efficient bulk copying, not waste.
+  Reverting, but keeping the finding:
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && git status --short && echo
+      "--- reverting the mapped reader ---" && git checkout --
+      win32/win32compat.h win32/win32…)
+  ⎿   M CMakeLists.txt
+      M WINDOWS-PORT.md
+      M win32/win32compat.h
+     … +8 lines (ctrl+o to expand)
+
+● PowerShell(cd C:\Users\Claude\devsrc\rsync-windows;
+            .\windows-build-and-test.bat --arch x64 --config Release --build-dir
+            build --no-tests 2>&1 | Select-String -Pattern " e…)
+  ⎿  Build complete (tests skipped):
+     C:\Users\Claude\devsrc\rsync-windows\build-x64\rsync.exe
+     logged and reverted
+  ⎿  (timeout 10m)
+
+● Option 2 is a documented negative result. Now option 3 — and the profile says
+  the read side is where to point it:
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && grep -rn "map_file("
+      --include=*.c . | grep -v build- | head && echo "=== the window size ==="
+      && grep -n "MAX_MAP_…)
+  ⎿  ./checksum.c:438:  buf = map_file(fd, len, MAX_MAP_SIZE, CHUNK_SIZE);
+     ./checksum.c:561:  unmap_file(buf);
+     ./fileio.c:278:struct map_struct *map_file(int fd, OFF_T len, int32 re
+     … +33 lines (ctrl+o to expand)
+
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && sed -n '735,760p' sender.c
+      && echo "=== _O_SEQUENTIAL available? ===" && grep -rn "_O_SEQUENTIAL"
+      "C:/Program Files…)
+  ⎿             if (IS_DEVICE(st.st_mode)) {
+                        if (!copy_devices) {
+                                rprintf(FERROR, "attempt to copy device contents
+     --copy-device
+     … +27 lines (ctrl+o to expand)
+
+● Both are testable from our own layer plus one temporary line. Wiring them as
+  env switches so they can be A/B'd in one binary:
+  ⎿  wired both knobs
+
+● PowerShell(cd C:\Users\Claude\devsrc\rsync-windows;
+            .\windows-build-and-test.bat --arch x64 --config Release --build-dir
+            build --no-tests 2>&1 | Select-String -Pattern " e…)
+  ⎿  Build complete (tests skipped):
+     C:\Users\Claude\devsrc\rsync-windows\build-x64\rsync.exe
+     … +12 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Sequential scan: +1.1% throughput, −2.7% CPU — consistent in direction, at the
+  edge of noise. Now the read window:
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad"; &
+            "$sp\ab.ps1" -EnvName RS…)
+  ⎿  which    MBps rsyncCPU sshCPU cpuPerGB
+     -----    ---- -------- ------ --------
+     256KB 1317.00     2.06   5.17     1.68
+     … +8 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Read window: no effect (1293 vs 1306, CPU slightly worse). The kernel's
+  readahead already covers it. Last knob — what rsync actually writes per call:
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && grep -n "IO_BUFFER_SIZE"
+      io.c | head -12 && echo "=== out buffer alloc ===" && grep -n
+      "alloc_xbuf\|iobuf.out" io.c…)
+  ⎿  1542:      alloc_xbuf(&iobuf.out, ROUND_UP_1024(IO_BUFFER_SIZE * 2));
+     1562:      alloc_xbuf(&iobuf.in, ROUND_UP_1024(IO_BUFFER_SIZE));
+     2651:              alloc_xbuf(&iobuf.msg, ROUND_UP_1024(IO_BUFFER_SIZE));
+     … +14 lines (ctrl+o to expand)
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && python - <<'PY'
+      import io…)
+  ⎿  ok
+     1542:      { /* EXPERIMENT: RSYNC_IOBUF_KB overrides the output buffer
+     size
+     */
+     … +5 lines (ctrl+o to expand)
+
+● PowerShell(cd C:\Users\Claude\devsrc\rsync-windows;
+            .\windows-build-and-test.bat --arch x64 --config Release --build-dir
+            build --no-tests 2>&1 | Select-String -Pattern " e…)
+  ⎿  Build complete (tests skipped):
+     C:\Users\Claude\devsrc\rsync-windows\build-x64\rsync.exe
+     … +12 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● No effect there either (1294 vs 1302). Reverting both experiment hooks and
+  keeping the one that earned its place:
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && git checkout -- io.c
+      sender.c && git status --short && echo "=== the surviving change ===" &&
+      git diff --stat)
+  ⎿   M WINDOWS-PORT.md
+      M win32/win32compat.c
+     ?? PERF.txt
+     … +5 lines (ctrl+o to expand)
+
+● PowerShell(cd C:\Users\Claude\devsrc\rsync-windows;
+            .\windows-build-and-test.bat --arch x64 --config Release --build-dir
+            build --host claude@169.254.238.153 2>&1 | Select-…)
+  ⎿  --------------------------------------------------------------
+     ----- overall results:
+           24 passed
+     … +4 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Bash(cd "C:/Users/Claude/AppData/Local/Temp/claude/C--Users-Claude-devsrc-rsyn
+      c-windows/66c00488-88a8-48c3-be31-6abc940b8590/scratchpad" && cat >>
+      perflog.csv <<'EOF…)
+  ⎿  0ab08359 win32: tell Windows the source file is read once, forwards
+
+● Now option 4 — the pull path. That 10.9% in ZwClose needs a caller, so the
+  sampler needs to walk stacks:
+
+● Bash(cd "C:/Users/Claude/AppData/Local/Temp/claude/C--Users-Claude-devsrc-rsyn
+      c-windows/66c00488-88a8-48c3-be31-6abc940b8590/scratchpad" && python -
+      <<'PY'
+      import io…)
+  ⎿  Running in the background (↓ to manage)
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            cmd /c "call `"C:\Program…)
+  ⎿  sampler.c
+  ⎿  (timeout 3m)
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad"; &
+            "$sp\profpush.ps1" -Dir…)
+  ⎿  pull rsync.exe: 1011 MB/s (4.25s)
+
+     179 samples over 0 threads (0.0% without symbols)
+     … +20 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● Callers now visible. The pull is dominated by NtWriteFile ← _write_nolock
+  (36%) plus waits (34%) — the ZwClose splits three ways (stat_path,
+  _close_nolock_internal, win32_utimes), so it's teardown, not a hot loop. The
+  write path is the lever:
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && grep -n "do_fallocate" -B 4
+      -A 20 syscall.c | head -40 && echo "=== is it advertised? ===" && grep -n
+      "prealloc" us…)
+  ⎿  2585-#else
+     2586-#define DO_FALLOC_OPTIONS 0
+     2587-#endif
+     … +24 lines (ctrl+o to expand)
+
+● Before building anything, measure whether the write size matters at all:
+
+  Made 1 scratchpad edit +74 (ctrl+o to expand)
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            cmd /c "call `"C:\Program…)
+  ⎿       32 KB chunks          :   2643 MB/s   0.41 CPU-s   (0.378 CPU-s p
+     er GB)
+          64 KB chunks          :   3365 MB/s   0.31 CPU-s   (0.291 CPU-s p
+     … +7 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● Decisive and actionable: 32 KB writes cost 0.378 CPU-s/GB, 256 KB cost 0.218,
+  1 MB 0.204. The receiver writes one mux frame at a time, so coalescing in our
+  layer should recover ~0.16 CPU-s/GB. Checking what rsync does to that fd
+  before I buffer it:
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && grep -n "do_open(fnametmp\|d
+      o_open(fname\|O_RDWR\|do_lseek\|do_ftruncate\|do_fsync\|do_fstat"
+      receiver.c | head -20…)
+  ⎿  45:extern int do_fsync;
+     219:               if (do_fstat(cfd, &cst) < 0 || !S_ISREG(cst.st_mode)) {
+     269:       fd = do_open(fname, O_WRONLY, 0600);
+     … +17 lines (ctrl+o to expand)
+
+
+● Destination fds are O_WRONLY — safe to buffer. Checking the flush points I
+  must cover:
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && grep -n
+      "fsync\|ftruncate64\|#define fstat\b\|win32_fstat" win32/win32compat.h |
+      head && echo "=== write_file's see…)
+  ⎿  165:int win32_fstat(int fd, struct win32_stat *st);
+     180:#define fstat64(f, b)   win32_fstat((f), (b))
+     182:#define ftruncate64     win32_ftruncate64
+     … +42 lines (ctrl+o to expand)
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && grep -n "define
+      WRITE_SIZE\|define CHUNK_SIZE\|define MAX_BLOCK_SIZE" rsync.h && echo "===
+      so the receiver already…)
+● rsync already coalesces receiver writes to 256 KB (WRITE_SIZE * 8), which my
+  bench says is near-optimal — so that lever is already pulled. One write-side
+  idea left worth measuring: preallocating the destination so it isn't extended
+  write by write.
+
+● Bash(cd "C:/Users/Claude/AppData/Local/Temp/claude/C--Users-Claude-devsrc-rsyn
+      c-windows/66c00488-88a8-48c3-be31-6abc940b8590/scratchpad" && python -
+      <<'PY'
+      import io…)
+  ⎿  Running in the background (↓ to manage)
+
+● Bash(sleep 45; cat
+      "C:/Users/Claude/AppData/Local/Temp/claude/C--Users-Claude-devsrc-rsync-wi
+      ndows/66c00488-88a8-48c3-be31-6abc940b8590/tasks/b1puwlbg4.output" 2>/de…)
+  ⎿  Error: Blocked: sleep 45 followed by: cat
+     "C:/Users/Claude/AppData/Local/Temp/claude/C--Users-Claude-devsrc-rsync-win
+     dows/66c00488-88a8-48c3-be31-6abc940b8590/tasks/b1puwlbg4.output" tail -6.
+     To wait for a condition, use Monitor with an until-loop (e.g. `until
+     <check>; do sleep 2; done`). To wait for a command you started, use
+     run_in_background: true. Do not chain shorter sleeps to work around this
+     block.
+
+  Read 1 file (ctrl+o to expand)
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            cmd /c "call `"C:\Program…)
+  ⎿      256 KB chunks          :   4276 MB/s   0.22 CPU-s   (0.204 CPU-s p
+     er GB)
+         256 KB chunks          :   4593 MB/s   0.23 CPU-s   (0.218 CPU-s p
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● Preallocation: neutral (0.218 CPU-s/GB either way). So the pull's cost is the
+  destination write, which rsync already does at a near-optimal 256 KB — option
+  4 has no lever left, and the ZwClose was teardown, not a loop.
+
+  Something bigger has changed, though — pushes are now landing at 1340–1360
+  MB/s where they were ~1080 before ISA-L. Let me quantify that end-to-end:
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad"; &
+            "$sp\ab.ps1" -EnvName SS…)
+  ⎿  which    MBps rsyncCPU sshCPU cpuPerGB
+     -----    ---- -------- ------ --------
+     isal  1301.00     1.86   5.47     1.71
+     … +8 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● ISA-L is +3.1% / −4.6% end-to-end on short runs (its big advantage needs
+  sustained heat). The jump from ~1080 to ~1350 is mostly thermal state, not
+  code — cross-session numbers still lie. The number that matters now: how close
+  is the whole pipeline to ssh's own ceiling, measured back to back?
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            $ssh="C:\Users\Claude\devs…)
+  ⎿  rsync push :   1364 MB/s
+     ssh alone  :   1778 MB/s
+     rsync push :   1361 MB/s
+     … +3 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● ssh alone in the same conditions does 1780 MB/s; the pipeline does 1358 — so
+  rsync's own work costs 24%, more than I said a moment ago. One last cheap
+  probe at what's inside that:
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            $ssh="C:\Users\Claude\devs…)
+  ⎿  Error: Exit code 23
+     xxh128 :   1330 MB/s
+     rsync: [sender] link_stat "C:\Users\Claude\devsrc\rsync-windows/-" failed:
+     No such file or directory (2)
+     rsync: [sender] link_stat "C:\Users\Claude\devsrc\rsync-windows/-" failed:
+     No such file or directory (2)
+     rsync: [sender] link_stat "C:\Users\Claude\devsrc\rsync-windows/c" failed:
+     No such file or directory (2)
+     rsync: [sender] link_stat "C:\Users\Claude\devsrc\rsync-windows/h" failed:
+     No such file or directory (2)
+     rsync: [sender] link_stat "C:\Users\Claude\devsrc\rsync-windows/e" failed:
+     No such file or directory (2)
+     rsync: [sender] link_stat "C:\Users\Claude\devsrc\rsync-windows/c" failed:
+     No such file or directory (2)
+     rsync: [sender] link_stat "C:\Users\Claude\devsrc\rsync-windows/k" failed:
+     No such file or directory (2)
+     rsync: [sender] link_stat "C:\Users\Claude\devsrc\rsync-windows/s" failed:
+     No such file or directory (2)
+
+     … +66 lines (ctrl+o to expand)
+
+● PowerShell unwrapped my one-element array and splatted it character by
+  character — the "none" runs were garbage. Redoing it properly:
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            $ssh="C:\Users\Claude\devs…)
+  ⎿  xxh128  :   1352 MB/s  rc=0
+     none    :   1373 MB/s  rc=0
+     xxh128  :   1365 MB/s  rc=0
+     … +3 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+● The checksum costs 1.1% end to end — the last knob, and not worth touching.
+  Writing up all five:
+
+● Bash(cd "C:/Users/Claude/AppData/Local/Temp/claude/C--Users-Claude-devsrc-rsyn
+      c-windows/66c00488-88a8-48c3-be31-6abc940b8590/scratchpad" && cat >>
+      perflog.csv <<'EOF…)
+  ⎿  logged
+
+● Bash(cd "C:/Users/Claude/devsrc/rsync-windows" && python - <<'PY'
+      import io…)
+  ⎿  documented
+     e9918e59 docs: where a transfer's time goes, and four things that did
+     not help
+
+● PowerShell($sp="C:\Users\Claude\AppData\Local\Temp\claude\C--Users-Claude-devs
+            rc-rsync-windows\66c00488-88a8-48c3-be31-6abc940b8590\scratchpad";
+            $ssh="C:\Users\Claude\devs…)
+  ⎿  remote clean
+     local clean
+     e9918e59 docs: where a transfer's time goes, and four things that did
+     … +9 lines (ctrl+o to expand)
+
+● All five done. Two commits kept, three negative results documented, tree
+  clean.
+
+  1. Profile — done, both directions
+
+  Wrote a stack-walking sampler (no admin needed: suspend running threads, read
+  the IP, walk to the first frame in rsync's own code). A 4.3 GB push, counting
+  only threads actually burning CPU:
+
+  ┌───────────────────────────────────────────┬───────┐
+  │             rsync.exe was in              │ share │
+  ├───────────────────────────────────────────┼───────┤
+  │ NtWaitForMultipleObjects — waiting on ssh │ 34.7% │
+  ├───────────────────────────────────────────┼───────┤
+  │ NtReadFile — reading the source           │ 29.9% │
+  ├───────────────────────────────────────────┼───────┤
+  │ memcpy_repmovs — two copies per byte      │ 13.9% │
+  ├───────────────────────────────────────────┼───────┤
+  │ XXH3_64bits_update — the checksum         │ 6.3%  │
+  └───────────────────────────────────────────┴───────┘
+
+  Pull is the mirror: NtWriteFile 36%, waiting 34%, memcpy 12%. The ZwClose that
+  looked suspicious resolved into stat_path, _close_nolock_internal and
+  win32_utimes — teardown, not a loop.
+
+  The number worth having: back to back in the same machine state, a push runs
+  1358 MB/s and one ssh connection fed from memory runs 1786 MB/s. The pipeline
+  delivers 76% of what the transport alone can do.
+
+  2. Memory-map the source — implemented, and it lost badly
+
+  Hooked read()/lseek() in our own layer so mapped memory never escaped the
+  translation unit and SEH could contain the truncation hazard completely.
+  Result: 1125 MB/s vs 1317, rsync CPU 3.23 s vs 1.89. PrefetchVirtualMemory
+  made it worse still (1019). A view is demand-paged, so 4.3 GB is ~1M soft
+  faults against one bulk copy per 256 KB read. The 30% in NtReadFile isn't
+  waste — it's what reading 4.3 GB costs. Reverted; the reasoning is in
+  BUILD-CMAKE.md so nobody repeats it.
+
+  3. Knobs — one of three kept
+
+  - Checksum: already xxh128, no MD5 fallback; costs 1.1% end to end.
+  - Read window 256 KB → 1 MB: nothing (1293 vs 1306).
+  - iobuf.out 64 KB → 256 KB: nothing (1302 vs 1294).
+  - _O_SEQUENTIAL on read-only opens: +1.1% throughput, −2.7% CPU. Edge of
+    noise, but it's true — rsync reads source files once, forwards — so I kept
+    it (0ab08359).
+
+  4. Pull asymmetry — no lever
+
+  The destination write dominates, and rsync already coalesces receiver writes
+  to 256 KB (WRITE_SIZE * 8). My bench: 32 KB writes cost 0.378 CPU-s/GB, 256 KB
+  0.218, 1 MB 0.204 — so the lever is pulled before we reach it. Preallocating
+  with SetEndOfFile: identical, 0.218 either way.
+
+  5. iobuf.out in the ring — measured, deliberately not built
+
+  The copy is ~4.5% of a core at 1.35 GB/s ≈ 7% of rsync's CPU ≈ 3–4% end to
+  end. Collecting it means restructuring io.c's buffer management (xbuf is
+  linear with a memmove, not a ring). Given options 2–4 all showed that copies
+  are cheap and mechanism-swaps lose, that price isn't worth 3%. Written up as a
+  decision, not silently skipped.
+
+  For the morning with admin: the open question is that 24%. My sampler shows
+  rsync waiting 35% of the time, which means it's blocked on ssh — yet ssh alone
+  is much faster than the pipeline. That points at serialisation or CPU
+  contention between the two processes, which is exactly what xperf's wait
+  analysis (ready-thread/CSwitch) answers and my leaf sampler cannot. sampler.c
+  is in the scratchpad if it's still useful. I'd start there rather than on any
+  of the five above.
+
+✻ Baked for 32m 55s · done 3:56 AM · 3 shells still running
+
+❯ Read the end of the WINDOWS-PORT.md file, the section from # Moar Speed Pt. 9! Moar
+  Profiling, use claude@169.254.238.153 to test the end to end bandwidth with tmpfs files
+  that are quickly and regularly deleted, read the memory in this folder of things not to
+  do. Then do the xperf and vtunes profiling of our rsync + ssh and improve performance
+  without pulling any major structural levers. Keep changes confined as much as possible to
+  our translation units, only modifying rsync or ssh sources when absolutely necessary.
+
+● I'll start by reading the relevant context — the WINDOWS-PORT.md tail section, the memory
+  directory, and checking the current repo state.
+
+● Memory read. Key rules I'll follow: PowerShell/Python only (no Bash on Windows), port code
+  in win32/, pin aes128-gcm + warm the source, confirm the shmpipe transport, and
+  create/delete tmpfs test files per test on claude@169.254.238.153 (no rm -rf).
+
+  Let me check the environment — elevation, xperf, VTune, and the previous session's tooling.
+
+● Strong is an admin account but the tool runs at medium integrity, so xperf's kernel logger
+  is denied. VTune 2026.4 is installed. Let me test whether a UAC elevation prompt is
+  answerable.
+
+❯ Wait do I need to start the command prompt as admin to make this easier?
+
+● Yes — it would make this materially easier, and I'd recommend it.
+
+  Where it stands: I confirmed Start-Process -Verb RunAs works (the elevation probe came back
+  elevated=True), so I can proceed without it. But everything xperf-related then has to be
+  shoved through a separate hidden elevated process with output redirected to files, while
+  the transfer itself runs in my medium-integrity shell — start trace, run push, stop trace,
+  merge, all split across two integrity levels. That's fragile and slow to iterate on.
+  VTune's hardware event-based sampling wants its driver too, which is the same story.
+
+  Elevated, xperf -on just works, and I get CSwitch/ReadyThread stacks — which is exactly the
+  data that answers the open question from last night (rsync waits 35% of the time yet ssh
+  alone is much faster than the pipeline; that's a serialisation question only wait analysis
+  can settle).
+
+  To keep this conversation, relaunch and resume rather than starting fresh:
+
+  Win+X → Terminal (Admin)
+  cd C:\Users\Claude\devsrc\rsync-windows
+  claude --continue
+
+  --continue picks up this session with the context intact, so nothing above is lost.
+
+  Two things worth knowing before you do:
+
+  - Everything I launch will then run at High integrity, including rsync.exe and ssh.exe.
+    Integrity level doesn't affect thread scheduling, so throughput should be unaffected —
+    and I'll re-baseline inside the new session anyway, since cross-session numbers on this
+    laptop have lied before.
+  - Your Dell sensor namespace (root/dcim/sysman) is Administrators-only, which is why
+    thermal logging needed a workaround before. Running elevated fixes that for free — I'll
+    get CPU temperature, fan RPM, % Processor Performance (clock), and per-process CPU logged
+    alongside throughput for every run, as you asked, so it's all chartable afterwards.
+
+  If you'd rather not restart, say so and I'll wrap each profiling round in a single RunAs
+  script — one UAC prompt per round instead of per command. Just slower going.
+
+✻ Cooked for 33s · done 4:27 AM
+
+❯ /exit
+
+❯ Read the end of the WINDOWS-PORT.md file, the section from # Moar Speed Pt. 9! Moar Profiling, use
+  claude@169.254.238.153 to test the end to end bandwidth with tmpfs files that are quickly and regularly deleted, read
+  the memory in this folder of things not to do. Then do the xperf and vtunes profiling of our rsync + ssh and improve
+  performance without pulling any major structural levers. Keep changes confined as much as possible to our
+  translation units, only modifying rsync or ssh sources when absolutely necessary.
+
+● I'll start by reading the relevant context — the WINDOWS-PORT.md tail section, the memory directory, and checking the
+  current repo state.
+
+● Memory read. Key rules I'll follow: PowerShell/Python only (no Bash on Windows), port code in win32/, pin aes128-gcm +
+  warm the source, confirm the shmpipe transport, and create/delete tmpfs test files per test on claude@169.254.238.153
+  (no rm -rf).
+
+  Let me check the environment — elevation, xperf, VTune, and the previous session's tooling.
+
+❯ Ok continue with profiling and improvements.
+
+● Elevated, xperf works. Now let me check the test assets and the link.
+
+● Connected; tmpfs is clean. Now let me set up the measurement rig — test files, and verify I can read the Dell sensors
+  now that I'm elevated.
+
+● Sensors read fine now. i5-8350U, 4C/8T, 15 W — Balanced power plan (I'll log it, and keep it constant across arms).
+  Copying the exact test files the earlier baselines used, so numbers stay comparable:
+
+● Now the metrics harness — every run logs throughput, per-process CPU, clock as % of base, and temperatures, plus an
+  optional per-run time series for charting.
+
+● Warming the source and confirming the shared-memory transport actually engages before any measurement:
+
+● Rings engaged. Taking a baseline before touching anything:
+
+● PowerShell($sp="C:\Users\Strong\AppData\Local\Temp\claude\C--Users-Claude-devsrc-rsync-windows\712f2cd4-9f6b-48a4-af66
+            -a8fa9df2f67a\scratchpad"
+            1..5 | ForEach-Object { & "…)
+  ⎿  base1        push    887 MB/s    1.21s  rsync  0.52s  ssh  1.19s   1.586 CPU-s/GB  clk 183.7%  cpu 34.6%  temp
+      56->58C (max 58)  rc=0
+     base2        push    758 MB/s    1.42s  rsync  0.50s  ssh  1.20s   1.586 CPU-s/GB  clk 179.4%  cpu 32.9%  temp
+     … +9 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● 1 GB is too short — connection setup dominates. The 4 GB run reproduces the prior session's 1358 MB/s exactly, so
+  that's the measurement unit. Now let me get a symbol-bearing build for xperf.
+
+● rsync.pdb exists but there's no ssh.pdb, and the RelWithDebInfo build predates the last commit. Rebuilding it while I
+  check how ssh is built:
+
+● Build finished. ssh.exe matches its PDB, so both binaries can be symbolized. Let me see the remaining xperf actions.
+
+● All the actions I need are there (profile, cswitch, readythread, stack). Writing the capture script:
+
+● Capture worked (1336 MB/s, so tracing overhead is negligible) but decoding failed. Checking why:
+
+● Capture is sound. Now let me see what the stack action produces:
+
+● Now I have clean data. Two clear pictures:
+
+  rsync.exe (~1.78 CPU-s): reading the source is 53% of its CPU — kernel memcpy 22%, and ~18% more in cache-manager page
+  bookkeeping (MiInsertPageInList, MmCheckCachedPageStates, MmUnmapViewInSystemCache…). Its own memcpy_repmovs is 21%
+  (the two user-space copies), checksum 7%.
+
+  ssh.exe (~4.2 CPU-s): AES-GCM is only 21%; MiProbeLockFrame+MmUnlockPages+MiSetProbePagesAhead ≈ 13.6% locking user
+  pages per send(), afd.sys!memcpy 7%, and netio.sys!tcpxsum_start 4% — a software TCP checksum, which suggests offload
+  is off on this adapter.
+
+  Neither process is CPU-saturated, so the ceiling is handoff latency. Let me look at our ring and at the context-switch
+  rate.
+
+● The ring itself is sound (spin-then-wait with armed flags). The ssh profile names syncio_pump_write and
+  sockio_pump_send — our own pump code. Let me find it:
+
+● The Thunderbolt adapter exposes no offload capabilities at all — so that software TCP checksum is a driver limitation,
+  not a knob.
+
+  The more useful question is whether one thread is saturated. Let me measure per-thread CPU during a push:
+
+● Nothing is CPU-bound — the busiest thread is at 65% of a core, total 2.06 of 8 cores. This is a latency-bound
+  pipeline, not a throughput-bound one. Let me check the wake-batching constants and what the earlier power-plan test
+  found:
+
+● Power plan was already tested (Ultimate was −3.1%) — not re-chasing that. The interesting constant is PUMP_WAKE_BYTES
+  = 128 KB: at 1.4 GB/s that's ~90 µs of deliberately-added latency per handoff. Let me read the send path:
+
+● pumps_flush_before_wait() already catches the tail, so the 128 KB threshold is bounded. I need real wait data rather
+  than more speculation. Dumping context switches from the wait trace:
+
+● VTune's hw mode is right for a 3-second run. While the event dump finishes, let me check the dump format:
+
+● Background command "Dump all trace events to CSV" completed (exit code 0)
+
+● Now I have full context-switch and ready-thread data. Writing the wait analyser:
+
+● Now the picture is clear. The decisive numbers:
+
+  ┌────────────────────┬───────┬────────────────────────────────────────────────────────────────────────────────────┐
+  │       thread       │ busy  │                                     blocked on                                     │
+  ├────────────────────┼───────┼────────────────────────────────────────────────────────────────────────────────────┤
+  │ rsync main (2588)  │ 66.5% │ UserRequest 0.785 s, DelayExecution (Sleep) 0.270 s — 32,931 blocks, woken by ssh  │
+  │                    │       │ 36,883×                                                                            │
+  ├────────────────────┼───────┼────────────────────────────────────────────────────────────────────────────────────┤
+  │ ssh 12200          │ 74.8% │ DelayExecution 0.781 s — 8,112 blocks                                              │
+  │ (busiest)          │       │                                                                                    │
+  ├────────────────────┼───────┼────────────────────────────────────────────────────────────────────────────────────┤
+  │ ssh 4172           │ 34.2% │ UserRequest 2.019 s, woken by kernel 23,927×                                       │
+  └────────────────────┴───────┴────────────────────────────────────────────────────────────────────────────────────┘
+
+  ~1.05 s of the 3.16 s wall clock is spent in Sleep() on the two hottest threads, plus ~0.5 s of pure ready→running
+  scheduler latency. Let me find those sleeps:
+
+● Found the backoff ladders. Let me read both:
+
+● The Sleep(1) is only teardown. Thread 4172 blocked 2.019 s in send() — that's genuine link backpressure. But the
+  busiest thread (12200) burns 0.781 s in DelayExecution. Let me check the alertable yields in the shm read path:
+
+● wait_for_any_event is OpenSSH's alertable SleepEx — legitimate idle waiting. But rsync's 0.270 s of DelayExecution is
+  poll_backoff's timed sleeps, which is attackable waste. Let me see whether win32_select waits on the ring's events or
+  polls them:
+
+● Decisive: 99.56% of rsync's blocking is WaitForMultipleObjects in win32_select ←
+  perform_io ← write_buf — waiting for room in the ring. So rsync outruns ssh; ssh's
+  main thread (74.8% busy) is the real ceiling. At 1324 MB/s and 74.8% busy it would
+  saturate at ~1770 MB/s — suspiciously close to the recorded "ssh alone 1786".
+
+  But a single TCP stream measured only 1437 MB/s with iperf3, so those prior numbers
+  can't both be right. Let me settle the actual ceiling back-to-back in one session:
+
+● Now the decisive measurement — the three ceilings interleaved in one thermal state:
+
+● Now the real picture: the link ceiling is ~1900 MB/s (iperf3 single-stream is
+  limited by iperf3 itself, not the link). So:
+
+  ┌─────────────────────────────────────────┬──────┐
+  │                                         │ MB/s │
+  ├─────────────────────────────────────────┼──────┤
+  │ rsync push                              │ 1362 │
+  ├─────────────────────────────────────────┼──────┤
+  │ ssh alone, same cipher, fed from memory │ 1924 │
+  ├─────────────────────────────────────────┼──────┤
+  │ iperf3, 1 stream                        │ 1448 │
+  └─────────────────────────────────────────┴──────┘
+
+  The pipeline delivers 71% of what ssh alone does. Let me check the ring geometry
+  and how ssh gets woken:
+
+● Found it. ssh can't wait on the ring event directly — OpenSSH's Windows layer
+  funnels everything through one alertable wait — so each direction has a notifier
+  thread that waits on the ring event and then QueueUserAPCs the main thread. That's
+  two thread wakeups per handoff, ~10,000 handoffs/s.
+
+  Let me read the exact pre-block path:
+
+● Three thread wakeups per empty-ring handoff, and shmpipe_read is called
+  non-blocking so ssh never spins on the ring at all. But I should confirm where
+  ssh's main thread actually blocks before changing anything — I already captured
+  that:
+
+● Now I understand the stall: ssh's main thread blocks 18,716 times in w32_select's
+  alertable sleep, and each empty-ring event costs the kick→notifier→APC dance. The
+  ring is 1 MB, and both sides block on it — classic lockstep.
+
+  The cheapest test needs no rebuild at all, since ring size is already an env knob:
+
+● Ring size is completely flat from 256 KB to 16 MB — so this is not a ring-capacity
+  problem, and a 16 MB ring gives rsync 12 ms of runway with no gain. That points
+  somewhere I haven't looked: the receiving end. ssh alone writes to cat > /dev/null;
+  the rsync push drives a full rsync receiver on the Linux box. Let me measure the
+  remote side:
+
+● This reframes everything. The remote rsync receiver sits at 90–100% of a core for
+  the whole transfer, with remote sshd-session at 70–90%. ssh alone writes to cat >
+  /dev/null — nearly free — which is why it reaches 1924.
+
+  That also explains the whole local stall chain: remote receiver saturates → TCP
+  backpressure → local send() blocks 2.0 s → sock ring fills → ssh main waits → shm
+  ring fills → rsync blocks on ring room. Let me confirm with a decisive test — two
+  parallel pushes to a 16-core box:
+
+● Confirmed decisively:
+
+  ┌─────────┬───────────┬────────────┐
+  │ streams │ aggregate │ per stream │
+  ├─────────┼───────────┼────────────┤
+  │ 1       │ 1362 MB/s │ 1362       │
+  ├─────────┼───────────┼────────────┤
+  │ 2       │ 1625 MB/s │ 812        │
+  ├─────────┼───────────┼────────────┤
+  │ 3       │ 1666 MB/s │ 556        │
+  └─────────┴───────────┴────────────┘
+
+  A second receiver buys +19%, so the single-stream push is capped by the remote
+  rsync receiver (stock upstream rsync on Linux), not by our sender. That's outside
+  our translation units — and it means local sender optimizations can't show up in
+  push throughput.
+
+  The pull direction is different: there our port is the receiver. That's the slower
+  direction historically. Let me measure it properly:
+
+● Pull is real now: 1106/1051 MB/s vs push 1339/1200 — and the laptop is at 89 °C
+  with clock down to 163%, so I'll add a cooldown before A/B work. Let me trace the
+  pull, where our port is the receiver:
+
+● Pull is dominated by writing the destination: write_file 67% inclusive,
+  CcMapAndCopyInToCache 51%, plus heavy page-allocation churn (MiMakePageAvoidRead,
+  MiGetPage, MiInsertCachedPte). That raises the obvious question — is the pull just
+  disk-bound? Let me measure what the disk can actually take:
+
+● Disk absorbs 3–3.7 GB/s, so pull at ~1050 is not disk-bound. Let me find what is —
+  per-thread local CPU plus the remote sender, during a pull:
+
+● No thread saturated in pull either (max 59%). Let me check the remote sender:
+
+● Contrast is clear: during push the remote rsync runs 80–100% (saturated); during
+  pull the remote is only 50–80% and no local thread exceeds 59%. So pull is
+  latency-bound with headroom at both ends — and the handoff code is ours.
+
+  Let me confirm where ssh actually blocks in the pull, so I spin in the right place:
+
+● Confirmed — syncio_pump_available → shmio_available is the readiness hook
+  w32_select consults before blocking. Let me see the file's head before editing:
+
+● Now I'll implement a bounded spin in our shmio layer so the common case never pays
+  for the three-wakeup dance. Env-gated so I can sweep it:
+
+● Now rebuild ssh (which needs the OpenSSH build) and verify it still works:
+
+● Built. Now sweep the spin value — with a cooldown between rounds, since the laptop
+  throttles:
+
+● The spin is a clear loss — and the mechanism is visible in the data: clock drops
+  from ~183% to ~134% in the spin arms. On a 15 W part, burning a core spinning
+  steals turbo headroom from the threads doing real work, even with six cores idle.
+  Pull falls 1003 → 635 MB/s and CPU/GB rises 1.35 → 2.50. Reverting:
+
+● Reverted and rebuilt to the original binary. Now let me try the pull side, where
+  the headroom actually is. Checking how the sequential-scan hint is currently
+  applied:
+
+● Let me extend the same hint to the receiver's destination, opt-in so the default
+  build is unchanged while I measure:
+
+● No win there either (1054 vs 1024, and the =1 arm always ran hotter). Reverting
+  that.
+
+  One more cheap test the main finding implies: is the remote cap rsync or tmpfs page
+  allocation? Our harness deletes the destination every run, so the receiver
+  allocates 4 GB of tmpfs each time:
+
+● Now the decisive test of what caps the push — fresh allocation on the remote vs
+  overwriting pages that already exist:
+
+● That collapsed because an existing destination triggers rsync's delta path (block
+  checksums over 4 GB), not the allocation effect I meant to isolate. Adding
+  --whole-file to both arms so allocation is the only difference:
+
+● +10.5%, consistent across all three rounds (and reuse ran hotter each time, so the
+  true effect is at least that). Making the receiver's job cheaper directly raises
+  throughput — the signature of a receiver-bound pipeline.
+
+  Let me run the test suite to confirm the rebuilt binaries are sound, and check the
+  tmpfs is clean:
+
+● tmpfs back to 17 M — clean. Now let me consolidate the measurements into
+  chart-ready form:
+
+● Now let me consolidate the metric logs for charting, and check what was already
+  uncommitted in the doc before I appended:
+
+● Done. Here's what came out of it.
+
+  The headline: we've been profiling the wrong machine
+
+  Elevated xperf traces plus /proc sampling on the far side say the push is capped by
+  the remote rsync receiver, not by anything on Windows.
+
+  Interleaved in one thermal state (the old cross-session numbers couldn't both be
+  true):
+
+  ┌───────────────────────────────────────┬──────┐
+  │                                       │ MB/s │
+  ├───────────────────────────────────────┼──────┤
+  │ rsync push                            │ 1362 │
+  ├───────────────────────────────────────┼──────┤
+  │ ssh alone, same connection and cipher │ 1924 │
+  ├───────────────────────────────────────┼──────┤
+  │ iperf3, one stream                    │ 1448 │
+  └───────────────────────────────────────┴──────┘
+
+  The link does ~1900; iperf3's single stream was measuring iperf3. The difference
+  between arms 1 and 2 isn't the transport — ssh alone writes to cat > /dev/null,
+  while the push drives a real rsync receiver, and that receiver sits at 90–100% of
+  one core for the whole transfer.
+
+  Everything I measured locally is that backpressure propagating: remote saturates →
+  TCP window → local send() blocks 2.0 s of a 3.1 s run → socket-pump ring fills →
+  ssh main waits → shm ring fills → rsync blocks in win32_select (99.56% of its
+  context switches). Nothing local is saturated: busiest thread 65% of a core, 2.06
+  of 8 cores total.
+
+  Confirmed twice independently — 2 parallel pushes give 1625 MB/s aggregate and 3
+  give 1666; and pre-allocating the destination on the far side is +10.5% (1345 →
+  1486, --whole-file in both arms).
+
+  Nothing I tried made it faster, and I reverted all of it
+
+  Honest result: three experiments, three measured losses or nulls, tree back at
+  e9918e59.
+
+  - Spin instead of the notifier/APC wake-up (ssh pays three thread wakeups per
+    empty-ring handoff, 18,716 of them). Pull fell 1003 → 635 MB/s. The metric log
+    shows why: effective clock dropped 172% → 148% of base. Six idle cores, and
+    spinning still lost — on a 15 W part a spinning core takes turbo from the threads
+    doing real work. Idle cores here are thermal headroom, not spare capacity.
+  - FILE_FLAG_SEQUENTIAL_SCAN on the destination — 1054 vs 1024 MB/s, worse arm ran
+    hotter. Nothing.
+  - Ring size 256 KB → 16 MB — flat (1351–1360). A 16 MB ring gives rsync 12 ms of
+    runway and changes nothing.
+
+  For the push this is expected rather than disappointing: the sender has ~40%
+  headroom and the far end has none, so local savings show up as more waiting, not
+  more throughput.
+
+  Pull (~1050 MB/s) is where local headroom still exists — neither end saturated,
+  latency-bound, our receiver's CPU almost entirely in the destination write
+  (write_file 67% inclusive, CcMapAndCopyInToCache 51%). Not the disk: this NVMe
+  takes buffered sequential writes at 3.0–3.8 GB/s.
+
+  What I left out
+
+  I did not run VTune. It's installed (2026.4) and I verified it works, but xperf's
+  CPU + CSwitch/ReadyThread traces answered the question, and once the answer was
+  "the bottleneck is on the other end of the wire" a local profiler couldn't add to
+  it. If you want the microarchitectural layer anyway — uarch-exploration on
+  ssh.exe's AES/copy path — say so and I'll do that specifically.
+
+  Also: the Thunderbolt adapter shows netio.sys!tcpxsum_start at 4% of ssh's CPU
+  (software TCP checksum), but it exposes no offload capabilities at all — driver
+  limitation, not a knob.
+
+  Logged for charting
+
+  scratchpad\charts-xperf\ has tidy per-chart CSVs (ceilings, parallel-streams,
+  remote-prealloc, ab-arms, cpu-profile, thread-busy, remote-cpu), plus raw runs.csv
+  (54 runs, each with MB/s, per-process CPU, CPU-s/GB, clock as % of base, and
+  start/end/max temperature) and 17 new rows in perflog.csv. The ab-arms table is the
+  interesting one — throughput and effective clock fall together across the spin
+  sweep, which is the thermal argument in one table.
+
+  State
+
+  - 24/24 tests pass; final cooled runs confirm baseline (push 1334/1358, pull 1063).
+  - No code changes in the tree. WINDOWS-PORT.md has the new Moar Speed Pt. X section
+    written up; note that file already had uncommitted edits from earlier sessions
+    before I started, so I left committing to you.
+  - Remote tmpfs back to 17 M — all test files deleted. ufw is still off on the Linux
+    box if you disabled it.
+
+✻ Baked for 55m 51s · done 5:24 AM
+
+# Save Optimization Harnesses And Data
+
+● Charts are in the repo root (SVG + PNG, matching the existing windows-perf-* set),
+  data and generator in optimization/.
+
+  Six charts for this round:
+
+  - windows-perf-xperf-ceiling — rsync push 1362 vs ssh alone 1924 vs iperf3 one
+    stream 1448, with the −29% gap shaded and attributed to the far-end receiver.
+  - windows-perf-xperf-receiver — the two proofs side by side: parallel streams (1362
+    → 1624 → 1666) and fresh vs pre-allocated destination (+10.5%).
+  - windows-perf-xperf-busy — push and pull, local threads and far-end processes on
+    one axis. Only the remote rsync touches the 100% line.
+  - windows-perf-xperf-cpu — where each process's CPU actually goes. The cipher is a
+    fifth of ssh; reading the source is half of rsync.
+  - windows-perf-xperf-spin — the spin sweep with effective clock on a second axis.
+    Throughput and clock fall together, which is the whole argument in one picture.
+  - windows-perf-xperf-nulls — ring size flat across 64×, and the sequential-write
+    hint doing nothing.
+
+  windows-perf-journey is the overall one: rsync push from 17 MB/s to 1362, log
+  scale, the two link eras separated, each era's line rate as a dashed ceiling. It
+  shows something the individual charts don't — the port hit the 2.5 GbE ceiling
+  (15×) and stalled there until a faster link revealed there was more to win (4.2×
+  more). 80× overall, on a 15 W laptop doing AES on every byte.
+
+  Two things I corrected while charting, worth flagging since they'd otherwise be
+  baked into published data:
+
+  - parallel.csv still held six rows from the run where Start-Process couldn't find
+    rsync.exe and timed an empty loop (up to 129,444 MB/s). They dominated the
+    average and produced a nonsense first panel until I spotted it.
+  - prealloc.csv held the six rows from the round where I forgot --whole-file, which
+    is the delta-path mistake, not a measurement.
+
+  Both batches are removed from the raw logs, and optimization/README.md records what
+  was dropped and why, so the published CSVs are trustworthy on their own.
+
+  One honest caveat on the journey chart, stated in its footer: each bar is what was
+  measured at that commit in that session, and this laptop throttles — so the
+  step-to-step deltas are indicative, not exact. The 17, 249, 326 and 1362 figures
+  are the solid ones.
+
+  Nothing is committed — optimization/ and the fourteen chart files are untracked,
+  and WINDOWS-PORT.md still carries the earlier sessions' uncommitted edits alongside
+  the new section.
+
+✻ Worked for 9m 57s · done 11:19 AM
+
+❯ Make sure we've salvaged as much perf data as we can from the Claude and Strong
+  accounts scratchpads of the optimization work, including the measured CSVs and
+  chart building scripts. Save all of that to optimization/ -- sadly I didn't do
+  this earlier so some of the data may be lost, but get what you can.
+
+● Salvaged. 174 files, 3.2 MB, out of both accounts' scratchpads and into
+  optimization/:
+
+  optimization/
+    README.md
+    charts/     7   the generator for every round, incl. the new xperfcharts.py
+    harness/   49   the scripts that actually ran the transfers
+    bench/     10   standalone microbenchmarks
+    data/      59   every measured CSV/JSON
+    profiles/  48   xperf butterfly reports, sampler output, CPU logs
+
+  The salvage is verified, not assumed. I re-ran all seven generators from the new
+  layout — they all succeed, and between them they reproduce every published
+  windows-perf-* chart. That's the real proof the data is complete rather than just
+  copied.
+
+  Two fixes were needed to make that true:
+  - linkchart.py expects a run directory containing iperf3.json + win-samples.csv +
+    lin-samples.csv, so I kept iperf-run/ and iperf-run2/ as directories under data/
+    instead of flattening them.
+  - isalcharts.py read its thermal CSVs from its own directory; repointed at ../data.
+
+  What's there that's easy to overlook: the multi-minute sustained-cipher runs with
+  clock and temperature per second (thermal-*.csv, net-*.csv, rev-*.csv), the
+  3-minute link characterisation sampled at both ends (iperf-run*/), the single-knob
+  A/B sweeps from the round before this one (ab-*.csv — mapped reads, read window,
+  iobuf size, GCM backend), and the raw xperf butterfly reports (2.5 MB) that the
+  CPU-profile chart was transcribed from.
+
+  Deliberately not taken: rel.json / lrel.json (GitHub release API responses), build
+  and vcpkg logs, test-suite logs, new_*.c drafts of code that landed in the tree,
+  the vendored xxhash copies, and perf/ (5.2 GB of synthetic test files —
+  regenerable). I also dropped ~17 stub files of 40 bytes from an early raw-TCP
+  experiment and a stray draft commit message.
+
+  Honest gap: the twelve other session directories under both accounts have empty
+  scratchpads, so anything written during those sessions is already gone. What
+  survives is the two big sessions — which is where essentially all the measurement
+  happened, judging by the fact that the full chart set rebuilds.
+
+  optimization/README.md documents the layout, the rebuild commands, the
+  interleaving/throttling caveat, the removed bad rows, and which experiments were
+  measured and reverted. Still nothing committed.
+
+✻ Cogitated for 5m 18s · done 11:25 AM
+
+# Final Reports
+
+See the windows-perf-* series graphs showing the results of performance optimization.
+I'm going to write up a post about this after digesting the results in my own slow
+neural network.

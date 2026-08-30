@@ -1,0 +1,20 @@
+
+179 samples over 0 threads (0.0% without symbols)
+
+  %      samples  where
+ 36.31        65  ntdll         NtWriteFile                 <-  _write_nolock
+ 34.08        61  ntdll         NtWaitForMultipleObjects    <-  win32_select
+ 11.73        21  rsync         memcpy_repmovs              <-  memcpy_repmovs
+  3.35         6  ntdll         ZwClose                     <-  stat_path
+  3.35         6  ntdll         NtQueryInformationFile      <-  stat_path
+  3.35         6  rsync         rsync_avx2_XXH3_64bits_update  <-  rsync_avx2_XXH3_64bits_update
+  2.23         4  ntdll         ZwClose                     <-  _close_nolock_internal
+  1.12         2  ntdll         ZwClose                     <-  win32_utimes
+  0.56         1  rsync         _write_nolock               <-  _write_nolock
+  0.56         1  rsync         ILT+58512(read_buf)         <-  ILT+58512(read_buf)
+  0.56         1  ntdll         ZwWaitForSingleObject       <-  peer_gone
+  0.56         1  rsync         perform_io                  <-  perform_io
+  0.56         1  rsync         memcpy                      <-  memcpy
+  0.56         1  rsync         simple_recv_token           <-  simple_recv_token
+  0.56         1  rsync         used_of                     <-  used_of
+  0.56         1  rsync         win32_trace                 <-  win32_trace

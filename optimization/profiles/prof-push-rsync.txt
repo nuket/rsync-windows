@@ -1,0 +1,19 @@
+
+144 samples over 0 threads (0.0% without symbols)
+
+  %      samples  where
+ 34.72        50  ntdll          NtWaitForMultipleObjects
+ 29.86        43  ntdll          NtReadFile
+ 13.89        20  rsync          memcpy_repmovs
+  6.25         9  rsync          rsync_avx2_XXH3_64bits_update
+  6.25         9  ntdll          NtDelayExecution
+  2.08         3  rsync          win32_select
+  1.39         2  rsync          perform_io
+  0.69         1  rsync          rsync_avx2_XXH3_128bits_update
+  0.69         1  KERNEL32       GetTickCount
+  0.69         1  rsync          send_token
+  0.69         1  rsync          memcpy
+  0.69         1  rsync          crtfd_readable
+  0.69         1  rsync          ILT+10592(write_buf)
+  0.69         1  ntdll          ZwWaitForSingleObject
+  0.69         1  ntdll          ZwClose

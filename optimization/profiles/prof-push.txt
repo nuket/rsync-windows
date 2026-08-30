@@ -1,0 +1,12 @@
+
+656 samples over 0 threads (0.0% without symbols)
+
+  %      samples  where
+ 75.00       492  ntdll          ZwWaitForWorkViaWorkerFactory
+ 10.52        69  ntdll          NtWaitForMultipleObjects
+  8.69        57  ntdll          NtReadFile
+  1.68        11  rsync          memcpy_repmovs
+  1.37         9  ntdll          NtDelayExecution
+  0.61         4  rsync          rsync_avx2_XXH3_64bits_update
+  0.30         2  rsync          perform_io
+  0.30         2  rsync          matched

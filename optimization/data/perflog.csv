@@ -1,0 +1,99 @@
+stage,what,metric,value,units,notes
+baseline,ssh stdin from a file,throughput,1275,MB/s,"4 GB, interleaved set, no pipe in the way"
+baseline,ssh stdin from a pipe (no rsync),throughput,1045,MB/s,"same ssh, same 4 GB; the pipe hop costs 18%"
+baseline,rsync push,throughput,945,MB/s,"pipe hop + rsync protocol"
+baseline,link ceiling (iperf3 4 streams),throughput,1894,MB/s,not the limit
+baseline,one TCP stream (iperf3),throughput,1437,MB/s,not the limit
+transport,anonymous pipe 1 MB buffer,throughput,5720,MB/s,"standalone, 32 KB chunks, parent to child, discard"
+transport,shared-memory ring 1 MB,throughput,22303,MB/s,"same test; 3.9x the pipe"
+transport,pipe cost at 1.5 GB/s,cpu_share,26,% of a core,derived from 5720 MB/s transport rate
+transport,shm cost at 1.5 GB/s,cpu_share,7,% of a core,derived from 22303 MB/s transport rate
+transport,pipe 32 KB chunks,throughput,6007,MB/s,rsync writes at roughly this size
+transport,pipe 64 KB chunks,throughput,5706,MB/s,iobuf.out is 64 KB
+transport,pipe 256 KB chunks,throughput,9299,MB/s,fewer syscalls per byte
+transport,shm 32 KB chunks,throughput,22652,MB/s,
+transport,shm 64 KB chunks,throughput,22403,MB/s,
+transport,shm 256 KB chunks,throughput,21488,MB/s,chunk size barely matters for the ring
+rsync-push,pipe hop: rsync push 4.3 GB aes128-gcm,throughput,976,MB/s,"interleaved 4 runs, cached source, 20 Gbit link"
+rsync-push,shm ring: rsync push 4.3 GB aes128-gcm,throughput,1021,MB/s,"same session, alternating; +4.6%"
+rsync-push,pipe hop: rsync.exe cpu,cpu_seconds,3.73,s per 4.3 GB,mean of 4
+rsync-push,shm ring: rsync.exe cpu,cpu_seconds,2.57,s per 4.3 GB,-31%
+rsync-push,pipe hop: ssh.exe cpu,cpu_seconds,8.14,s per 4.3 GB,mean of 4
+rsync-push,shm ring: ssh.exe cpu,cpu_seconds,6.83,s per 4.3 GB,-16%
+rsync-push,pipe hop: both processes,cpu_per_GB,2.761,CPU-s per GB,
+rsync-push,shm ring: both processes,cpu_per_GB,2.188,CPU-s per GB,-21%
+context,link now (iperf3 4 streams),throughput,1690,MB/s,"13.5 Gbit/s, Balanced power plan"
+context,default cipher chacha20-poly1305,throughput,258,MB/s,"why a push looks slow unless the cipher is pinned"
+context,ssh from a file aes128-gcm,throughput,772,MB/s,"same session; aes256-gcm 887"
+ring-size,memcpy 32-64 KB chunks in 1 MB (L2),copy_rate,30.1,GB/s,"3.3% of a core per GB/s of transfer"
+ring-size,memcpy 32 KB chunks in 4 MB,copy_rate,13.0,GB/s,7.7% of a core per GB/s
+ring-size,memcpy 256 KB chunks in 64 MB,copy_rate,9.1,GB/s,"11% of a core per GB/s, out of cache"
+ring-size,standalone ring 128 KB,throughput,22594,MB/s,one direction; 32 KB chunks
+ring-size,standalone ring 256 KB,throughput,22529,MB/s,
+ring-size,standalone ring 512 KB,throughput,22316,MB/s,
+ring-size,standalone ring 1 MB,throughput,22537,MB/s,
+ring-size,standalone ring 2 MB,throughput,22449,MB/s,
+ring-size,standalone ring 4 MB,throughput,21358,MB/s,-5%
+ring-size,standalone ring 8 MB,throughput,13832,MB/s,"the 6 MB L3 cliff: -39%"
+ring-size,rsync push ring 256 KB,cpu_per_GB,1.848,CPU-s per GB,"sweep 1, 3 interleaved rounds, 1122 MB/s"
+ring-size,rsync push ring 512 KB,cpu_per_GB,1.840,CPU-s per GB,"sweep 1, 1129 MB/s"
+ring-size,rsync push ring 1 MB,cpu_per_GB,1.808,CPU-s per GB,"sweep 1, 1107 MB/s"
+ring-size,rsync push ring 4 MB,cpu_per_GB,1.903,CPU-s per GB,"sweep 1, 1081 MB/s"
+ring-size,rsync push ring 1 MB,cpu_per_GB,1.885,CPU-s per GB,"sweep 2, 5 rounds, 1097 MB/s"
+ring-size,rsync push ring 4 MB,cpu_per_GB,1.916,CPU-s per GB,"sweep 2, 5 rounds, 1090 MB/s; the 4% of sweep 1 did not replicate"
+send-side,SO_SNDBUF auto (Windows autotuning),throughput,783,MB/s,"1 GB push, ring transport, aes128-gcm"
+send-side,SO_SNDBUF 0 (no kernel buffering),throughput,2.9,MB/s,"64 MB push; 38x collapse: one blocking send in flight, a round trip per send"
+send-side,SO_SNDBUF 262144,throughput,657,MB/s,1 GB push; fixed sizes do not beat autotuning
+send-side,SO_SNDBUF 1048576,throughput,756,MB/s,1 GB push
+send-side,1 GB push steady state,throughput,769,MB/s,"repeat of auto; 1 GB is enough, these reach steady state in well under a second"
+isal,CNG sustained 3 min run 1,throughput_start,1436,MB/s,"one ssh connection fed from memory, aes128-gcm, from 60 C"
+isal,CNG sustained 3 min run 1,throughput_end,1276,MB/s,-11.2%; clock 168% -> 131%
+isal,CNG sustained 3 min run 2,throughput_start,1342,MB/s,
+isal,CNG sustained 3 min run 2,throughput_end,1255,MB/s,-6.4%; clock 146% -> 130%
+isal,ISA-L sustained 3 min run 1,throughput_start,1460,MB/s,
+isal,ISA-L sustained 3 min run 1,throughput_end,1444,MB/s,-1.1%; clock 145% -> 128%
+isal,ISA-L sustained 3 min run 2,throughput_start,1434,MB/s,
+isal,ISA-L sustained 3 min run 2,throughput_end,1419,MB/s,-1.0%; clock 145% -> 128%
+isal,cold mean (first 36 s),throughput,1389,MB/s,CNG; ISA-L 1447 = +4.2%
+isal,sustained mean (last 36 s),throughput,1265,MB/s,CNG; ISA-L 1432 = +13.1%
+isal,both backends hot,clock_pct,131,% of base,"CNG 131, ISA-L 128: same throttling, different cost"
+isal,both backends hot,temp,82,C,identical
+mapread,source read via MapViewOfFile,throughput,1125,MB/s,"vs 1317 with ReadFile, 3 interleaved rounds; rsync CPU 3.23s vs 1.89s"
+mapread,mapped + PrefetchVirtualMemory,throughput,1019,MB/s,"vs 1340 with ReadFile; prefetching the window made it worse again"
+knobs,_O_SEQUENTIAL on the source,throughput,1360,MB/s,"vs 1345 without; 3 interleaved rounds, edge of noise"
+knobs,_O_SEQUENTIAL on the source,cpu_per_GB,1.606,CPU-s per GB,vs 1.650 without
+knobs,sender read window 1 MB,throughput,1293,MB/s,"vs 1306 at the default 256 KB: no effect"
+knobs,iobuf.out 256 KB,throughput,1302,MB/s,"vs 1294 at the default 64 KB: no effect"
+knobs,per-file checksum,note,0,-,"already xxh3/xxh128 (profile shows rsync_avx2_XXH3_64bits_update); no MD5 fallback to fix"
+profile,rsync.exe push 4.3 GB,NtReadFile,29.9,% of running samples,"the source read; the biggest single item"
+profile,rsync.exe push 4.3 GB,NtWaitForMultipleObjects,34.7,% of running samples,waiting on ssh/the ring
+profile,rsync.exe push 4.3 GB,memcpy_repmovs,13.9,% of running samples,two copies per byte
+profile,rsync.exe push 4.3 GB,XXH3_64bits_update,6.3,% of running samples,the whole-file checksum
+profile,rsync.exe pull 4.3 GB,NtWriteFile,29.1,% of running samples,
+profile,rsync.exe pull 4.3 GB,ZwClose,10.9,% of running samples,"unexplained; one file transferred"
+ceiling,rsync push (back to back),throughput,1358,MB/s,"mean of 3, alternating with the row below"
+ceiling,ssh alone fed from memory,throughput,1786,MB/s,"same conditions; the pipeline delivers 76% of it"
+knobs,whole-file checksum xxh128,throughput,1355,MB/s,vs 1370 with --checksum-choice=none: the checksum costs 1.1%
+write,32 KB writes to a file,cpu_per_GB,0.378,CPU-s per GB,standalone; the receiver does not write this small
+write,64 KB writes,cpu_per_GB,0.291,CPU-s per GB,
+write,256 KB writes,cpu_per_GB,0.218,CPU-s per GB,what rsync already does (WRITE_SIZE * 8)
+write,1 MB writes,cpu_per_GB,0.204,CPU-s per GB,"6% better than 256 KB: not worth a shared-source change"
+write,preallocated with SetEndOfFile,cpu_per_GB,0.218,CPU-s per GB,identical; preallocation buys nothing here
+isal,ISA-L vs CNG end to end (short push),throughput,1348,MB/s,"vs 1307 for CNG, +3.1%; CPU 1.630 vs 1.708"
+xperf,rsync push (interleaved, one thermal state),throughput,1362,MB/s,4 GB cached source over aes128-gcm
+xperf,ssh alone same connection and cipher,throughput,1924,MB/s,"fed from memory to cat > /dev/null; this is the link, ~1900"
+xperf,iperf3 one stream,throughput,1448,MB/s,iperf3's own limit not the link's
+xperf,remote rsync receiver during a push,cpu,90-100,% of one core,the thing setting the pace
+xperf,remote rsync sender during a pull,cpu,50-80,% of one core,not saturated
+xperf,busiest local thread during a push,cpu,64.8,% of one core,nothing local is saturated
+xperf,local total during a push,cpu,2.06,cores of 8,
+xperf,2 parallel pushes,throughput,1625,MB/s aggregate,+19% over one
+xperf,3 parallel pushes,throughput,1666,MB/s aggregate,plateau
+xperf,push to a pre-allocated remote destination,throughput,1486,MB/s,"vs 1345 fresh, +10.5%; --whole-file in both arms"
+xperf,rsync.exe blocking during a push,share,99.56,% of context switches,WaitForMultipleObjects in win32_select via write_buf
+xperf,ssh.exe main thread blocks during a push,count,18716,blocks in 3.2 s,w32_select alertable sleep
+xperf,shm ring size sweep 256KB-16MB,throughput,1351-1360,MB/s,flat; the ring was never the queue that mattered
+xperf,shmio spin 0 (pull),throughput,1003,MB/s,clock 172% of base
+xperf,shmio spin 2048 (pull),throughput,635,MB/s,"clock 148%; spinning costs turbo on a 15 W part -- reverted"
+xperf,FILE_FLAG_SEQUENTIAL_SCAN on the destination (pull),throughput,1024,MB/s,vs 1054 without; no effect worth having -- reverted
+xperf,buffered sequential write to this NVMe,throughput,3035-3753,MB/s,the pull is not disk-bound

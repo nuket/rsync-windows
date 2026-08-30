@@ -1,0 +1,30 @@
+attached to pid 12476
+exit 0, 943 samples over 4.5s
+thread 9952: 118 samples
+    25.4%  libcrypto.dll!Camellia_cbc_encrypt
+    22.0%  memcpy_repmovs
+    17.8%  ntdll.dll!NtDelayExecution
+    16.1%  libcrypto.dll!AES_cbc_encrypt
+     2.5%  ntdll.dll!NtQueryVolumeInformationFile
+     2.5%  ntdll.dll!RtlEnterCriticalSection
+     1.7%  ntdll.dll!NtSetEvent
+     1.7%  memset
+     1.7%  sshbuf_reset
+thread 6904: 118 samples
+   100.0%  ntdll.dll!ZwWaitForWorkViaWorkerFactory
+thread 8732: 118 samples
+   100.0%  ntdll.dll!ZwWaitForWorkViaWorkerFactory
+thread 2580: 118 samples
+   100.0%  ntdll.dll!ZwWaitForWorkViaWorkerFactory
+thread 14800: 118 samples
+    98.3%  ntdll.dll!ZwWaitForSingleObject
+thread 6424: 118 samples
+    54.2%  ntdll.dll!ZwWaitForSingleObject
+    43.2%  ntdll.dll!NtDeviceIoControlFile
+thread 9180: 118 samples
+   100.0%  ntdll.dll!NtReadFile
+thread 1572: 117 samples
+    76.1%  ntdll.dll!ZwWaitForSingleObject
+    15.4%  ntdll.dll!NtWriteFile
+     6.0%  memcpy_repmovs
+     1.7%  ntdll.dll!RtlEnterCriticalSection

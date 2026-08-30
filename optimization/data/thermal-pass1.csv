@@ -1,0 +1,3 @@
+"Cipher","Transfers","MeanMBps","FirstMBps","LastMBps","DecayPct","ClockStart","ClockEnd","ClockMean","TempStart","TempEnd","TempMax"
+"aes128-gcm","89","1012","1100","952","13.5","187","128","147","55","84","92"
+"aes256-gcm","74","837","816","847","-3.7","128","135","133","83","83","83"

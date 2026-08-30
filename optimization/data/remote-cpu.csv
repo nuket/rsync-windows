@@ -1,0 +1,5 @@
+"dir","proc","pctOfCoreLow","pctOfCoreHigh"
+"push","remote rsync (receiver)","80","100"
+"push","remote sshd-session","70","90"
+"pull","remote rsync (sender)","50","80"
+"pull","remote sshd-session","50","70"

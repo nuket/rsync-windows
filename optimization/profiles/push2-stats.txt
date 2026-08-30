@@ -1,0 +1,24 @@
+Number of Processors : 8
+CPU Speed            : 1896 MHz
+OS Version           : 10.00.00.00
+OS Build Number      : 19045
+Clock type           : PerfCounter
+Boot time            : 2026/08/29:19:53:28.5000000
+Native Pointer Size  : 8 (64bit)
+Start time (UTC)     : 2026/08/30:02:37:11.5746693
+End time (UTC)       : 2026/08/30:02:37:15.4722013  (+         0:00:00:03.8975320)
+Total # Lost Buffers : 0
+Total # Lost Events  : 0
+
+Number of Traces     : 1
+
+Trace name: C:\Users\Strong\AppData\Local\Temp\claude\C--Users-Claude-devsrc-rsync-windows\712f2cd4-9f6b-48a4-af66-a8fa9df2f67a\scratchpad\push2.etl
+    Log file mode        : Sequential Relogged
+    Pointer size         : 8 (64bit)
+    Start time (UTC)     : 2026/08/30:02:37:11.5746693
+    End time (UTC)       : 2026/08/30:02:37:15.4722013  (+         0:00:00:03.8975320)
+    Start time (Local)   : 2026/08/30:04:37:11.5746693
+    End time (Local)     : 2026/08/30:04:37:15.4722013
+    # Lost Buffers       : 0
+    # Lost Events        : 0
+

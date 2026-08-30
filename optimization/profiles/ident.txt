@@ -1,0 +1,83 @@
+/*
+ * Which w32_io a ring belongs to.  fd 0 and fd 1 to begin with, and then
+ * whatever ssh_session2_open() dup()s them into -- it is those dups the
+ * client loop reads and writes, and a dup gets a w32_io and a handle of its
+ * own.  Both are kept: a dup does not retire the original, and everything
+ * here runs on the main thread in order, so it does not matter which of
+ * them a given byte goes through.
+ */
+static BOOL
+is_ours(struct shmio *s, struct w32_io *pio)
+{
+	int i;
+
+	for (i = 0; i < s->n_ours; i++)
+		if (s->ours[i] == pio)
+			return TRUE;
+	return FALSE;
+}
+
+static void
+claim(struct shmio *s, struct w32_io *pio)
+{
+	if (!pio || is_ours(s, pio))
+		return;
+	if (s->n_ours < (int)(sizeof s->ours / sizeof s->ours[0]))
+		s->ours[s->n_ours++] = pio;
+}
+
+/* A w32_io is going away: drop it, so a later one at the same address is
+ * not mistaken for it. */
+static void
+forget_io(struct w32_io *pio)
+{
+	int i, j;
+
+	for (j = 0; j < 2; j++) {
+		struct shmio *s = j ? &shm_out : &shm_in;
+
+		for (i = 0; i < s->n_ours; i++)
+			if (s->ours[i] == pio)
+				s->ours[i] = s->ours[--s->n_ours];
+	}
+}
+
+void
+shmio_note_dup(int oldfd, struct w32_io *newio)
+{
+	struct shmio *s;
+
+	if (!shm_attached || !newio)
+		return;
+	if (oldfd != shm_in.fd && oldfd != shm_out.fd)
+		return;
+	s = (oldfd == shm_out.fd) ? &shm_out : &shm_in;
+	if (!s->ring || s->detached)
+		return;
+	claim(s, w32_io_from_fd(oldfd));   /* the original, if not already */
+	claim(s, newio);
+	shmio_debug(oldfd == shm_out.fd ? "stdout dup: a ring"
+					: "stdin dup: a ring");
+}
+
+struct shmio *
+shmio_for(struct w32_io *pio, int for_write)
+{
+	struct shmio *s;
+
+	if (!shm_attached)
+		return NULL;
+	s = for_write ? &shm_out : &shm_in;
+	if (!s->ring || s->detached)
+		return NULL;
+	if (is_ours(s, pio))
+		return s;
+	/* The fd itself, before anything has duplicated it. */
+	if (w32_io_from_fd(s->fd) == pio) {
+		claim(s, pio);
+		shmio_debug(for_write ? "stdout is a ring" : "stdin is a ring");
+		return s;
+	}
+	return NULL;
+}
+

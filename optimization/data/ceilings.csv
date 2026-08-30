@@ -1,0 +1,4 @@
+"arm","MBps","n","clockPct"
+"iperf3 1 stream","1448","3","182.4"
+"rsync push","1362","3","183.6"
+"ssh alone (pipe)","1924","3","186.5"
