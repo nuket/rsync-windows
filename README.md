@@ -40,10 +40,13 @@ receives done on the crypto thread rather than beside it — plus two staging
 copies per byte removed, a buffer that was freed and reallocated per packet
 kept, a kernel mutex taken for every packet's random padding replaced, the
 encrypted packet handed to the socket thread rather than copied to it, and
-AES-GCM run through Windows CNG rather than LibreSSL's EVP, which
-together took it from ~340MB/s sending and ~220MB/s receiving to ~1.5GB/s
-sending and ~1.26GB/s receiving over 20Gbit Thunderbolt networking
-(rsync: ~1GB/s pushing, ~980MB/s pulling). `rsync.exe`
+AES-GCM run through Intel's ISA-L assembly rather than LibreSSL's EVP (the
+x64 build; the x86 one uses Windows CNG, as does any machine without AVX2),
+which together took it from ~340MB/s sending and ~220MB/s receiving to
+~1.5GB/s sending and ~1.26GB/s receiving over 20Gbit Thunderbolt networking.
+The bulk data crosses from `rsync.exe` to it through a shared-memory ring
+rather than a kernel pipe, which is two copies per byte instead of four and
+a fifth of the processor time of a push. `rsync.exe`
 prefers it whenever it sits in the same directory. It uses the
 same `~/.ssh`, agent and `known_hosts` as the system one — and the same
 `libcrypto.dll`, the one the Windows OpenSSH Client component (9.5 or later)
