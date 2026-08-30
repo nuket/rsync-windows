@@ -83,14 +83,28 @@ longer take many times longer than a full copy.
 What changed since v3.5.0-gf800ace2
 -----------------------------------
 
+  - rsync.exe and the ssh.exe it starts now pass a transfer's bulk data
+    through a shared-memory ring rather than a kernel pipe: two copies per
+    byte instead of four, and no system call per chunk.  A fifth of the
+    processor time of a push, gone.  Both ends fall back to the pipe if the
+    other does not answer, so an older ssh.exe still works;
+    RSYNC_WIN32_NO_SHMPIPE=1 keeps the pipes.
+
   - The ssh.exe no longer creates a thread for every write to stdout, nor a
     named pipe for every pass through its main loop (OpenSSH's portable
     pselect() fallback did that), its socket sends and receives run on
     their own threads, overlapping the crypto instead of following it, and
     two staging copies per byte are gone.  A packet buffer that was freed
     and reallocated for every packet is kept, and AES-GCM runs through
-    Windows CNG (BCrypt) instead of LibreSSL's EVP, which is 35% faster on
-    the same core; set SSH_AESGCM_BACKEND=libcrypto to get the old path.
+    Intel's ISA-L assembly rather than LibreSSL's EVP.  Cold that is worth
+    about 4%; the reason it is the default is what happens when the machine
+    is not cold.  Held at line rate for three minutes on a 15W laptop,
+    Windows CNG gives up 6-11% of its throughput as the processor throttles
+    and ISA-L gives up 1%, at the same clock and the same temperature.
+    SSH_AESGCM_BACKEND=cng picks CNG, =libcrypto the original EVP path;
+    ssh -vvv says which one a build is using.  The assembly is 64-bit, so
+    this is the x64 download; the x86 one keeps CNG, as does any machine
+    without AVX2, AES-NI and PCLMULQDQ.
     The random padding drawn for every packet no longer takes a kernel
     mutex to do it, and each encrypted packet is handed to the socket
     thread rather than copied to it.  None of it shows on Ethernet; on a

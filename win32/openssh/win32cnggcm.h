@@ -15,6 +15,16 @@ struct cng_gcm;
 
 /* FALSE when SSH_AESGCM_BACKEND=libcrypto is in the environment */
 int cng_gcm_wanted(void);
+/* Which backend a context actually ended up on: "ISA-L" or "CNG".  ssh -v
+ * says so, which is the only way to tell from outside which of them a
+ * given ssh.exe was built with. */
+const char *cng_gcm_backend_name(struct cng_gcm *);
+
+/* Which backend a context actually ended up on: "ISA-L" or "CNG".  ssh -v
+ * says so, which is the only way to tell from outside which of the two a
+ * given ssh.exe was built with. */
+const char *cng_gcm_backend_name(struct cng_gcm *);
+
 /* NULL if CNG will not take the key (the caller falls back to EVP) */
 struct cng_gcm *cng_gcm_new(const u_char *key, u_int keylen,
     const u_char *iv, u_int ivlen);

@@ -66,6 +66,23 @@ jobs:
       # to decide that.  The staging step below refuses to ship a .pdb.
       run: windows-build-and-test.bat --clean --config Release
 
+    - name: Install NASM
+      shell: pwsh
+      # Two AES-GCM objects from Intel's ISA-L are assembled with it
+      # (win32/openssh/isal).  build-openssh.ps1 treats NASM as optional so
+      # that nobody needs a new tool to build this locally -- without it
+      # ssh.exe quietly falls back to Windows CNG -- which is exactly why the
+      # release build installs it and passes -RequireIsal below: a release
+      # that shipped without it would look identical and give up 8-11% of its
+      # throughput once the machine is hot.
+      run: |
+        if (Get-Command nasm -ErrorAction SilentlyContinue) {
+          Write-Host "nasm already present: $((Get-Command nasm).Source)"
+        } else {
+          choco install -y --no-progress nasm
+          echo "C:\Program Files\NASM" >>$Env:GITHUB_PATH
+        }
+
     - name: Build ssh.exe, x64 and x86
       shell: pwsh
       # Win32-OpenSSH from the openssh/ submodule with the patches in
@@ -76,7 +93,7 @@ jobs:
       # System32, which is what ssh.exe loads -- and leaves build-x64\ssh.exe and
       # build-x86\ssh-x86.exe.  No DLL ships with either.
       run: |
-        .\win32\openssh\build-openssh.ps1 -Arch both
+        .\win32\openssh\build-openssh.ps1 -Arch both -RequireIsal
         if ($LASTEXITCODE -ne 0) { exit 1 }
 
     - name: Check no upstream test was absorbed unreviewed
@@ -326,7 +343,7 @@ jobs:
 
         ## Why an ssh.exe
 
-        rsync runs its remote end through ssh, and on Windows that means Microsoft's OpenSSH client. The one Windows ships reads its stdin 3KB at a time with a thread per read, which holds a transfer *from* a Windows machine at about 17MB/s no matter how fast the link is. This ``ssh.exe`` is the same client -- $Env:SSH_VER, built from the pinned ``openssh/`` submodule -- with that fixed, and with three more costs that only show on a fast link removed: a thread created for every write to stdout, a named pipe created for every pass through the main loop by OpenSSH's portable ``pselect()`` fallback, and socket sends and receives done on the crypto thread rather than on threads of their own, plus two staging copies per byte, a packet buffer freed and reallocated per packet, and a kernel mutex taken for every packet's random padding; and AES-GCM runs through Windows CNG (BCrypt), 35% faster on the same core than LibreSSL's EVP (``SSH_AESGCM_BACKEND=libcrypto`` in the environment forces the old path). rsync.exe prefers it automatically when it sits in the same directory: with it, a transfer runs at the speed of the link on Ethernet, and at ~1.5GB/s sending and ~1.26GB/s receiving over 20Gbit Thunderbolt networking (rsync ~1GB/s pushing, ~980MB/s pulling). Everything else about it is Microsoft's: it uses the same ``~/.ssh``, the same ssh-agent, the same known_hosts. An ``-e`` naming a different ssh by path is used as given.
+        rsync runs its remote end through ssh, and on Windows that means Microsoft's OpenSSH client. The one Windows ships reads its stdin 3KB at a time with a thread per read, which holds a transfer *from* a Windows machine at about 17MB/s no matter how fast the link is. This ``ssh.exe`` is the same client -- $Env:SSH_VER, built from the pinned ``openssh/`` submodule -- with that fixed, and with three more costs that only show on a fast link removed: a thread created for every write to stdout, a named pipe created for every pass through the main loop by OpenSSH's portable ``pselect()`` fallback, and socket sends and receives done on the crypto thread rather than on threads of their own, plus two staging copies per byte, a packet buffer freed and reallocated per packet, and a kernel mutex taken for every packet's random padding; and AES-GCM runs through Intel's ISA-L assembly rather than LibreSSL's EVP -- worth about 4% on a cold machine, and rather more on a warm one: held at line rate for three minutes on a 15W laptop, Windows CNG gives up 6-11% of its throughput to thermal throttling where ISA-L gives up 1%, at the same clock and the same temperature (``SSH_AESGCM_BACKEND=cng`` picks CNG, ``=libcrypto`` the original EVP path, and ``ssh -vvv`` says which one it is using; the assembly is 64-bit, so this is the x64 download and the x86 one keeps CNG). rsync.exe passes it a transfer's bulk data through a shared-memory ring rather than a kernel pipe -- two copies per byte instead of four, no system call per chunk, and a fifth of the processor time of a push gone; both ends fall back to the pipe if the other does not answer. rsync.exe prefers it automatically when it sits in the same directory: with it, a transfer runs at the speed of the link on Ethernet, and at ~1.5GB/s sending and ~1.26GB/s receiving over 20Gbit Thunderbolt networking (rsync ~1GB/s pushing, ~980MB/s pulling). Everything else about it is Microsoft's: it uses the same ``~/.ssh``, the same ssh-agent, the same known_hosts. An ``-e`` naming a different ssh by path is used as given.
 
         It needs the **OpenSSH Client** Windows component (Settings > Optional features; ``setup-windows-rsync.ps1`` installs it), because it uses the ``libcrypto.dll`` that component puts in System32 -- Windows' own build of LibreSSL, which uses AES-NI and runs AES at several GB/s -- for everything but the AES-GCM bulk cipher. That is deliberate: rsync.exe's process hardening makes an ssh.exe it starts take the System32 copy regardless, and a LibreSSL built from source for this release ran AES in software at a tenth of the speed. No DLL ships with it, so the 32-bit build is for 32-bit Windows, where System32 holds a 32-bit libcrypto.dll. It is built against the same LibreSSL 3.8.2 that Windows ships (OpenSSH Client 9.5 and later), with the same mitigations as rsync.exe -- CFG, CET, ``/sdl``, ``/Qspectre`` -- and with zlib linked in. Everything in it is under a permissive licence -- OpenSSH (BSD), Microsoft's Win32 layer (BSD), zlib -- and every text is in the attached ``NOTICE-ssh.txt``.
 

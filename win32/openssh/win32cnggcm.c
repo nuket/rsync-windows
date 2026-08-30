@@ -87,6 +87,12 @@ cng_gcm_wanted(void)
 	return wanted;
 }
 
+const char *
+cng_gcm_backend_name(struct cng_gcm *g)
+{
+	return g != NULL && g->isal != NULL ? "ISA-L" : "CNG";
+}
+
 void
 cng_gcm_free(struct cng_gcm *g)
 {

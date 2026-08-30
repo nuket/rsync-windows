@@ -64,7 +64,12 @@ param(
     [string] $Configuration = 'Release',
     [string] $Work,
     [string] $Out,
-    [switch] $Clean
+    [switch] $Clean,
+    # Fail rather than quietly fall back to CNG when NASM is missing.  The
+    # release workflow passes this: a release that silently shipped ssh.exe
+    # without the ISA-L AES-GCM would look identical and run 8-11% slower
+    # once the machine is hot, which is not a thing to find out afterwards.
+    [switch] $RequireIsal
 )
 
 $ErrorActionPreference = 'Stop'
@@ -135,6 +140,11 @@ if (-not $nasm) {
     }
 }
 Write-Host ("    nasm       : " + $(if ($nasm) { $nasm } else { "not found -- ssh.exe will use CNG for AES-GCM" }))
+if ($RequireIsal -and -not $nasm) {
+    throw ("-RequireIsal was given and NASM was not found. Install it (winget install NASM.NASM, " +
+           "choco install nasm) or point `$env:NASM at nasm.exe. Without it the ISA-L AES-GCM " +
+           "objects cannot be assembled and ssh.exe would fall back to CNG.")
+}
 
 # paths.targets carries a hard-coded SDK version; point it at the one present.
 $pt = Join-Path $sol 'paths.targets'
@@ -210,6 +220,8 @@ foreach ($a in $archs) {
             $isalObjs += $obj
         }
         Write-Host "    $($isalObjs.Count) objects -> $isalOut"
+    } elseif ($RequireIsal -and $a -eq 'x64') {
+        throw "-RequireIsal: the ISA-L objects were not assembled for $a"
     }
 
     Step "${a}: ssh.exe (msbuild, $platform $Configuration)"
