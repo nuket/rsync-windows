@@ -899,6 +899,7 @@ Platform behaviour -- the part `testsuite/` could not reach even in principle:
 | `delete_exclude` | `--delete` must not delete what `--exclude` protects |
 | `links_reported` | links followed and copied as plain files, and listed at the end |
 | `remote` | push, pull and delta over ssh |
+| `exit_codes` | a push or pull whose receiver cannot replace a file exits 23 |
 
 Ordinary rsync behaviour, ported from the equivalent `testsuite/` tests:
 

@@ -68,19 +68,23 @@ def check(condition, msg):
 
 # --- running rsync ---------------------------------------------------------
 
-def rsync(*args, expect=0, capture=True, stdin_text=None):
+def rsync(*args, expect=0, capture=True, stdin_text=None, timeout=None):
     """Run the rsync under test.  Fails the test on an unexpected exit code.
 
     `expect` may be an int or a tuple; pass None to accept anything.
     `stdin_text` feeds the process's stdin, which --files-from=- needs.
+    `timeout` fails the test if rsync runs longer than that many seconds.
     """
     argv = [str(RSYNC), *[str(a) for a in args]]
     print('rsync ' + ' '.join(str(a) for a in args))
     # rsync here speaks UTF-8 (the embedded manifest selects that code
     # page), so decode as UTF-8 rather than the console's ANSI default.
-    proc = subprocess.run(argv, capture_output=capture, text=True,
-                          encoding='utf-8', errors='replace',
-                          input=stdin_text)
+    try:
+        proc = subprocess.run(argv, capture_output=capture, text=True,
+                              encoding='utf-8', errors='replace',
+                              input=stdin_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        fail(f'rsync did not finish within {timeout}s')
     if capture and proc.stdout:
         print(proc.stdout, end='')
     if capture and proc.stderr:

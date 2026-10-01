@@ -27,6 +27,7 @@ extern int protocol_version;
 extern int am_server;
 extern RSYNC_TLS int kluge_around_eof;
 extern RSYNC_TLS BOOL shutting_down;
+extern RSYNC_TLS int got_xfer_error;
 
 /*
  * The receiver half is a thread, so it shares the generator's heap.  With
@@ -127,6 +128,10 @@ static void receiver_half_entry(void *arg)
 
 	receiver_half(a->f_in, a->f_out, a->local_name,
 		      a->error_pipe_r, a->error_pipe_w);
+
+	/* receive_sigusr2()'s exit status: in a pull it is how the generator
+	 * learns of the errors this half reported itself. */
+	_endthreadex(got_xfer_error ? RERR_PARTIAL : 0);
 }
 
 pid_t spawn_receiver_half(int f_in, int f_out, char *local_name,

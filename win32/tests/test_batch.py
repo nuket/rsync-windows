@@ -105,9 +105,9 @@ check((seeded2 / 'doc.bin').read_bytes() == body + b'-NEW',
 # --delete exercises the del-stats exchange between the two halves, which is
 # the part of the replay handshake that has no sender to drive it.
 delsrc = SCRATCH / 'delsrc'
-write(delsrc / 'keep.txt', 'keep\n')
+write(delsrc / 'keep.txt', 'keep\n', mtime=1_500_000_000)
 deldst = SCRATCH / 'deldst'
-write(deldst / 'keep.txt', 'keep\n')
+write(deldst / 'keep.txt', 'keep\n', mtime=1_500_000_000)
 write(deldst / 'obsolete.txt', 'should go\n')
 rsync('-rt', '--delete', '--write-batch=BATCH4', f'{delsrc}/', f'{deldst}/')
 check(not (deldst / 'obsolete.txt').exists(),
@@ -121,7 +121,7 @@ check('--delete' in (SCRATCH / 'BATCH4.sh').read_text(),
       'BATCH4.sh does not record the --delete it was created with')
 
 deldst2 = SCRATCH / 'deldst2'
-write(deldst2 / 'keep.txt', 'keep\n')
+write(deldst2 / 'keep.txt', 'keep\n', mtime=1_500_000_000)
 write(deldst2 / 'obsolete.txt', 'should go\n')
 rsync('-rt', '--delete', '--read-batch=BATCH4', f'{deldst2}/')
 check(not (deldst2 / 'obsolete.txt').exists(),
