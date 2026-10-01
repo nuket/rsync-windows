@@ -248,7 +248,7 @@ All new, all Windows-only (`win32/`, ~3,100 lines):
 | `win32helperstubs.c` | 21 | log-level arrays the C test helpers need |
 | `win32/include/` | 9 files | stand-ins: `pwd.h`, `grp.h`, `dirent.h`, `syslog.h`, `unistd.h`, `netinet/{in,tcp}.h`, `arpa/inet.h`, `sys/ioctl.h` |
 | `rsync.manifest`, `rsync.rc` | 37 | selects the UTF-8 active code page, embedded as a resource |
-| `win32/tests/` | 24 tests | covers what the port supports and skips what Windows cannot do; `testsuite/` is untouched |
+| `win32/tests/` | 25 tests | covers what the port supports and skips what Windows cannot do; `testsuite/` is untouched |
 
 ### Build files
 
@@ -267,7 +267,7 @@ Python 3.6+ is the only new hard requirement, and only because it replaces
 
 ### Testing
 
-`win32/tests/` holds 24 tests that run on Windows, including push, pull and
+`win32/tests/` holds 25 tests that run on Windows, including push, pull and
 delta over ssh to a Linux peer. The upstream suite in `testsuite/` is left
 untouched and still runs on Linux under both build systems.
 
@@ -312,6 +312,7 @@ or mapped to the port test covering the same ground, or listed as a gap:
 | `itemize` | 3: `ki62-io-error-mask`, `metadata-depth`, `output-options` |
 | `links_reported` | 2: `hardlinks`, `hardlinks-deep` |
 | `local_copy` | 1: `reverse-daemon-delta` |
+| `old_protocols` | Windows-specific; no upstream equivalent |
 | `options` | 14: `authenticate-no-ocloexec-build-regression`, `chmod`, `chmod-option`, `chmod-temp-dir`, `connect-prog-host-quoting`, `connect-prog-nested-singlequote-host-injection` and 8 more |
 | `paths` | 2: `operator-path-insecure-links-refused`, `operator-path-log-file` |
 | `relative` | 3: `relative`, `relative-content`, `relative-implied` |

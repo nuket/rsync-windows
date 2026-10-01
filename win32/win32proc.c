@@ -25,9 +25,10 @@ static struct {
 	pid_t  pid;
 	HANDLE handle;
 	int    is_thread;   /* the do_recv() receiver half; see win32fork.c */
+	HANDLE sigusr2;     /* a thread's stand-in for SIGUSR2 */
 } children[MAX_CHILDREN];
 
-static void remember_child_kind(pid_t pid, HANDLE h, int is_thread)
+static void remember_child_kind(pid_t pid, HANDLE h, int is_thread, HANDLE sigusr2)
 {
 	int i;
 
@@ -36,6 +37,7 @@ static void remember_child_kind(pid_t pid, HANDLE h, int is_thread)
 			children[i].pid = pid;
 			children[i].handle = h;
 			children[i].is_thread = is_thread;
+			children[i].sigusr2 = sigusr2;
 			return;
 		}
 	}
@@ -44,13 +46,13 @@ static void remember_child_kind(pid_t pid, HANDLE h, int is_thread)
 
 static void remember_child(pid_t pid, HANDLE h)
 {
-	remember_child_kind(pid, h, 0);
+	remember_child_kind(pid, h, 0, NULL);
 }
 
 /* Called by win32_fork_thread() for the receiver half. */
-void win32_remember_thread_child(pid_t pid, HANDLE h)
+void win32_remember_thread_child(pid_t pid, HANDLE h, HANDLE sigusr2)
 {
-	remember_child_kind(pid, h, 1);
+	remember_child_kind(pid, h, 1, sigusr2);
 }
 
 static HANDLE find_child(pid_t pid, int *slot)
@@ -667,9 +669,12 @@ pid_t win32_waitpid(pid_t pid, int *status, int options)
 	else
 		GetExitCodeProcess(h, &code);
 	CloseHandle(h);
+	if (children[slot].sigusr2)
+		CloseHandle(children[slot].sigusr2);
 	children[slot].pid = 0;
 	children[slot].handle = NULL;
 	children[slot].is_thread = 0;
+	children[slot].sigusr2 = NULL;
 
 	/* Encode as a Unix wait status: exited normally with `code`. */
 	if (status)
@@ -689,12 +694,12 @@ int win32_kill(pid_t pid, int sig)
 	if (sig == 0)
 		return 0;   /* existence check only */
 
-	/* The generator sends SIGUSR2 to stop a receiver that would otherwise
-	 * linger in read_final_goodbye().  Our receiver half returns on its
-	 * own instead (see receiver_half()), so there is nothing to signal --
-	 * and killing the thread outright could strand a CRT lock. */
-	if (children[slot].is_thread)
+	/* A thread takes no signals, and killing it could strand a CRT lock. */
+	if (children[slot].is_thread) {
+		if (sig == SIGUSR2)
+			SetEvent(children[slot].sigusr2);
 		return 0;
+	}
 
 	if (!TerminateProcess(h, 1)) {
 		errno = EPERM;

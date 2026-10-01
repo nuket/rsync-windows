@@ -55,7 +55,11 @@ struct fork_thread_ctx {
 	void   *parent_tls;
 	size_t  tls_size;
 	HANDLE  started;
+	HANDLE  sigusr2;
 };
+
+/* Stands in for SIGUSR2, which a thread cannot receive. */
+static RSYNC_TLS HANDLE thread_sigusr2;
 
 static unsigned __stdcall fork_thread_trampoline(void *p)
 {
@@ -65,6 +69,7 @@ static unsigned __stdcall fork_thread_trampoline(void *p)
 
 	/* Inherit the parent's divergent state, then diverge privately. */
 	memcpy(tls_block(), ctx->parent_tls, ctx->tls_size);
+	thread_sigusr2 = ctx->sigusr2;
 
 	/* Give the buffers that fork would have copied their own storage. */
 	io_fork_child_fixup();
@@ -73,6 +78,11 @@ static unsigned __stdcall fork_thread_trampoline(void *p)
 
 	fn(arg);
 	return 0;
+}
+
+void win32_wait_sigusr2(void)
+{
+	WaitForSingleObject(thread_sigusr2, INFINITE);
 }
 
 /*
@@ -100,7 +110,12 @@ pid_t win32_fork_thread(void (*fn)(void *), void *arg)
 	memcpy(ctx.parent_tls, tls_block(), ctx.tls_size);
 
 	ctx.started = CreateEvent(NULL, TRUE, FALSE, NULL);
-	if (!ctx.started) {
+	ctx.sigusr2 = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (!ctx.started || !ctx.sigusr2) {
+		if (ctx.started)
+			CloseHandle(ctx.started);
+		if (ctx.sigusr2)
+			CloseHandle(ctx.sigusr2);
 		free(ctx.parent_tls);
 		errno = EAGAIN;
 		return -1;
@@ -110,6 +125,7 @@ pid_t win32_fork_thread(void (*fn)(void *), void *arg)
 	th = _beginthreadex(NULL, 0, fork_thread_trampoline, &ctx, 0, &tid);
 	if (!th) {
 		CloseHandle(ctx.started);
+		CloseHandle(ctx.sigusr2);
 		free(ctx.parent_tls);
 		errno = EAGAIN;
 		return -1;
@@ -121,6 +137,6 @@ pid_t win32_fork_thread(void (*fn)(void *), void *arg)
 	CloseHandle(ctx.started);
 	free(ctx.parent_tls);   /* the child has its own copy now */
 
-	win32_remember_thread_child((pid_t)tid, (HANDLE)th);
+	win32_remember_thread_child((pid_t)tid, (HANDLE)th, ctx.sigusr2);
 	return (pid_t)tid;
 }

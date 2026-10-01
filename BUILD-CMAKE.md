@@ -515,10 +515,10 @@ Two consequences worth knowing:
   collide. Building the whole list up front avoids it, at the cost of a
   slower start on very large trees.
 * **fds are process-wide**, so the hand-off does not close the sibling's pipe
-  ends the way the forked version does, and the receiver half returns rather
-  than lingering in `read_final_goodbye()` waiting for a `SIGUSR2` that a
-  thread cannot receive. It still performs that function's protocol-31
-  `MSG_DONE` exchange first, which the generator waits for.
+  ends the way the forked version does, and the receiver half waits for an
+  event set by `kill()` rather than lingering in `read_final_goodbye()` for
+  a `SIGUSR2` that a thread cannot receive. It still performs that function's
+  protocol-31 `MSG_DONE` exchange first, which the generator waits for.
 
 Residual risk: this is emulation, not fork. Both halves share one heap, so
 the pre-split file list is shared rather than copied. That is read-mostly and
@@ -896,6 +896,7 @@ Platform behaviour -- the part `testsuite/` could not reach even in principle:
 | `paths` | drive letters, backslashes, trailing slashes, `h:relative` |
 | `filenames` | Unicode, spaces and shell metacharacters through the narrow API |
 | `local_copy` | local copy, incremental no-op, `--delete` |
+| `old_protocols` | push and pull at protocols 29 and 30 finish, the pull's summary last |
 | `delete_exclude` | `--delete` must not delete what `--exclude` protects |
 | `links_reported` | links followed and copied as plain files, and listed at the end |
 | `remote` | push, pull and delta over ssh |

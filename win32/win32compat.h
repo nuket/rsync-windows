@@ -478,7 +478,8 @@ pid_t win32_piped_child(char **command, int *f_in, int *f_out);
 /* fork() replacement for do_recv()'s generator/receiver split: runs `fn` on a
  * thread seeded with a copy of this thread's TLS block.  See win32fork.c. */
 pid_t win32_fork_thread(void (*fn)(void *), void *arg);
-void  win32_remember_thread_child(pid_t pid, HANDLE h);
+void  win32_wait_sigusr2(void);
+void  win32_remember_thread_child(pid_t pid, HANDLE h, HANDLE sigusr2);
 pid_t win32_waitpid(pid_t pid, int *status, int options);
 int   win32_kill(pid_t pid, int sig);
 

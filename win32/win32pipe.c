@@ -151,11 +151,12 @@ pid_t spawn_receiver_half(int f_in, int f_out, char *local_name,
  * the generator sends SIGUSR2.  A thread has no such signal, so instead we
  * perform just the protocol-31 exchange that read_final_goodbye() would have
  * done -- the generator is still waiting on that final MSG_DONE -- and then
- * return, letting the generator's wait_process() collect this half.
+ * wait for the event win32_kill() sets in the signal's place.  Older
+ * protocols have no such exchange.
  */
 void receiver_half_finish(int f_in, int f_out)
 {
-	if (protocol_version >= 29) {
+	if (protocol_version >= 31) {
 		uchar fnamecmp_type;
 		char xname[MAXPATHLEN];
 		int iflags, xlen, i;
@@ -165,10 +166,13 @@ void receiver_half_finish(int f_in, int f_out)
 
 		i = read_ndx_and_attrs(f_in, f_out, &iflags, &fnamecmp_type,
 				       xname, &xlen);
-		if (protocol_version >= 31 && i == NDX_DONE)
+		if (i == NDX_DONE)
 			write_int(f_out, NDX_DONE);
 		io_flush(FULL_FLUSH);
 	}
+
+	/* The generator may still be reporting deletions; the summary goes last. */
+	win32_wait_sigusr2();
 
 	/* The forked version prints this from sigusr2_handler(), because the
 	 * transfer counters live in this half rather than the generator's. */
